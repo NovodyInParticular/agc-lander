@@ -16,6 +16,7 @@ void extras_force_ufo(double after_s);
 // the Moon itself with whatever lives on it.
 void extras_draw_ufo(const ViewCam *cam);
 void globe_draw(const ViewCam *cam, V3 sun_site, V3 earth_site);
+void globe_draw_backdrop(const ViewCam *cam, V3 sun_site, V3 earth_site);
 
 // Globe camera.
 void globe_input(int w, int h);

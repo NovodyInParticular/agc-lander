@@ -313,7 +313,7 @@ static const char *globe_fs =
     "in vec3 fixedDir; in vec3 camRel; in float fragLogZ;\n"
     "uniform float logFar; uniform mat4 fixedFromSite; uniform vec3 sunF; uniform vec3 earthF; uniform vec3 baseF;\n"
     "uniform float exposure; uniform float baseR; uniform vec3 lampP[4]; uniform vec3 lampC[4];\n"
-    "uniform vec4 maria[24]; uniform int nMaria;\n"
+    "uniform vec4 maria[24]; uniform int nMaria; uniform vec3 tint;\n"
     "out vec4 finalColor;\n"
     "vec3 hash33(vec3 p){ p = fract(p * vec3(0.1031, 0.1030, 0.0973)); p += dot(p, p.yxz + 33.33); return fract((p.xxy + p.yxx) * p.zyx); }\n"
     "float hash13(vec3 p){ p = fract(p * 0.1031); p += dot(p, p.zyx + 31.32); return fract((p.x + p.y) * p.z); }\n"
@@ -384,7 +384,7 @@ static const char *globe_fs =
     "    vec3 ln = mat3(fixedFromSite) * (l * inversesqrt(d2));\n"
     "    col += alb * lampC[i] * max(dot(N, ln), 0.0) / (d2 + 1.0);\n"
     "  }\n"
-    "  finalColor = vec4(col * exposure, 1.0);\n"
+    "  finalColor = vec4(col * tint * exposure, 1.0);\n"
     "}\n";
 
 static Shader globe_sh;
@@ -454,6 +454,8 @@ void extras_init(void)
     globe_sh = LoadShaderFromMemory(globe_vs, globe_fs);
     float lf = render_log_far();
     SetShaderValue(globe_sh, GetShaderLocation(globe_sh, "logFar"), &lf, SHADER_UNIFORM_FLOAT);
+    float one[3] = { 1, 1, 1 };
+    SetShaderValue(globe_sh, GetShaderLocation(globe_sh, "tint"), one, SHADER_UNIFORM_VEC3);
     globe_mat = LoadMaterialDefault();
     globe_mat.shader = globe_sh;
     lm_mat = LoadMaterialDefault();
@@ -644,29 +646,12 @@ static V3 base_site(V3 *up_site)
     return terrain_fixed_to_site(v3_scale(f, globe_radius() * ff - 0.5));
 }
 
-void globe_draw(const ViewCam *cam, V3 sun_site, V3 earth_site)
+static void globe_sphere(const ViewCam *cam, V3 sun_site, V3 earth_site, V3 brel, double R)
 {
+    (void)brel;
     M3 S = terrain_site_from_fixed();
     M3 St = m3_transpose(S);
-    double R = globe_radius();
     V3 centre = terrain_fixed_to_site(v3(0, 0, 0));
-    V3 bup;
-    V3 bpos = base_site(&bup);
-    V3 brel = v3_sub(bpos, cam->pos);
-    double bdist = v3_len(brel);
-
-    // Base lamps (camera-relative), for the ground and the buildings.
-    M3 bfr = local_frame(bup);
-    V3 lp[4] = { v3(0, 40, 0), v3(56, 8, 34), v3(-44, 24, -20), v3(-48, 30, 42) };
-    V3 lc[4] = { v3(2600, 1800, 1000), v3(2200, 1400, 700), v3(700, 520, 300), v3(500, 360, 220) };
-    float lpf[12], lcf[12];
-    V3 lrel[4];
-    for (int i = 0; i < 4; i++) {
-        lrel[i] = v3_add(brel, m3_apply(bfr, lp[i]));
-        lpf[3 * i] = (float)lrel[i].x; lpf[3 * i + 1] = (float)lrel[i].y; lpf[3 * i + 2] = (float)lrel[i].z;
-        lcf[3 * i] = (float)lc[i].x; lcf[3 * i + 1] = (float)lc[i].y; lcf[3 * i + 2] = (float)lc[i].z;
-    }
-
     // The Moon.
     M3 rs = m3_mul(S, (M3){ { { R, 0, 0 }, { 0, R, 0 }, { 0, 0, R } } });
     Matrix ffs = { (float)St.m[0][0], (float)St.m[0][1], (float)St.m[0][2], 0, (float)St.m[1][0], (float)St.m[1][1],
@@ -688,9 +673,54 @@ void globe_draw(const ViewCam *cam, V3 sun_site, V3 earth_site)
     float br = (float)(BASE_CRATER_R / R), ex = render_exposure();
     SetShaderValue(globe_sh, GetShaderLocation(globe_sh, "baseR"), &br, SHADER_UNIFORM_FLOAT);
     SetShaderValue(globe_sh, GetShaderLocation(globe_sh, "exposure"), &ex, SHADER_UNIFORM_FLOAT);
+    DrawMesh(globe_mesh, globe_mat, to_matrix(rs, v3_sub(centre, cam->pos)));
+}
+
+
+// The whole Moon behind the detailed terrain in the normal views, so the ground
+// never ends at the edge of the terrain patch (or before its chunks load) and
+// the limb is a real curve. Drawn first without writing depth: terrain, the LM
+// and everything else simply paint over it.
+void globe_draw_backdrop(const ViewCam *cam, V3 sun_site, V3 earth_site)
+{
+    V3 brel = v3_sub(base_site(NULL), cam->pos);
+    float zero[12] = { 0 };
+    SetShaderValueV(globe_sh, GetShaderLocation(globe_sh, "lampC"), zero, SHADER_UNIFORM_VEC3, 4);
+    // Match the detailed terrain's regolith colour where the two meet.
+    float tint[3] = { 0.80f, 0.74f, 0.66f };
+    SetShaderValue(globe_sh, GetShaderLocation(globe_sh, "tint"), tint, SHADER_UNIFORM_VEC3);
+    rlDrawRenderBatchActive();
+    rlDisableDepthMask();
+    globe_sphere(cam, sun_site, earth_site, brel, globe_radius() - 300.0);
+    rlDrawRenderBatchActive();
+    rlEnableDepthMask();
+    float one[3] = { 1, 1, 1 };
+    SetShaderValue(globe_sh, GetShaderLocation(globe_sh, "tint"), one, SHADER_UNIFORM_VEC3);
+}
+
+void globe_draw(const ViewCam *cam, V3 sun_site, V3 earth_site)
+{
+    double R = globe_radius();
+    V3 bup;
+    V3 bpos = base_site(&bup);
+    V3 brel = v3_sub(bpos, cam->pos);
+    double bdist = v3_len(brel);
+
+    // Base lamps (camera-relative), for the ground and the buildings.
+    M3 bfr = local_frame(bup);
+    V3 lp[4] = { v3(0, 40, 0), v3(56, 8, 34), v3(-44, 24, -20), v3(-48, 30, 42) };
+    V3 lc[4] = { v3(2600, 1800, 1000), v3(2200, 1400, 700), v3(700, 520, 300), v3(500, 360, 220) };
+    float lpf[12], lcf[12];
+    V3 lrel[4];
+    for (int i = 0; i < 4; i++) {
+        lrel[i] = v3_add(brel, m3_apply(bfr, lp[i]));
+        lpf[3 * i] = (float)lrel[i].x; lpf[3 * i + 1] = (float)lrel[i].y; lpf[3 * i + 2] = (float)lrel[i].z;
+        lcf[3 * i] = (float)lc[i].x; lcf[3 * i + 1] = (float)lc[i].y; lcf[3 * i + 2] = (float)lc[i].z;
+    }
+
     SetShaderValueV(globe_sh, GetShaderLocation(globe_sh, "lampP"), lpf, SHADER_UNIFORM_VEC3, 4);
     SetShaderValueV(globe_sh, GetShaderLocation(globe_sh, "lampC"), lcf, SHADER_UNIFORM_VEC3, 4);
-    DrawMesh(globe_mesh, globe_mat, to_matrix(rs, v3_sub(centre, cam->pos)));
+    globe_sphere(cam, sun_site, earth_site, brel, R);
 
     // The base: only worth drawing as geometry when close; its lights show
     // from much further away - if the camera is above its horizon.

@@ -276,6 +276,8 @@ static void draw_world(const ViewCam *cam, int w, int h, float film, int camera)
     V3 cam_mod = v3(fmod(cam->pos.x, 4096.0), fmod(cam->pos.y, 4096.0), fmod(cam->pos.z, 4096.0));
     render_set_scene_uniforms(sun_site, cam_mod, local_up_at(cam->pos), 0.11f, ground, dust);
 
+    globe_draw_backdrop(cam, sun_site, earth_site);
+    render_set_scene_uniforms(sun_site, cam_mod, local_up_at(cam->pos), 0.11f, ground, dust);
     if (getenv("AGC_NODEPTH")) rlDisableDepthTest();
     terrain_draw(cam->pos, render_terrain_shader());
     rlEnableDepthTest();
