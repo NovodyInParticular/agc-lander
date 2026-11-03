@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=AGC Lander
+GenericName=Apollo 11 Lunar Module simulator
+Comment=Land Eagle with the real Luminary099 flight software
+Exec=agc-lander
+Icon=agc-lander
+Terminal=false
+Categories=Game;Simulation;
+Keywords=apollo;moon;lunar;lander;agc;space;

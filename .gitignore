@@ -1,0 +1,17 @@
+build/
+yaYUL-Luminary099.lst
+
+# Vendored dependencies: only what the build needs.
+third_party/raylib/*
+!third_party/raylib/src/
+!third_party/raylib/LICENSE
+!third_party/raylib/README.md
+third_party/virtualagc/*
+!third_party/virtualagc/yaAGC/
+!third_party/virtualagc/yaYUL/
+!third_party/virtualagc/Luminary099/
+!third_party/virtualagc/COPYING
+!third_party/virtualagc/LICENSE.txt
+!third_party/virtualagc/README.md
+# NASSP source data is only needed to regenerate data/a11_pdi_lgc.c (tools/extract_nassp.py).
+third_party/ref/

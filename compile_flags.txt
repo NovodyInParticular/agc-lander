@@ -1,0 +1,4 @@
+-std=gnu11
+-Isrc
+-Ithird_party/virtualagc/yaAGC
+-Ithird_party/raylib/src
