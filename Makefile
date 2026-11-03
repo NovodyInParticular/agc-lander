@@ -48,10 +48,13 @@ $(SYMS_C): $(ROPE) tools/gen_symbols.py
 	python3 -I tools/gen_symbols.py build/yaYUL-Luminary099.lst $@
 
 build/font_jbm.c: data/fonts/JetBrainsMono-Regular.ttf tools/embed_bin.py
+	@mkdir -p $(dir $@)
 	python3 -I tools/embed_bin.py $< font_jbm $@
 build/font_rc.c: data/fonts/RobotoCondensed-Regular.ttf tools/embed_bin.py
+	@mkdir -p $(dir $@)
 	python3 -I tools/embed_bin.py $< font_rc $@
 build/font_rcb.c: data/fonts/RobotoCondensed-Bold.ttf tools/embed_bin.py
+	@mkdir -p $(dir $@)
 	python3 -I tools/embed_bin.py $< font_rcb $@
 
 rope: $(ROPE)
