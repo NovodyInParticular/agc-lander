@@ -1078,7 +1078,7 @@ void cp_click(const Hot *h, float u, float v)
         int up = v < h->r.y + h->r.height / 2;
         if (h->id == ID_ROD) {
             // Spring-loaded: one click per flick, back to centre.
-            lm_rod_click(up ? -1 : +1);
+            lm_rod_click(up ? +1 : -1);   // +1 = slower descent (measured in agc-lab)
             rod_anim = up ? 0.25f : -0.25f;
             return;
         }
