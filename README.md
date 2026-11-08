@@ -190,7 +190,8 @@ The real LM flew with two crew, and so can you:
 - **Commander (host):** runs the real AGC and the vehicle, and flies (hand controller, ROD switch, ENGINE STOP).
 - **LM Pilot (joins):** gets the right-hand station. They run the DSKY, the AGS DEDA and the panels, and work
   ENG ARM, PGNS mode and their own ENGINE STOP. Their key presses and switch throws go to the host's
-  computer, so you're both flying one Lunar Module.
+  computer, so you're both flying one Lunar Module. Their hand controller and ROD inputs are added to the
+  Commander's, so agree who flies.
 
 **Host:** in the menu, set **TWO PLAYERS: HOST** (Enter), then start any scenario. Or run `agc-lander --host`.
 **Join:** choose **JOIN A GAME AS LM PILOT**, type the host's IP address and press Enter. Or run

@@ -976,10 +976,20 @@ int main(int argc, char **argv)
                     "The crew procedure: R51 V50N25 -> ENTER,  V50N18 -> PRO (maneuver) then ENTER,",
                     "arm the engine, V99N62 -> PRO at TIG-5 s, after radar lock key V57E,",
                     "engine stop at the contact light.",
+                    "",
+                    "TWO PLAYERS (co-op, UDP port 47012 on the host, both on the same version)",
+                    "Host:  menu TWO PLAYERS: HOST, then start a scenario   (or agc-lander --host)",
+                    "Join:  menu JOIN A GAME AS LM PILOT, type the host's IP, Enter   (or --join IP)",
+                    "Commander (host): flies the LM, ROD switch, Space ENGINE STOP, F5 pause, PgUp/PgDn warp",
+                    "LM Pilot (join): DSKY keys, panels, F7 engine arm, F8 PGNS mode, Space ENGINE STOP",
+                    "The LM Pilot's stick/keys add to the Commander's.  Esc on the LM Pilot's side leaves.",
                 };
+                const int n = (int)(sizeof lines / sizeof lines[0]), coop_first = 11;
                 float hy = 140;
-                DrawRectangleRounded((Rectangle){ 60, hy - 20, 980, 10 * 30 + 40 }, 0.05f, 8, (Color){ 0, 0, 0, 210 });
-                for (int i = 0; i < 10; i++) hud_text(font_mono, lines[i], 80, hy + i * 30, 19, (Color){ 220, 224, 230, 255 });
+                DrawRectangleRounded((Rectangle){ 60, hy - 20, 1000, n * 30 + 40 }, 0.05f, 8, (Color){ 0, 0, 0, 210 });
+                for (int i = 0; i < n; i++)
+                    hud_text(font_mono, lines[i], 80, hy + i * 30, 19,
+                             i == coop_first ? (Color){ 120, 220, 255, 255 } : (Color){ 220, 224, 230, 255 });
             }
         }
         if (opt.shot) {
