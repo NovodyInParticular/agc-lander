@@ -12,8 +12,9 @@
 // and keyboard shortcuts, forwarding key presses to the AGC.
 void dsky_update_draw(Rectangle area);
 
-// Draw only (no input), e.g. into the cockpit panel texture.
-void dsky_draw(Rectangle area);
+// Draw onto the cockpit panel canvas (pcanvas.h) in native DSKY units; lit
+// elements glow, scaled by `brightness`.
+void dsky_draw_canvas(float brightness);
 
 // Keyboard shortcuts, key timers, PRO release. Call once per frame.
 void dsky_frame(void);
@@ -22,8 +23,5 @@ void dsky_frame(void);
 int dsky_key_at(Vector2 native);
 void dsky_mouse_press(int key_index);
 const char *dsky_key_name(int key_index);
-
-// Emission mode for the cockpit texture: draw only what glows, scaled by gain.
-void dsky_set_emission(int on, float gain);
 
 #endif

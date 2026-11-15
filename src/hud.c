@@ -95,8 +95,9 @@ void hud_init(void)
     fdai_tex = make_fdai_texture();
     fdai_ball = LoadModelFromMesh(GenMeshSphere(1.0f, 48, 64));
     fdai_ball.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = fdai_tex;
-    fdai_rt = LoadRenderTexture(512, 512);
-    SetTextureFilter(fdai_rt.texture, TEXTURE_FILTER_BILINEAR);
+    fdai_rt = LoadRenderTexture(1024, 1024);
+    GenTextureMipmaps(&fdai_rt.texture);
+    SetTextureFilter(fdai_rt.texture, TEXTURE_FILTER_TRILINEAR);
 }
 
 Texture2D hud_fdai_texture(void) { return fdai_rt.texture; }
@@ -143,6 +144,8 @@ void hud_prepare(void)
     DrawModel(fdai_ball, (Vector3){ 0, 0, 0 }, 1.0f, WHITE);
     EndMode3D();
     EndTextureMode();
+    // The cockpit shows the ball much smaller than it is rendered.
+    rlGenTextureMipmaps(fdai_rt.texture.id, fdai_rt.texture.width, fdai_rt.texture.height, fdai_rt.texture.format, &fdai_rt.texture.mipmaps);
 }
 
 static void draw_fdai(Rectangle r)

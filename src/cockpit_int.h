@@ -19,7 +19,7 @@ typedef struct {
 
 extern PanelDef cp_panels[NPANELS];
 
-// Things the panel code registers while drawing (albedo pass), consumed by
+// Things the panel code registers while drawing, consumed by
 // cockpit.c for 3D levers/knobs and mouse picking.
 enum { LEV_TOGGLE, LEV_KNOB, LEV_THUMB };
 typedef struct {
@@ -39,16 +39,23 @@ typedef struct {
     int idx;            // button / key index
 } Hot;
 
-#define CP_MAXLEV 600
-#define CP_MAXHOT 900
-extern Lever cp_lev[CP_MAXLEV];
-extern int cp_nlev;
-extern Hot cp_hot[CP_MAXHOT];
-extern int cp_nhot;
+// Per panel, so that panels can be redrawn at different rates.
+#define CP_MAXLEV 96
+#define CP_MAXHOT 280
+typedef struct {
+    Lever lev[CP_MAXLEV];
+    int nlev;
+    Hot hot[CP_MAXHOT];
+    int nhot;
+} PanelItems;
+extern PanelItems cp_items[NPANELS];
 
-// Panel drawing. pass 0 = albedo, 1 = emission. The caller has set a 2D
-// camera mapping panel millimetres to atlas pixels.
-void cp_draw_panel(int panel, int pass, Camera2D cam);
+// Set when a switch was operated: every panel is redrawn on the next frame.
+extern int cp_dirty;
+
+// Record one panel onto the current canvas layer (pc_begin .. pc_end), in
+// millimetres from its top-left corner, and refresh its levers and hotspots.
+void cp_draw_panel(int panel);
 
 // Per-frame logic (timers, spring switches, syncing switches to the sim).
 void cp_panels_update(float dt);

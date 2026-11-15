@@ -28,14 +28,14 @@ static void finish(Texture2D *t)
 #ifndef AGC_ASSETS_FROM_APK
 
 #define EMBED(n) extern const unsigned char tex_##n[]; extern const unsigned int tex_##n##_len;
-EMBED(lm_panel) EMBED(lm_foil) EMBED(lm_blanket) EMBED(rock) EMBED(cabin) EMBED(cabin_wall)
+EMBED(lm_panel) EMBED(lm_foil) EMBED(lm_blanket) EMBED(rock) EMBED(cabin) EMBED(cabin_wall) EMBED(regolith)
 #undef EMBED
 
 Texture2D assets_texture(const char *name)
 {
 #define ROW(n) { #n, tex_##n, &tex_##n##_len }
     static const struct { const char *name; const unsigned char *data; const unsigned int *len; } table[] = {
-        ROW(lm_panel), ROW(lm_foil), ROW(lm_blanket), ROW(rock), ROW(cabin), ROW(cabin_wall),
+        ROW(lm_panel), ROW(lm_foil), ROW(lm_blanket), ROW(rock), ROW(cabin), ROW(cabin_wall), ROW(regolith),
     };
 #undef ROW
     for (unsigned i = 0; i < sizeof table / sizeof table[0]; i++) {

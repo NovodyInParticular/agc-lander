@@ -206,6 +206,39 @@ def bake_cabin_wall(path):
     pack(h, tile, rough, albedo, path)
 
 
+def bake_regolith(path):
+    """Lunar soil: granular fines, clods, pebbles and small craters with raised rims."""
+    tile = 3.2
+    x, y = grid(N, tile)
+    rng = np.random.default_rng(83)
+    h = 0.010 * band_noise(N, 1, 10, 1.3, 81)           # gentle hummocks
+    h += 0.0035 * band_noise(N, 10, 500, 0.9, 82)       # granular soil
+    clods = np.clip(band_noise(N, 30, 160, 0.3, 84) - 1.3, 0, None)
+    h += 0.004 * clods
+    albedo = 1.0 + 0.07 * band_noise(N, 1, 20, 1.2, 85) + 0.04 * band_noise(N, 40, 400, 0.4, 86) + 0.10 * np.clip(clods, 0, 1.5)
+
+    def stamp(cx, cy, r):
+        dx = (x - cx + tile / 2) % tile - tile / 2
+        dy = (y - cy + tile / 2) % tile - tile / 2
+        return np.sqrt(dx * dx + dy * dy) / r
+
+    for i in range(90):                                  # craters, 4 cm .. 60 cm across
+        r = min(0.30, 0.02 * (rng.uniform() + 0.03) ** -0.75)
+        d = stamp(rng.uniform(0, tile), rng.uniform(0, tile), r)
+        bowl = np.where(d < 1, (d * d - 1) * 0.20 * r, 0.0)
+        rim = 0.045 * r * np.exp(-((d - 1.05) / 0.28) ** 2)
+        h += bowl + rim
+        albedo *= 1 - 0.10 * np.clip(1 - d, 0, 1) + 0.06 * np.exp(-((d - 1.1) / 0.3) ** 2)
+    for i in range(420):                                 # pebbles, 1 .. 5 cm
+        r = min(0.028, 0.006 * (rng.uniform() + 0.05) ** -0.6)
+        d = stamp(rng.uniform(0, tile), rng.uniform(0, tile), r)
+        inside = np.clip(1 - d * d, 0, 1)
+        h += 0.75 * r * np.sqrt(inside)
+        albedo *= 1 + 0.22 * (inside > 0)
+    rough = 0.0 * h
+    pack(h, tile, rough, np.clip(albedo, 0.5, 1.6), path)
+
+
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else "data/textures"
     os.makedirs(out, exist_ok=True)
@@ -215,6 +248,7 @@ def main():
     bake_rock(os.path.join(out, "rock.png"))
     bake_cabin(os.path.join(out, "cabin.png"))
     bake_cabin_wall(os.path.join(out, "cabin_wall.png"))
+    bake_regolith(os.path.join(out, "regolith.png"))
 
 
 if __name__ == "__main__":

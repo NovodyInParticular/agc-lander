@@ -61,6 +61,7 @@ static const char *terrain_fs = GLSL_HEADER LOGZ_FS NOISE_GLSL
     "uniform vec3 sunDir; uniform vec3 camMod; uniform float exposure;\n"
     "uniform mat4 shadowVP; uniform sampler2D shadowMap; uniform vec3 shadowCenter; uniform float shadowOn;\n"
     "uniform vec3 dustCenter; uniform float dustAmount; uniform int dbg;\n"
+    "uniform sampler2D soilMap;\n"
     "out vec4 finalColor;\n"
     "float lmShadow(vec3 p){\n"
     "  if (shadowOn < 0.5) return 1.0;\n"
@@ -77,27 +78,23 @@ static const char *terrain_fs = GLSL_HEADER LOGZ_FS NOISE_GLSL
     "  vec3 N = normalize(fragNormal);\n"
     "  vec3 V = -fragPos / max(dist, 1e-3);\n"
     "  vec2 dp = camMod.xz + fragPos.xz;\n"
-    "  float near = 1.0 - smoothstep(30.0, 900.0, dist);\n"
-    "  float mid = 1.0 - smoothstep(400.0, 9000.0, dist);\n"
-    "  // Regolith micro relief: perturb the normal close up.\n"
-    "  if (near > 0.0) {\n"
-    "    float e = 0.08;\n"
-    "    float h0 = fbm(dp * 1.7), hx = fbm((dp + vec2(e,0)) * 1.7), hz = fbm((dp + vec2(0,e)) * 1.7);\n"
-    "    float k = 0.035 * near;\n"
-    "    N = normalize(N + vec3(-(hx-h0)/e, 0.0, -(hz-h0)/e) * k);\n"
-    "  }\n"
-    "  if (mid > 0.0) {\n"
-    "    float e = 1.5;\n"
-    "    float h0 = fbm(dp * 0.07), hx = fbm((dp + vec2(e,0)) * 0.07), hz = fbm((dp + vec2(0,e)) * 0.07);\n"
-    "    N = normalize(N + vec3(-(hx-h0)/e, 0.0, -(hz-h0)/e) * 0.45 * mid);\n"
-    "  }\n"
+    "  // Soil detail from the baked regolith map at three scales (grain and\n"
+    "  // pebbles underfoot, metre-size pits, decametre swells), each turned so\n"
+    "  // the repeats never line up.\n"
+    "  float near = 1.0 - smoothstep(20.0, 160.0, dist);\n"
+    "  float mid = 1.0 - smoothstep(250.0, 3000.0, dist);\n"
+    "  mat2 r2 = mat2(0.80, 0.60, -0.60, 0.80), r3 = mat2(0.28, -0.96, 0.96, 0.28);\n"
+    "  vec4 s1 = texture(soilMap, dp / 3.2);\n"
+    "  vec4 s2 = texture(soilMap, r2 * dp / 29.0);\n"
+    "  vec4 s3 = texture(soilMap, r3 * dp / 310.0);\n"
+    "  vec2 sg = (s1.rg * 2.0 - 1.0) * 0.30 * near + ((s2.rg * 2.0 - 1.0) * r2) * 0.26 * mid + ((s3.rg * 2.0 - 1.0) * r3) * 0.16;\n"
+    "  N = normalize(N + vec3(sg.x, 0.0, sg.y));\n"
     "  float albedo = fragColor.r * 1.0;\n"   // stored as albedo*1000/255
     "  albedo *= 0.255;\n"
     "  float fresh = fragColor.b;\n"
-    "  // Fine albedo mottling, dark and bright regolith.\n"
-    "  float mott = fbm(dp * 0.013) * 0.6 + fbm(dp * 0.31) * 0.4;\n"
-    "  albedo *= mix(1.0, 0.75 + 0.5 * mott, 0.6);\n"
-    "  albedo *= 1.0 + 0.6 * near * (fbm(dp * 6.0) - 0.5);\n"
+    "  // Albedo mottling: broad dark and bright patches, then the soil's own tone.\n"
+    "  albedo *= 0.84 + 0.32 * fbm(dp * 0.013);\n"
+    "  albedo *= mix(1.0, s3.a * 2.0, 0.55) * mix(1.0, s2.a * 2.0, 0.55 * mid) * mix(1.0, s1.a * 2.0, 0.85 * near);\n"
     "  // Lommel-Seeliger with an opposition surge (the lunar 'flat' look).\n"
     "  float mu0 = max(dot(N, sunDir), 0.0);\n"
     "  float mu = max(dot(N, V), 0.02);\n"
@@ -393,7 +390,7 @@ static const char *depth_vs = GLSL_HEADER
 // ---------------------------------------------------------------------------
 
 static Shader sh_terrain, sh_lm, sh_fx, sh_sky, sh_down, sh_up, sh_final, sh_depth;
-static Texture2D tex_foil, tex_panel, tex_blanket, tex_rock;
+static Texture2D tex_foil, tex_panel, tex_blanket, tex_rock, tex_soil;
 static float exposure = 1.0f;
 
 typedef struct { unsigned int fbo; Texture2D tex; unsigned int depth; int w, h; } Target;
@@ -494,6 +491,8 @@ void render_init(void)
     tex_panel = assets_texture("lm_panel");
     tex_blanket = assets_texture("lm_blanket");
     tex_rock = assets_texture("rock");
+    tex_soil = assets_texture("regolith");
+    SetTextureFilter(tex_soil, TEXTURE_FILTER_ANISOTROPIC_16X);   // seen at grazing angles
     set_logfar(sh_terrain);
     set_logfar(sh_lm);
     set_logfar(sh_fx);
@@ -665,6 +664,13 @@ void render_set_scene_uniforms(V3 sun, V3 cam_mod, V3 up_dir, float ground_albed
     }
     set1(sh_terrain, "dustAmount", dust);
     bind_shadow(sh_terrain);
+    {   // The soil map rides on texture unit 6 (the shadow map is on 5).
+        int slot = 6;
+        rlActiveTextureSlot(6);
+        rlEnableTexture(tex_soil.id);
+        rlSetUniform(GetShaderLocation(sh_terrain, "soilMap"), &slot, SHADER_UNIFORM_INT, 1);
+        rlActiveTextureSlot(0);
+    }
     set3(sh_lm, "sunDir", sun);
     set1(sh_lm, "exposure", exposure);
     set1(sh_lm, "groundAlbedo", ground_albedo);

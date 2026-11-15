@@ -3,7 +3,8 @@
 // Geometry is authored in LM body axes (metres, origin at the CG, +X up,
 // +Y right, +Z forward), matching lmmodel.c: the two triangular forward
 // windows here are the apertures behind the exterior model's windows.
-// Panels are textured from a live atlas (cockpit_panels.c). Lighting:
+// Panel artwork is vector geometry on each panel's plane (pcanvas.c, drawn
+// by cockpit_panels.c). Lighting:
 // sunlight through the windows (with a cabin shadow map, so sun patches
 // move across the panels as the LM turns), light bounced in from the lunar
 // surface through each window, the cabin floodlights, and the panels'
@@ -23,6 +24,7 @@
 #include "cockpit_int.h"
 #include "hud.h"
 #include "lm.h"
+#include "pcanvas.h"
 #include "render.h"
 
 #define DEG (PI_D / 180.0)
@@ -83,7 +85,7 @@ typedef struct {
 
 static Builder SB, DB, TB;   // static opaque, dynamic (levers etc.), transparent
 static Builder *B = &SB;
-static float white_u, white_v;   // atlas UV of a white texel
+static const float white_u = 0, white_v = 0;   // texture coordinates are unused
 
 static void bpush(V3 p, V3 n, float u, float v, Color c, int mat)
 {
@@ -113,14 +115,6 @@ static void quad(V3 a, V3 b, V3 c, V3 d, Color col, int mat)
 {
     tri(a, b, c, col, mat);
     tri(a, c, d, col, mat);
-}
-
-// Textured quad: corners a (uv0) b (uv1) c (uv2) d (uv3).
-static void quad_uv(V3 a, V3 b, V3 c, V3 d, Vector2 ta, Vector2 tb, Vector2 tc, Vector2 td, Color col, int mat)
-{
-    V3 n = v3_norm(v3_cross(v3_sub(b, a), v3_sub(c, a)));
-    bpush(a, n, ta.x, ta.y, col, mat); bpush(b, n, tb.x, tb.y, col, mat); bpush(c, n, tc.x, tc.y, col, mat);
-    bpush(a, n, ta.x, ta.y, col, mat); bpush(c, n, tc.x, tc.y, col, mat); bpush(d, n, td.x, td.y, col, mat);
 }
 
 static void box(V3 lo, V3 hi, Color col, int mat)
@@ -165,7 +159,7 @@ static void tube(V3 a, V3 b, double ra, double rb, int seg, Color col, int mat, 
 // --- Colours ---------------------------------------------------------------------------
 
 static const Color K_WALL = { 168, 166, 158, 255 };     // cabin structure paint
-static const Color K_PANEL = { 255, 255, 255, 255 };
+static const Color K_PANEL = { 74, 78, 82, 255 };       // panel grey
 static const Color K_CONSOLE = { 80, 84, 88, 255 };
 static const Color K_FRAME = { 30, 31, 33, 255 };
 static const Color K_FLOOR = { 104, 104, 100, 255 };
@@ -175,86 +169,10 @@ static const Color K_METAL = { 170, 172, 176, 255 };
 static const Color K_BLUE = { 40, 80, 170, 255 };
 static const Color K_RED = { 170, 40, 36, 255 };
 
-// --- Atlas ------------------------------------------------------------------------------
-
-#define ATLAS 4096
-static RenderTexture2D atlas_rt, emit_rt;
-static int lpd_ax, lpd_ay, white_ax, white_ay;
-#define LPD_CELL_W 96
-#define LPD_CELL_H 48
-
-static Vector2 atlas_uv(int panel, float u_mm, float v_mm)
-{
-    const PanelDef *p = &cp_panels[panel];
-    float px = p->ax + u_mm / p->w_mm * p->aw, py = p->ay + v_mm / p->h_mm * p->ah;
-    return (Vector2){ px / ATLAS, 1.0f - py / ATLAS };   // render textures are stored bottom-up
-}
-
-static void pack_atlas(void)
-{
-    for (float scale = 1.0f; scale > 0.3f; scale *= 0.92f) {
-        int order[NPANELS + 2];
-        int w[NPANELS + 2], h[NPANELS + 2];
-        int n = NPANELS + 2;
-        for (int i = 0; i < NPANELS; i++) {
-            PanelDef *p = &cp_panels[i];
-            w[i] = (int)ceilf(p->w_mm * p->dens * scale) + 2;
-            h[i] = (int)ceilf(p->h_mm * p->dens * scale) + 2;
-        }
-        w[NPANELS] = LPD_CELL_W * 9; h[NPANELS] = LPD_CELL_H;   // LPD numerals
-        w[NPANELS + 1] = 16; h[NPANELS + 1] = 16;               // white
-        for (int i = 0; i < n; i++) order[i] = i;
-        for (int i = 0; i < n; i++)
-            for (int j = i + 1; j < n; j++)
-                if (h[order[j]] > h[order[i]]) { int t = order[i]; order[i] = order[j]; order[j] = t; }
-        int x = 0, y = 0, rowh = 0, ok = 1;
-        int ax[NPANELS + 2], ay[NPANELS + 2];
-        for (int k = 0; k < n; k++) {
-            int i = order[k];
-            if (x + w[i] > ATLAS) { x = 0; y += rowh + 2; rowh = 0; }
-            if (y + h[i] > ATLAS) { ok = 0; break; }
-            ax[i] = x; ay[i] = y;
-            x += w[i] + 2;
-            if (h[i] > rowh) rowh = h[i];
-        }
-        if (!ok) continue;
-        for (int i = 0; i < NPANELS; i++) {
-            cp_panels[i].ax = ax[i] + 1; cp_panels[i].ay = ay[i] + 1;
-            cp_panels[i].aw = w[i] - 2; cp_panels[i].ah = h[i] - 2;
-        }
-        lpd_ax = ax[NPANELS]; lpd_ay = ay[NPANELS];
-        white_ax = ax[NPANELS + 1]; white_ay = ay[NPANELS + 1];
-        TraceLog(LOG_INFO, "cockpit: atlas packed at %.0f%% density", scale * 100);
-        return;
-    }
-    TraceLog(LOG_WARNING, "cockpit: atlas packing failed");
-}
-
-static void draw_atlas(int pass)
-{
-    float k = pass ? 0.5f : 1.0f;
-    for (int i = 0; i < NPANELS; i++) {
-        PanelDef *p = &cp_panels[i];
-        Camera2D cam = { 0 };
-        cam.offset = (Vector2){ p->ax * k, p->ay * k };
-        cam.zoom = p->aw / p->w_mm * k;
-        BeginScissorMode((int)(p->ax * k), (int)(p->ay * k), (int)(p->aw * k + 1), (int)(p->ah * k + 1));
-        BeginMode2D(cam);
-        cp_draw_panel(i, pass, cam);
-        EndMode2D();
-        EndScissorMode();
-    }
-    if (pass == 0) {
-        DrawRectangle(white_ax, white_ay, 16, 16, WHITE);
-        DrawRectangle(lpd_ax, lpd_ay, LPD_CELL_W * 9, LPD_CELL_H, BLACK);
-        for (int i = 0; i < 9; i++) {
-            char s[4];
-            snprintf(s, sizeof s, "%d", i * 10);
-            Vector2 m = MeasureTextEx(font_bold, s, 40, 1);
-            DrawTextEx(font_bold, s, (Vector2){ lpd_ax + i * LPD_CELL_W + (LPD_CELL_W - m.x) / 2, (float)lpd_ay + 4 }, 40, 1, WHITE);
-        }
-    }
-}
+// --- Panel canvas layers -----------------------------------------------------------------
+// One layer per panel (index = panel), plus the LPD numerals etched on the
+// Commander's window.
+#define LAYER_LPD NPANELS
 
 // --- Static cabin geometry ------------------------------------------------------------
 
@@ -372,8 +290,8 @@ static void build_panels(void)
     for (int i = 0; i < NPANELS; i++) {
         PanelDef *p = &cp_panels[i];
         V3 a = p->tl, b = p->tr, c = v3_add(p->tr, v3_sub(p->bl, p->tl)), d = p->bl;
-        quad_uv(a, b, c, d, atlas_uv(i, 0, 0), atlas_uv(i, p->w_mm, 0), atlas_uv(i, p->w_mm, p->h_mm), atlas_uv(i, 0, p->h_mm),
-                K_PANEL, M_PANEL);
+        // The plate itself; its artwork is the panel canvas, a hair above it.
+        quad(a, b, c, d, K_PANEL, M_PANEL);
         // Panel plate thickness and a dark gap around it.
         V3 back = v3_scale(panel_normal(i), -0.012);
         V3 q[4] = { a, b, c, d };
@@ -555,20 +473,24 @@ static void build_glass(void)
         etch_line(v3_sub(p, dy), v3_add(p, dy), a % 5 ? 0.0007 : 0.0010);
         if (lpd_point(a, 0, outer, &q, &y, &s) && a % 5 == 0)
             etch_line(v3_sub(q, v3(0, 0.004, 0)), v3_add(q, v3(0, 0.004, 0)), 0.0008);
-        if (a % 10 == 0 && a > 0 && a < 90) {
-            // Numeral quad to the right of the mark (toward the console).
-            int cell = a / 10;
-            double w = 0.014, h = 0.008;
-            V3 up = v3(SX, 0, -SZ);
-            V3 base = v3_add(p, v3(0, half + 0.004, 0));
-            V3 c0 = v3_add(base, v3_scale(up, -h / 2)), c1 = v3_add(c0, v3(0, w, 0));
-            V3 c2 = v3_add(c1, v3_scale(up, h)), c3 = v3_add(c0, v3_scale(up, h));
-            float u0 = (float)(lpd_ax + cell * LPD_CELL_W) / ATLAS, u1 = (float)(lpd_ax + (cell + 1) * LPD_CELL_W) / ATLAS;
-            float vt = 1.0f - (float)lpd_ay / ATLAS, vb = 1.0f - (float)(lpd_ay + LPD_CELL_H) / ATLAS;
-            quad_uv(c0, c1, c2, c3, (Vector2){ u0, vb }, (Vector2){ u1, vb }, (Vector2){ u1, vt }, (Vector2){ u0, vt },
-                    (Color){ 255, 255, 255, 255 }, 254);
-        }
     }
+}
+
+// LPD numerals: lettering on the inner pane beside each 10-degree mark.
+static void build_lpd_numerals(void)
+{
+    const double inner = 0.028;
+    V3 up = v3(SX, 0, -SZ);
+    pc_begin(LAYER_LPD, pane_pt(0, 0, inner), v3(0, 0.001, 0), v3_scale(up, -0.001), N_IN, 0.0003);
+    for (int a = 10; a <= 80; a += 10) {
+        V3 p;
+        double y, s;
+        if (!lpd_point(a, 0, inner, &p, &y, &s)) continue;
+        char t[4];
+        snprintf(t, sizeof t, "%d", a);
+        pc_text(t, (float)((y + 0.016 + 0.004) * 1000), (float)(-s * 1000 - 4.5), 9.0f, 0.3f, (Color){ 8, 8, 8, 215 });
+    }
+    pc_end();
 }
 
 // --- Dynamic geometry: switch levers, knobs, hand controllers -----------------------
@@ -580,8 +502,9 @@ static void build_dynamic(void)
 {
     B = &DB;
     DB.count = 0;
-    for (int i = 0; i < cp_nlev; i++) {
-        const Lever *l = &cp_lev[i];
+    for (int pn = 0; pn < NPANELS; pn++)
+    for (int i = 0; i < cp_items[pn].nlev; i++) {
+        const Lever *l = &cp_items[pn].lev[i];
         const PanelDef *p = &cp_panels[l->panel];
         V3 n = panel_normal(l->panel);
         V3 upv = v3_norm(v3_sub(p->tl, p->bl));
@@ -642,21 +565,64 @@ static void build_dynamic(void)
     B = &SB;
 }
 
-// --- Shader -------------------------------------------------------------------------------
+// --- Shaders -------------------------------------------------------------------------------
+// The cabin mesh and the panel canvas share one lighting model: sunlight
+// through the windows (shadow-mapped), light bounced in through each window,
+// the floodlights, and a little ambient.
+
+#define CK_LIGHT_GLSL \
+    "uniform sampler2D texture2;\n" \
+    "uniform mat4 shadowVP2; uniform vec3 shadowC2; uniform vec3 sunB; uniform float sunOn; uniform vec3 eyeB;\n" \
+    "uniform vec3 winC[3]; uniform vec3 winN[3]; uniform float winA[3]; uniform vec3 winL[3];\n" \
+    "uniform vec3 lampP[3]; uniform vec3 lampC[3];\n" \
+    "uniform float exposure; uniform float emitGain; uniform float glare;\n" \
+    "float sunShadow(vec3 p, vec3 n){\n" \
+    "  vec4 sp = shadowVP2 * vec4(p - shadowC2 + n * 0.008, 1.0);\n" \
+    "  vec3 c = sp.xyz / sp.w * 0.5 + 0.5;\n" \
+    "  if (c.x < 0.0 || c.x > 1.0 || c.y < 0.0 || c.y > 1.0) return 0.0;\n" \
+    "  float s = 0.0; vec2 t = 1.0 / vec2(textureSize(texture2, 0));\n" \
+    "  for (int x=-1;x<=1;x++) for(int y=-1;y<=1;y++){ float d = texture(texture2, c.xy + vec2(x,y)*t*1.2).r; s += (c.z - 0.0015 > d) ? 0.0 : 1.0; }\n" \
+    "  return s / 9.0;\n" \
+    "}\n" \
+    "vec3 cabinLight(vec3 p, vec3 N, vec3 V, vec3 alb, float specK, float shin){\n" \
+    "  vec3 col = vec3(0.0);\n" \
+    "  float NL = max(dot(N, sunB), 0.0) * sunOn;\n" \
+    "  if (NL > 0.0) {\n" \
+    "    float sh = sunShadow(p, N);\n" \
+    "    vec3 H = normalize(sunB + V);\n" \
+    "    col += (alb * NL + specK * pow(max(dot(N, H), 0.0), shin) * NL * 4.0) * sh * vec3(1.0, 0.985, 0.96) * 2.8;\n" \
+    "  }\n" \
+    "  for (int i = 0; i < 3; i++) {\n" \
+    "    vec3 w = winC[i] - p; float d2 = dot(w, w); vec3 wn = w * inversesqrt(d2);\n" \
+    "    float f = winA[i] * max(dot(N, wn), 0.0) * max(dot(-wn, winN[i]), 0.0) / (3.14159 * d2 + winA[i]);\n" \
+    "    col += alb * winL[i] * f * 6.0;\n" \
+    "  }\n" \
+    "  for (int i = 0; i < 3; i++) {\n" \
+    "    vec3 l = lampP[i] - p; float d2 = dot(l, l); l *= inversesqrt(d2);\n" \
+    "    vec3 H = normalize(l + V);\n" \
+    "    float nl = max(dot(N, l), 0.0);\n" \
+    "    col += lampC[i] * (alb * nl + specK * pow(max(dot(N, H), 0.0), shin) * nl) / (d2 + 0.06);\n" \
+    "  }\n" \
+    "  return col + alb * vec3(0.022, 0.023, 0.025);\n" \
+    "}\n"
 
 static const char *ck_vs =
     "#version 330\n"
-    "in vec3 vertexPosition; in vec3 vertexNormal; in vec2 vertexTexCoord; in vec4 vertexColor;\n"
+    "in vec3 vertexPosition; in vec3 vertexNormal; in vec4 vertexColor;\n"
     "uniform mat4 mvp; uniform mat4 matModel;\n"
-    "out vec3 bodyPos; out vec3 bodyN; out vec2 uv; out vec4 vcol; out vec3 camPos;\n"
-    "void main(){ bodyPos = vertexPosition; bodyN = vertexNormal; uv = vertexTexCoord; vcol = vertexColor;\n"
+    "out vec3 bodyPos; out vec3 bodyN; out vec4 vcol; out vec3 camPos;\n"
+    "void main(){ bodyPos = vertexPosition; bodyN = vertexNormal; vcol = vertexColor;\n"
     "  camPos = (matModel * vec4(vertexPosition, 1.0)).xyz; gl_Position = mvp * vec4(vertexPosition, 1.0); }\n";
 
 static const char *ck_fs =
     "#version 330\n"
-    "in vec3 bodyPos; in vec3 bodyN; in vec2 uv; in vec4 vcol; in vec3 camPos;\n"
-    "uniform sampler2D texture0; uniform sampler2D texture1; uniform sampler2D texture2;\n"
+    "in vec3 bodyPos; in vec3 bodyN; in vec4 vcol; in vec3 camPos;\n"
+    CK_LIGHT_GLSL
     "uniform sampler2D cabinMap; uniform sampler2D wallMap;\n"
+    "out vec4 finalColor;\n"
+    "float hash12(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }\n"
+    "float vnoise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);\n"
+    "  return mix(mix(hash12(i), hash12(i+vec2(1,0)), f.x), mix(hash12(i+vec2(0,1)), hash12(i+vec2(1,1)), f.x), f.y); }\n"
     "vec4 triMap(sampler2D t, vec3 p, vec3 n, out vec3 bump){\n"
     "  vec3 w = abs(n); w = w * w; w = w * w * w; w /= (w.x + w.y + w.z);\n"
     "  vec3 dx = dFdx(p), dy = dFdy(p); vec4 s = vec4(0.0); bump = vec3(0.0);\n"
@@ -665,72 +631,76 @@ static const char *ck_fs =
     "  if (w.z > 0.004) { vec4 c = textureGrad(t, p.xy, dx.xy, dy.xy); s += c * w.z; bump += vec3(c.rg * 2.0 - 1.0, 0.0) * w.z; }\n"
     "  return s;\n"
     "}\n"
-    "uniform mat4 shadowVP2; uniform vec3 shadowC2; uniform vec3 sunB; uniform float sunOn; uniform vec3 eyeB;\n"
-    "uniform vec3 winC[3]; uniform vec3 winN[3]; uniform float winA[3]; uniform vec3 winL[3];\n"
-    "uniform vec3 lampP[3]; uniform vec3 lampC[3];\n"
-    "uniform float exposure; uniform float emitGain; uniform float glare;\n"
-    "out vec4 finalColor;\n"
-    "float hash12(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }\n"
-    "float vnoise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);\n"
-    "  return mix(mix(hash12(i), hash12(i+vec2(1,0)), f.x), mix(hash12(i+vec2(0,1)), hash12(i+vec2(1,1)), f.x), f.y); }\n"
-    "float sunShadow(vec3 p, vec3 n){\n"
-    "  vec4 sp = shadowVP2 * vec4(p - shadowC2 + n * 0.008, 1.0);\n"
-    "  vec3 c = sp.xyz / sp.w * 0.5 + 0.5;\n"
-    "  if (c.x < 0.0 || c.x > 1.0 || c.y < 0.0 || c.y > 1.0) return 0.0;\n"
-    "  float s = 0.0; vec2 t = 1.0 / vec2(textureSize(texture2, 0));\n"
-    "  for (int x=-1;x<=1;x++) for(int y=-1;y<=1;y++){ float d = texture(texture2, c.xy + vec2(x,y)*t*1.2).r; s += (c.z - 0.0015 > d) ? 0.0 : 1.0; }\n"
-    "  return s / 9.0;\n"
-    "}\n"
     "void main(){\n"
     "  gl_FragDepth = clamp(length(camPos) / 6.0, 0.0, 1.0) * 0.03;\n"
     "  int mat = int(vcol.a * 255.0 + 0.5);\n"
     "  vec3 N = normalize(bodyN); vec3 V = normalize(eyeB - bodyPos);\n"
     "  if (dot(N, V) < 0.0) N = -N;\n"
-    "  vec3 alb = vcol.rgb; vec3 emis = vec3(0.0);\n"
-    "  if (mat == 1) { alb *= texture(texture0, uv).rgb; emis = texture(texture1, uv).rgb * emitGain; }\n"
+    "  vec3 alb = vcol.rgb;\n"
     "  if (mat == 5) { finalColor = vec4(alb * (0.3 + 3.0 * glare) * exposure, 1.0); return; }\n"
-    "  if (mat == 255) {}\n"
-    "  if (mat == 254) { float a = texture(texture0, uv).r; finalColor = vec4(vec3(0.03) * exposure, a * 0.85); return; }\n"
     "  if (mat == 6) { finalColor = vec4(vec3(0.03) * exposure, 0.85); return; }\n"
     "  float specK = mat == 3 ? 0.55 : mat == 1 ? 0.06 : mat == 4 ? 0.05 : 0.03;\n"
+    "  float shin = mat == 3 ? 80.0 : 14.0;\n"
     "  // Painted surfaces and the pressure shell take their relief, wear and sheen from the baked maps.\n"
     "  if (mat == 2 || mat == 4 || mat == 8) {\n"
     "    vec3 b; vec4 sm;\n"
     "    if (mat == 8) sm = triMap(wallMap, bodyPos / 0.90, N, b); else sm = triMap(cabinMap, bodyPos / 0.60, N, b);\n"
     "    alb *= sm.a * 2.0; N = normalize(N + b); specK *= clamp(1.0 - 3.0 * (sm.b - 0.5), 0.4, 2.2);\n"
     "  }\n"
-    "  float shin = mat == 3 ? 80.0 : 14.0;\n"
-    "  vec3 col = vec3(0.0);\n"
-    "  float NL = max(dot(N, sunB), 0.0) * sunOn;\n"
-    "  if (NL > 0.0) {\n"
-    "    float sh = sunShadow(bodyPos, N);\n"
-    "    vec3 H = normalize(sunB + V);\n"
-    "    col += (alb * NL + specK * pow(max(dot(N, H), 0.0), shin) * NL * 4.0) * sh * vec3(1.0, 0.985, 0.96) * 2.8;\n"
-    "  }\n"
-    "  for (int i = 0; i < 3; i++) {\n"
-    "    vec3 w = winC[i] - bodyPos; float d2 = dot(w, w); vec3 wn = w * inversesqrt(d2);\n"
-    "    float f = winA[i] * max(dot(N, wn), 0.0) * max(dot(-wn, winN[i]), 0.0) / (3.14159 * d2 + winA[i]);\n"
-    "    col += alb * winL[i] * f * 6.0;\n"
-    "  }\n"
-    "  for (int i = 0; i < 3; i++) {\n"
-    "    vec3 l = lampP[i] - bodyPos; float d2 = dot(l, l); l *= inversesqrt(d2);\n"
-    "    vec3 H = normalize(l + V);\n"
-    "    float nl = max(dot(N, l), 0.0);\n"
-    "    col += lampC[i] * (alb * nl + specK * pow(max(dot(N, H), 0.0), shin) * nl) / (d2 + 0.06);\n"
-    "  }\n"
-    "  col += alb * vec3(0.022, 0.023, 0.025);\n"
+    "  vec3 col = cabinLight(bodyPos, N, V, alb, specK, shin);\n"
     "  if (mat == 7) {\n"
     "    float smudge = vnoise(bodyPos.yz * 60.0) * 0.6 + vnoise(bodyPos.yz * 230.0) * 0.4;\n"
     "    float a = 0.012 + glare * (0.03 + 0.18 * smudge);\n"
     "    finalColor = vec4(vec3(0.9, 0.92, 0.95) * (0.02 + glare * 1.5) * exposure, a);\n"
     "    return;\n"
     "  }\n"
-    "  col += emis;\n"
     "  finalColor = vec4(col * exposure, 1.0);\n"
     "}\n";
 
-static Shader ck_sh;
-static Material ck_mat, ck_depth_mat;
+// Panel canvas (pcanvas.c): every quad evaluates its own edge, so shapes and
+// lettering are antialiased analytically at any distance.
+static const char *pn_vs =
+    "#version 330\n"
+    "in vec3 vertexPosition; in vec2 vertexTexCoord; in vec3 vertexNormal; in vec4 vertexColor; in vec4 vertexTangent; in vec2 vertexTexCoord2;\n"
+    "uniform mat4 mvp; uniform mat4 matModel;\n"
+    "out vec3 bodyPos; out vec2 uv; out vec3 glow; out vec4 vcol; out vec4 par; out vec2 uv2; out vec3 camPos;\n"
+    "void main(){ bodyPos = vertexPosition; uv = vertexTexCoord; glow = vertexNormal; vcol = vertexColor; par = vertexTangent; uv2 = vertexTexCoord2;\n"
+    "  camPos = (matModel * vec4(vertexPosition, 1.0)).xyz; gl_Position = mvp * vec4(vertexPosition, 1.0); }\n";
+
+static const char *pn_fs =
+    "#version 330\n"
+    "in vec3 bodyPos; in vec2 uv; in vec3 glow; in vec4 vcol; in vec4 par; in vec2 uv2; in vec3 camPos;\n"
+    CK_LIGHT_GLSL
+    "uniform sampler2D texture0; uniform sampler2D texture1;\n"   // SDF font, picture (FDAI ball)
+    "uniform vec3 planeN; uniform float fontTexels; uniform float fontSlope;\n"
+    "out vec4 finalColor;\n"
+    "void main(){\n"
+    "  gl_FragDepth = clamp(length(camPos) / 6.0, 0.0, 1.0) * 0.03;\n"
+    "  int kind = int(par.w + 0.5);\n"
+    "  vec3 alb = vcol.rgb, emis = glow; float cov = 1.0;\n"
+    "  if (kind == 1) {\n"   // rounded rectangle (also circles, lines), optionally an outline
+    "    vec2 q = abs(uv) - (par.xy - par.z);\n"
+    "    float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - par.z;\n"
+    "    if (uv2.x > 0.0) d = max(d, -(d + uv2.x));\n"
+    "    float aa = max(length(fwidth(uv)) * 0.7071, 1e-5);\n"
+    "    cov = clamp(0.5 - d / aa, 0.0, 1.0);\n"
+    "  } else if (kind == 3) {\n"   // glyph: distance field, one screen pixel of edge
+    "    float sd = texture(texture0, uv).r;\n"
+    "    float tpp = length(fwidth(uv)) * 0.7071 * fontTexels;\n"
+    "    cov = clamp((sd - 0.5) / clamp(fontSlope * tpp, 1e-4, 0.5) + 0.5 + 0.10 * clamp(tpp / 6.0 - 0.3, 0.0, 1.0), 0.0, 1.0);\n"
+    "  } else if (kind == 4) {\n"
+    "    vec4 t = texture(texture1, uv); alb = t.rgb; cov = t.a; emis = t.rgb * glow.x;\n"
+    "  }\n"
+    "  cov *= vcol.a;\n"
+    "  if (cov < 0.004) discard;\n"
+    "  vec3 N = planeN; vec3 V = normalize(eyeB - bodyPos);\n"
+    "  if (dot(N, V) < 0.0) N = -N;\n"
+    "  vec3 col = cabinLight(bodyPos, N, V, alb, 0.06, 14.0) + emis * emitGain;\n"
+    "  finalColor = vec4(col * exposure, cov);\n"
+    "}\n";
+
+static Shader ck_sh, pn_sh;
+static Material ck_mat, ck_depth_mat, pn_mat;
 static Mesh mesh_static, mesh_dyn, mesh_glass;
 static int dyn_cap;
 
@@ -772,12 +742,7 @@ void cockpit_init(void)
         p->w_mm = (float)(v3_len(v3_sub(p->tr, p->tl)) * 1000);
         p->h_mm = (float)(v3_len(v3_sub(p->bl, p->tl)) * 1000);
     }
-    pack_atlas();
-    white_u = (white_ax + 8) / (float)ATLAS;
-    white_v = 1.0f - (white_ay + 8) / (float)ATLAS;
-
-    atlas_rt = LoadRenderTexture(ATLAS, ATLAS);
-    emit_rt = LoadRenderTexture(ATLAS / 2, ATLAS / 2);
+    pc_init();
 
     B = &SB;
     build_shell();
@@ -790,16 +755,7 @@ void cockpit_init(void)
     B = &SB;
     dyn_cap = 60000;
     mesh_dyn = upload(&DB, 1, dyn_cap);
-
-    ck_sh = LoadShaderFromMemory(ck_vs, ck_fs);
-    ck_mat = LoadMaterialDefault();
-    ck_mat.shader = ck_sh;
-    ck_mat.maps[MATERIAL_MAP_DIFFUSE].texture = atlas_rt.texture;
-    ck_mat.maps[MATERIAL_MAP_SPECULAR].texture = emit_rt.texture;
-    ck_sh.locs[SHADER_LOC_MAP_ROUGHNESS] = GetShaderLocation(ck_sh, "cabinMap");
-    ck_sh.locs[SHADER_LOC_MAP_OCCLUSION] = GetShaderLocation(ck_sh, "wallMap");
-    ck_mat.maps[MATERIAL_MAP_ROUGHNESS].texture = assets_texture("cabin");
-    ck_mat.maps[MATERIAL_MAP_OCCLUSION].texture = assets_texture("cabin_wall");
+    build_lpd_numerals();
 
     sh2_fbo = rlLoadFramebuffer();
     rlEnableFramebuffer(sh2_fbo);
@@ -807,7 +763,27 @@ void cockpit_init(void)
     rlFramebufferAttach(sh2_fbo, sh2_tex, RL_ATTACHMENT_DEPTH, RL_ATTACHMENT_TEXTURE2D, 0);
     if (!rlFramebufferComplete(sh2_fbo)) TraceLog(LOG_WARNING, "cockpit: shadow FBO incomplete");
     rlDisableFramebuffer();
-    ck_mat.maps[MATERIAL_MAP_NORMAL].texture = (Texture2D){ sh2_tex, SHADOW2, SHADOW2, 1, PIXELFORMAT_UNCOMPRESSED_GRAYSCALE };
+    Texture2D shadow = { sh2_tex, SHADOW2, SHADOW2, 1, PIXELFORMAT_UNCOMPRESSED_GRAYSCALE };
+
+    ck_sh = LoadShaderFromMemory(ck_vs, ck_fs);
+    ck_sh.locs[SHADER_LOC_MAP_ROUGHNESS] = GetShaderLocation(ck_sh, "cabinMap");
+    ck_sh.locs[SHADER_LOC_MAP_OCCLUSION] = GetShaderLocation(ck_sh, "wallMap");
+    ck_mat = LoadMaterialDefault();
+    ck_mat.shader = ck_sh;
+    ck_mat.maps[MATERIAL_MAP_NORMAL].texture = shadow;
+    ck_mat.maps[MATERIAL_MAP_ROUGHNESS].texture = assets_texture("cabin");
+    ck_mat.maps[MATERIAL_MAP_OCCLUSION].texture = assets_texture("cabin_wall");
+
+    pn_sh = LoadShaderFromMemory(pn_vs, pn_fs);
+    pn_mat = LoadMaterialDefault();
+    pn_mat.shader = pn_sh;
+    pn_mat.maps[MATERIAL_MAP_ALBEDO].texture = pc_font_texture();
+    pn_mat.maps[MATERIAL_MAP_METALNESS].texture = hud_fdai_texture();
+    pn_mat.maps[MATERIAL_MAP_NORMAL].texture = shadow;
+    float texels = (float)pc_font_texture().width, slope = pc_font_slope();
+    SetShaderValue(pn_sh, GetShaderLocation(pn_sh, "fontTexels"), &texels, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(pn_sh, GetShaderLocation(pn_sh, "fontSlope"), &slope, SHADER_UNIFORM_FLOAT);
+
     ck_depth_mat = LoadMaterialDefault();
     ck_depth_mat.shader = *render_depth_shader();
     TraceLog(LOG_INFO, "cockpit: %d static + %d glass triangles", mesh_static.triangleCount, mesh_glass.triangleCount);
@@ -815,9 +791,9 @@ void cockpit_init(void)
 
 void cockpit_shutdown(void)
 {
-    UnloadRenderTexture(atlas_rt);
-    UnloadRenderTexture(emit_rt);
+    pc_shutdown();
     UnloadShader(ck_sh);
+    UnloadShader(pn_sh);
 }
 
 // --- Per-frame -------------------------------------------------------------------------------
@@ -828,6 +804,28 @@ static float glare_amt;
 
 void cockpit_update(float dt) { cp_panels_update(dt); }
 
+// Re-record the panel artwork. The flight instruments and the DSKY are
+// redrawn every frame; the other panels take turns (one every few frames),
+// and all of them at once after a switch was operated.
+static void record_panels(void)
+{
+    static unsigned frame_no;
+    int quads = 0;
+    for (int i = 0; i < NPANELS; i++) {
+        int fast = i == P1 || i == P2 || i == P4;
+        if (!fast && !cp_dirty && pc_layer_ready(i) && (frame_no + (unsigned)i) % 6 != 0) continue;
+        const PanelDef *p = &cp_panels[i];
+        pc_begin(i, p->tl, v3_scale(v3_sub(p->tr, p->tl), 1.0 / p->w_mm), v3_scale(v3_sub(p->bl, p->tl), 1.0 / p->h_mm),
+                 panel_normal(i), 0.0004);
+        cp_draw_panel(i);
+        pc_end();
+        quads += pc_layer_quads(i);
+    }
+    if (frame_no == 0) TraceLog(LOG_INFO, "cockpit: panel canvas %d quads", quads);
+    cp_dirty = 0;
+    frame_no++;
+}
+
 void cockpit_prepare(M3 R, V3 sun_site, V3 up_site, float dt)
 {
     cur_R = R;
@@ -836,27 +834,7 @@ void cockpit_prepare(M3 R, V3 sun_site, V3 up_site, float dt)
     up_b = v3_norm(m3_apply(Rt, up_site));
 
     (void)dt;
-    cp_nlev = 0;
-    cp_nhot = 0;
-    BeginTextureMode(atlas_rt);
-    ClearBackground(BLACK);
-    draw_atlas(0);
-    EndTextureMode();
-    BeginTextureMode(emit_rt);
-    ClearBackground(BLACK);
-    draw_atlas(1);
-    EndTextureMode();
-    static int mips_done;
-    GenTextureMipmaps(&atlas_rt.texture);
-    GenTextureMipmaps(&emit_rt.texture);
-    if (!mips_done) {
-        SetTextureFilter(atlas_rt.texture, TEXTURE_FILTER_TRILINEAR);
-        SetTextureFilter(atlas_rt.texture, TEXTURE_FILTER_ANISOTROPIC_8X);
-        SetTextureFilter(emit_rt.texture, TEXTURE_FILTER_TRILINEAR);
-        ck_mat.maps[MATERIAL_MAP_DIFFUSE].texture = atlas_rt.texture;
-        ck_mat.maps[MATERIAL_MAP_SPECULAR].texture = emit_rt.texture;
-        mips_done = 1;
-    }
+    record_panels();
 
     // Levers etc. for this frame.
     build_dynamic();
@@ -996,9 +974,9 @@ void cockpit_input(int w, int h)
         bv = (float)(b * p->h_mm);
     }
     if (bp < 0) return;
-    for (int i = 0; i < cp_nhot; i++) {
-        const Hot *hh = &cp_hot[i];
-        if (hh->panel == bp && CheckCollisionPointRec((Vector2){ bu, bv }, hh->r)) {
+    for (int i = 0; i < cp_items[bp].nhot; i++) {
+        const Hot *hh = &cp_items[bp].hot[i];
+        if (CheckCollisionPointRec((Vector2){ bu, bv }, hh->r)) {
             hover = hh;
             hover_u = bu;
             hover_v = bv;
@@ -1023,12 +1001,28 @@ ViewCam cockpit_camera(V3 lm_pos, M3 R)
 
 // --- Draw --------------------------------------------------------------------------------------
 
-static void set3(const char *name, V3 v)
+static void light_uniforms(Shader sh, const float *wc, const float *wn, const float *wa, const float *wl, const float *lp,
+                           const float *lc, float glare)
 {
-    float f[3] = { (float)v.x, (float)v.y, (float)v.z };
-    SetShaderValue(ck_sh, GetShaderLocation(ck_sh, name), f, SHADER_UNIFORM_VEC3);
+    SetShaderValueV(sh, GetShaderLocation(sh, "winC"), wc, SHADER_UNIFORM_VEC3, 3);
+    SetShaderValueV(sh, GetShaderLocation(sh, "winN"), wn, SHADER_UNIFORM_VEC3, 3);
+    SetShaderValueV(sh, GetShaderLocation(sh, "winA"), wa, SHADER_UNIFORM_FLOAT, 3);
+    SetShaderValueV(sh, GetShaderLocation(sh, "winL"), wl, SHADER_UNIFORM_VEC3, 3);
+    SetShaderValueV(sh, GetShaderLocation(sh, "lampP"), lp, SHADER_UNIFORM_VEC3, 3);
+    SetShaderValueV(sh, GetShaderLocation(sh, "lampC"), lc, SHADER_UNIFORM_VEC3, 3);
+    V3 e = eye_body();
+    float sun[3] = { (float)sun_b.x, (float)sun_b.y, (float)sun_b.z }, eye[3] = { (float)e.x, (float)e.y, (float)e.z };
+    float sc[3] = { (float)SH2_C.x, (float)SH2_C.y, (float)SH2_C.z };
+    float one = 1.0f, expo = render_exposure(), gain = 0.9f;
+    SetShaderValue(sh, GetShaderLocation(sh, "sunB"), sun, SHADER_UNIFORM_VEC3);
+    SetShaderValue(sh, GetShaderLocation(sh, "sunOn"), &one, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(sh, GetShaderLocation(sh, "eyeB"), eye, SHADER_UNIFORM_VEC3);
+    SetShaderValue(sh, GetShaderLocation(sh, "shadowC2"), sc, SHADER_UNIFORM_VEC3);
+    SetShaderValueMatrix(sh, GetShaderLocation(sh, "shadowVP2"), sh2_vp);
+    SetShaderValue(sh, GetShaderLocation(sh, "exposure"), &expo, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(sh, GetShaderLocation(sh, "emitGain"), &gain, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(sh, GetShaderLocation(sh, "glare"), &glare, SHADER_UNIFORM_FLOAT);
 }
-static void set1(const char *name, float v) { SetShaderValue(ck_sh, GetShaderLocation(ck_sh, name), &v, SHADER_UNIFORM_FLOAT); }
 
 static Matrix to_matrix(M3 r, V3 t)
 {
@@ -1039,6 +1033,13 @@ static Matrix to_matrix(M3 r, V3 t)
         0, 0, 0, 1,
     };
     return m;
+}
+
+static void draw_layer(int layer, V3 n, Matrix M)
+{
+    float f[3] = { (float)n.x, (float)n.y, (float)n.z };
+    SetShaderValue(pn_sh, GetShaderLocation(pn_sh, "planeN"), f, SHADER_UNIFORM_VEC3);
+    pc_draw_layer(layer, pn_mat, M);
 }
 
 void cockpit_draw(M3 R, V3 lm_rel, int w, int h)
@@ -1071,16 +1072,11 @@ void cockpit_draw(M3 R, V3 lm_rel, int w, int h)
         if (sd > 0) glare = fmaxf(glare, (float)sd);
     }
     glare_amt = glare;
-    float c[9], a3[3], p9[9], lc[9];
+    float c9[9], n9[9], p9[9], lc[9];
     for (int k = 0; k < 3; k++) {
-        c[3 * k] = (float)wc[k].x; c[3 * k + 1] = (float)wc[k].y; c[3 * k + 2] = (float)wc[k].z;
-        a3[k] = wa[k];
+        c9[3 * k] = (float)wc[k].x; c9[3 * k + 1] = (float)wc[k].y; c9[3 * k + 2] = (float)wc[k].z;
+        n9[3 * k] = (float)wn[k].x; n9[3 * k + 1] = (float)wn[k].y; n9[3 * k + 2] = (float)wn[k].z;
     }
-    SetShaderValueV(ck_sh, GetShaderLocation(ck_sh, "winC"), c, SHADER_UNIFORM_VEC3, 3);
-    for (int k = 0; k < 3; k++) { c[3 * k] = (float)wn[k].x; c[3 * k + 1] = (float)wn[k].y; c[3 * k + 2] = (float)wn[k].z; }
-    SetShaderValueV(ck_sh, GetShaderLocation(ck_sh, "winN"), c, SHADER_UNIFORM_VEC3, 3);
-    SetShaderValueV(ck_sh, GetShaderLocation(ck_sh, "winA"), a3, SHADER_UNIFORM_FLOAT, 3);
-    SetShaderValueV(ck_sh, GetShaderLocation(ck_sh, "winL"), wl, SHADER_UNIFORM_VEC3, 3);
     // Floodlights (panel 5 FLOOD knob) and the utility light.
     float fl = cp_flood_level();
     V3 lp[3] = { v3(3.26, -0.55, 0.0), v3(3.26, 0.55, 0.0), v3(3.05, -0.98, -0.40) };
@@ -1089,24 +1085,21 @@ void cockpit_draw(M3 R, V3 lm_rel, int w, int h)
         float g = k < 2 ? fl * 0.38f : fl * 0.10f;
         lc[3 * k] = g; lc[3 * k + 1] = g * 0.93f; lc[3 * k + 2] = g * 0.80f;
     }
-    SetShaderValueV(ck_sh, GetShaderLocation(ck_sh, "lampP"), p9, SHADER_UNIFORM_VEC3, 3);
-    SetShaderValueV(ck_sh, GetShaderLocation(ck_sh, "lampC"), lc, SHADER_UNIFORM_VEC3, 3);
-    set3("sunB", sun_b);
-    set1("sunOn", 1.0f);
-    set3("eyeB", eye_body());
-    set3("shadowC2", SH2_C);
-    SetShaderValueMatrix(ck_sh, GetShaderLocation(ck_sh, "shadowVP2"), sh2_vp);
-    set1("exposure", render_exposure());
-    set1("emitGain", 0.9f);
-    set1("glare", glare);
+    light_uniforms(ck_sh, c9, n9, wa, wl, p9, lc, glare);
+    light_uniforms(pn_sh, c9, n9, wa, wl, p9, lc, glare);
 
     Matrix M = to_matrix(R, lm_rel);
     rlDisableBackfaceCulling();
     DrawMesh(mesh_static, ck_mat, M);
     if (mesh_dyn.vertexCount > 0) DrawMesh(mesh_dyn, ck_mat, M);
     rlDrawRenderBatchActive();
+    // Panel artwork: coplanar quads in painter's order, tested against the
+    // cabin's depth but not written to it.
     rlDisableDepthMask();
+    for (int i = 0; i < NPANELS; i++) draw_layer(i, panel_normal(i), M);
+    rlDrawRenderBatchActive();
     DrawMesh(mesh_glass, ck_mat, M);
+    draw_layer(LAYER_LPD, N_IN, M);
     rlDrawRenderBatchActive();
     rlEnableDepthMask();
     rlEnableBackfaceCulling();

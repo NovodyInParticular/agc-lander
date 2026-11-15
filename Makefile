@@ -13,11 +13,11 @@ ROPE_C  := build/rope_luminary099.c
 SYMS_C  := build/agc_symbols.c
 FONTS_C := build/font_jbm.c build/font_rc.c build/font_rcb.c
 # Baked surface maps (tools/bake_textures.py), embedded in the PC executables.
-TEX_NAMES := lm_panel lm_foil lm_blanket rock cabin cabin_wall
+TEX_NAMES := lm_panel lm_foil lm_blanket rock cabin cabin_wall regolith
 
 AGC_CORE := $(VAGC)/yaAGC/agc_engine.c $(VAGC)/yaAGC/agc_engine_init.c $(VAGC)/yaAGC/agc_utilities.c
 HOST     := src/agc_host.c src/agc_mem.c src/moon.c src/lm.c src/coop.c src/net.c $(ROPE_C) $(SYMS_C)
-GAME     := src/main.c src/dsky.c src/scenario.c src/crew.c src/hints.c src/terrain.c src/render.c src/lmmodel.c src/hud.c src/cockpit.c src/cockpit_panels.c src/sky_extras.c src/controls.c src/rocks.c src/assets.c data/a11_pdi_lgc.c $(FONTS_C)
+GAME     := src/main.c src/dsky.c src/scenario.c src/crew.c src/hints.c src/terrain.c src/render.c src/lmmodel.c src/hud.c src/cockpit.c src/cockpit_panels.c src/pcanvas.c src/sky_extras.c src/controls.c src/rocks.c src/assets.c data/a11_pdi_lgc.c $(FONTS_C)
 
 # Vendor core: build quietly, it predates modern warning sets.
 CORE_FLAGS := -O2 -w -I$(VAGC)/yaAGC

@@ -3,6 +3,8 @@
 
 #include "agc_host.h"
 #include "dsky.h"
+#include "hud.h"
+#include "pcanvas.h"
 
 // ---------------------------------------------------------------------------
 // Colours.
@@ -20,16 +22,63 @@ static const Color C_KEY       = { 34, 35, 37, 255 };
 static const Color C_KEY_DOWN  = { 70, 72, 76, 255 };
 static const Color C_KEY_TEXT  = { 230, 230, 230, 255 };
 
-// Emission mode: only light-emitting parts are drawn (for the cockpit's
-// emission texture); everything else is black.
-static int emis;
-static float emis_gain = 1;
-void dsky_set_emission(int on, float gain) { emis = on; emis_gain = gain; }
-static Color EC(Color c) { return emis ? (Color){ 0, 0, 0, 255 } : c; }
-static Color EL(Color c)
+// Drawing target: the 2D screen, or the cockpit panel canvas, where lit
+// elements also glow (scaled by `gain`, the ANUN/NUM brightness).
+static int canvas;
+static float gain = 1;
+
+static Color dim(Color c, float k)
 {
-    if (!emis) return c;
-    return (Color){ (unsigned char)(c.r * emis_gain), (unsigned char)(c.g * emis_gain), (unsigned char)(c.b * emis_gain), 255 };
+    return (Color){ (unsigned char)(c.r * k), (unsigned char)(c.g * k), (unsigned char)(c.b * k), 255 };
+}
+
+static void box(Rectangle r, Color c, int lit)
+{
+    if (!canvas) { DrawRectangleRec(r, c); return; }
+    if (lit) pc_glow(dim(c, gain));
+    pc_rect(r.x, r.y, r.width, r.height, lit ? dim(c, 0.85f) : c);
+    pc_glow_off();
+}
+
+static void rbox(Rectangle r, float roundness, Color c)
+{
+    if (canvas) pc_rrect(r, roundness, c);
+    else DrawRectangleRounded(r, roundness, 8, c);
+}
+
+static void rbox_lines(Rectangle r, float roundness, float t, Color c)
+{
+    if (canvas) pc_rrect_lines(r, roundness, t, c);
+    else DrawRectangleRoundedLinesEx(r, roundness, 6, t, c);
+}
+
+// Text centred in a rectangle, lines split at '\n'. glow: 0 none, else the
+// fraction of the text colour it emits on the canvas.
+static void label(const char *text, Rectangle r, float fs, Color c, float glow)
+{
+    fs *= 1.25f;
+    if (canvas) {
+        if (glow > 0) pc_glow(dim(c, glow * gain));
+        pc_text_box(text, r, fs, 0.4f, c);
+        pc_glow_off();
+        return;
+    }
+    int lines = 1;
+    for (const char *p = text; *p; p++) lines += *p == '\n';
+    float y = r.y + (r.height - fs * (1 + (lines - 1) * 1.12f)) / 2;
+    while (1) {
+        char buf[32];
+        const char *nl = strchr(text, '\n');
+        size_t n = nl ? (size_t)(nl - text) : strlen(text);
+        if (n >= sizeof buf) n = sizeof buf - 1;
+        memcpy(buf, text, n);
+        buf[n] = 0;
+        Vector2 m = MeasureTextEx(font_bold, buf, fs, 0.4f);
+        DrawTextEx(font_bold, buf, (Vector2){ r.x + (r.width - m.x) / 2, y }, fs, 0.4f, c);
+        if (!nl) break;
+        text = nl + 1;
+        y += fs * 1.12f;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -48,38 +97,43 @@ static unsigned char segments_for(uint8_t code)
     }
 }
 
+static void segment(Rectangle r, int on)
+{
+    Color c = on ? C_EL_ON : C_EL_OFF;
+    if (!canvas) { DrawRectangleRounded(r, 0.9f, 4, c); return; }
+    if (on) pc_glow(dim(c, gain));
+    pc_rrect(r, 0.9f, on ? dim(c, 0.9f) : c);
+    pc_glow_off();
+}
+
 static void draw_digit(float x, float y, float w, float h, unsigned char seg)
 {
-    float t = w * 0.18f, gap = t * 0.25f, hh = h / 2;
+    float t = w * 0.19f, gap = t * 0.14f, hh = h / 2;
     Rectangle r[7] = {
-        { x + t, y, w - 2 * t, t },                          // a
-        { x + w - t, y + gap, t, hh - 2 * gap },             // b
-        { x + w - t, y + hh + gap, t, hh - 2 * gap },        // c
-        { x + t, y + h - t, w - 2 * t, t },                  // d
-        { x, y + hh + gap, t, hh - 2 * gap },                // e
-        { x, y + gap, t, hh - 2 * gap },                     // f
-        { x + t, y + hh - t / 2, w - 2 * t, t },             // g
+        { x + t * 0.5f + gap, y, w - t - 2 * gap, t },                 // a
+        { x + w - t, y + t * 0.5f + gap, t, hh - t * 0.5f - 2 * gap }, // b
+        { x + w - t, y + hh + gap, t, hh - t * 0.5f - 2 * gap },       // c
+        { x + t * 0.5f + gap, y + h - t, w - t - 2 * gap, t },         // d
+        { x, y + hh + gap, t, hh - t * 0.5f - 2 * gap },               // e
+        { x, y + t * 0.5f + gap, t, hh - t * 0.5f - 2 * gap },         // f
+        { x + t * 0.5f + gap, y + hh - t / 2, w - t - 2 * gap, t },    // g
     };
-    for (int i = 0; i < 7; i++)
-        DrawRectangleRec(r[i], (seg >> i) & 1 ? EL(C_EL_ON) : EC(C_EL_OFF));
+    for (int i = 0; i < 7; i++) segment(r[i], (seg >> i) & 1);
 }
 
 static void draw_sign(float x, float y, float w, float h, uint8_t sign)
 {
-    float t = w * 0.18f;
+    float t = w * 0.19f;
     int plus = (sign & 2) != 0, minus = !plus && (sign & 1);
-    Color bar = (plus || minus) ? EL(C_EL_ON) : EC(C_EL_OFF);
-    DrawRectangleRec((Rectangle){ x, y + h / 2 - t / 2, w, t }, bar);
-    DrawRectangleRec((Rectangle){ x + w / 2 - t / 2, y + h * 0.18f, t, h * 0.64f },
-                     plus ? EL(C_EL_ON) : EC(C_EL_OFF));
+    segment((Rectangle){ x, y + h / 2 - t / 2, w, t }, plus || minus);
+    if (plus) segment((Rectangle){ x + w / 2 - t / 2, y + h * 0.18f, t, h * 0.64f }, 1);
 }
 
-static void draw_label(const char *text, float x, float y, float w, float h, Color bg, Color fg)
+// Lit legend bar (PROG / VERB / NOUN): dark lettering on the glowing bar.
+static void draw_label(const char *text, float x, float y, float w, float h)
 {
-    DrawRectangleRec((Rectangle){ x, y, w, h }, bg);
-    int fs = (int)(h * 0.62f);
-    int tw = MeasureText(text, fs);
-    DrawText(text, (int)(x + (w - tw) / 2), (int)(y + (h - fs) / 2 + 1), fs, fg);
+    box((Rectangle){ x, y, w, h }, C_EL_LABEL, 1);
+    label(text, (Rectangle){ x, y, w, h }, h * 0.66f, C_EL_BG, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -98,25 +152,6 @@ static const Lamp lamps[14] = {
     LAMP("PRIO DISP", prio_disp, 0),      LAMP("ALT", alt, 1),
     LAMP("NO DAP", no_dap, 0),            LAMP("VEL", vel, 1),
 };
-
-static void draw_multiline_centered(const char *text, Rectangle r, int fs, Color c)
-{
-    char buf[32];
-    const char *nl = strchr(text, '\n');
-    if (!nl) {
-        int tw = MeasureText(text, fs);
-        DrawText(text, (int)(r.x + (r.width - tw) / 2), (int)(r.y + (r.height - fs) / 2), fs, c);
-        return;
-    }
-    size_t n = (size_t)(nl - text);
-    if (n >= sizeof buf) n = sizeof buf - 1;
-    memcpy(buf, text, n);
-    buf[n] = 0;
-    int w1 = MeasureText(buf, fs), w2 = MeasureText(nl + 1, fs);
-    float y0 = r.y + r.height / 2 - fs - 1;
-    DrawText(buf, (int)(r.x + (r.width - w1) / 2), (int)y0, fs, c);
-    DrawText(nl + 1, (int)(r.x + (r.width - w2) / 2), (int)(y0 + fs + 2), fs, c);
-}
 
 // ---------------------------------------------------------------------------
 // Keypad.
@@ -243,18 +278,15 @@ static void handle_mouse(Camera2D cam)
 
 static void draw_native(void);
 
-void dsky_draw(Rectangle area)
+// Onto the cockpit panel canvas, in native DSKY units (the caller has set the
+// canvas transform); lit elements glow, scaled by `brightness`.
+void dsky_draw_canvas(float brightness)
 {
-    float scale = area.width / DSKY_W;
-    if (area.height / DSKY_H < scale)
-        scale = area.height / DSKY_H;
-    Camera2D cam = { 0 };
-    cam.zoom = scale;
-    cam.offset = (Vector2){ area.x + (area.width - DSKY_W * scale) / 2,
-                            area.y + (area.height - DSKY_H * scale) / 2 };
-    BeginMode2D(cam);
+    canvas = 1;
+    gain = brightness;
     draw_native();
-    EndMode2D();
+    canvas = 0;
+    gain = 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -274,46 +306,45 @@ void dsky_update_draw(Rectangle area)
     EndMode2D();
 }
 
-// Draw at native DSKY coordinates (0..DSKY_W, 0..DSKY_H) into the current 2D mode.
+// Draw at native DSKY coordinates (0..DSKY_W, 0..DSKY_H) to the current target.
 static void draw_native(void)
 {
     const DskyState *d = agc_host_dsky();
-    DrawRectangleRounded((Rectangle){ 0, 0, DSKY_W, DSKY_H }, 0.03f, 8, EC(C_HOUSING));
+    rbox((Rectangle){ 0, 0, DSKY_W, DSKY_H }, 0.03f, C_HOUSING);
 
     // Indicator lamp panel.
     Rectangle lp = { 16, 16, 230, 468 };
-    DrawRectangleRec(lp, EC(C_PANEL));
+    box(lp, C_PANEL, 0);
     for (int i = 0; i < 14; i++) {
         int col = i % 2, row = i / 2;
         Rectangle r = { lp.x + 10 + col * 108, lp.y + 10 + row * 64, 102, 56 };
         int on = *(const int *)((const char *)d + lamps[i].offset);
-        Color c = on ? (lamps[i].amber ? EL(C_LAMP_AMBER) : EL(C_LAMP_WHITE)) : EC(C_LAMP_OFF);
-        DrawRectangleRec(r, c);
-        draw_multiline_centered(lamps[i].label, r, 14, on ? (Color){ 30, 30, 30, 255 } : (Color){ 36, 38, 38, 255 });
+        box(r, on ? (lamps[i].amber ? C_LAMP_AMBER : C_LAMP_WHITE) : C_LAMP_OFF, on);
+        label(lamps[i].label, r, 14, on ? (Color){ 30, 30, 30, 255 } : (Color){ 140, 142, 138, 255 }, 0);
     }
 
     // EL display panel.
     Rectangle ep = { 262, 16, 242, 468 };
-    DrawRectangleRec(ep, EC(C_PANEL));
-    DrawRectangleRec((Rectangle){ ep.x + 8, ep.y + 8, ep.width - 16, ep.height - 16 }, EC(C_EL_BG));
+    box(ep, C_PANEL, 0);
+    box((Rectangle){ ep.x + 8, ep.y + 8, ep.width - 16, ep.height - 16 }, C_EL_BG, 0);
 
     float dw = 28, dh = 46;  // digit size
     float rx = ep.x + 18;
 
     // COMP ACTY and PROG.
     Rectangle ca = { rx, ep.y + 22, 82, 70 };
-    DrawRectangleRec(ca, d->comp_acty ? EL(C_EL_ON) : EC(C_EL_OFF));
-    draw_multiline_centered("COMP\nACTY", ca, 14, d->comp_acty ? EC(C_EL_BG) : EC((Color){ 40, 60, 46, 255 }));
+    box(ca, d->comp_acty ? C_EL_ON : C_EL_OFF, d->comp_acty);
+    label("COMP\nACTY", ca, 14, d->comp_acty ? C_EL_BG : (Color){ 70, 100, 78, 255 }, 0);
     float px = ep.x + ep.width - 18 - 2 * dw - 10;
-    draw_label("PROG", px, ep.y + 22, 2 * dw + 10, 18, EL(C_EL_LABEL), EC(C_EL_BG));
+    draw_label("PROG", px, ep.y + 22, 2 * dw + 10, 18);
     draw_digit(px, ep.y + 46, dw, dh, segments_for(d->prog[0]));
     draw_digit(px + dw + 10, ep.y + 46, dw, dh, segments_for(d->prog[1]));
 
     // VERB and NOUN (blank while V/N flash is in its off phase).
     float vny = ep.y + 110;
     int vn_on = !d->vn_flash_off;
-    draw_label("VERB", rx, vny, 2 * dw + 10, 18, EL(C_EL_LABEL), EC(C_EL_BG));
-    draw_label("NOUN", px, vny, 2 * dw + 10, 18, EL(C_EL_LABEL), EC(C_EL_BG));
+    draw_label("VERB", rx, vny, 2 * dw + 10, 18);
+    draw_label("NOUN", px, vny, 2 * dw + 10, 18);
     draw_digit(rx, vny + 24, dw, dh, vn_on ? segments_for(d->verb[0]) : 0);
     draw_digit(rx + dw + 10, vny + 24, dw, dh, vn_on ? segments_for(d->verb[1]) : 0);
     draw_digit(px, vny + 24, dw, dh, vn_on ? segments_for(d->noun[0]) : 0);
@@ -323,20 +354,19 @@ static void draw_native(void)
     float ry = vny + 86;
     for (int r = 0; r < 3; r++) {
         float y = ry + r * 84;
-        DrawRectangleRec((Rectangle){ rx, y, ep.width - 36, 4 }, EL(C_EL_LABEL));
+        box((Rectangle){ rx, y, ep.width - 36, 4 }, C_EL_LABEL, 1);
         y += 16;
         draw_sign(rx, y, 26, dh, d->sign[r]);
         for (int j = 0; j < 5; j++)
             draw_digit(rx + 34 + j * (dw + 8), y, dw, dh, segments_for(d->reg[r][j]));
     }
 
-    // Keypad.
+    // Keypad (the legends are back-lit in the cabin).
     for (int i = 0; i < 19; i++) {
         int down = key_flash[i] > 0 || i == mouse_held_key || (keys[i].code == PRO_CODE && pro_down);
         Rectangle r = key_rect(&keys[i]);
-        DrawRectangleRounded(r, 0.12f, 6, down ? EC(C_KEY_DOWN) : EC(C_KEY));
-        DrawRectangleRoundedLinesEx(r, 0.12f, 6, 2, EC((Color){ 20, 20, 20, 255 }));
-        int fs = strlen(keys[i].label) > 2 ? 16 : 28;
-        draw_multiline_centered(keys[i].label, r, fs, EC(C_KEY_TEXT));
+        rbox(r, 0.12f, down ? C_KEY_DOWN : C_KEY);
+        rbox_lines(r, 0.12f, 2, (Color){ 20, 20, 20, 255 });
+        label(keys[i].label, r, strlen(keys[i].label) > 2 ? 17 : 30, C_KEY_TEXT, 0.45f);
     }
 }

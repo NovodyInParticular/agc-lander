@@ -9,7 +9,7 @@
 #include "raylib.h"
 
 // Tileable surface map by name ("lm_panel", "lm_foil", "lm_blanket", "rock",
-// "cabin", "cabin_wall"): repeat wrap, full mip chain, anisotropic filtering. Logs and
+// "cabin", "cabin_wall", "regolith"): repeat wrap, full mip chain, anisotropic filtering. Logs and
 // returns a 1x1 neutral map if the asset cannot be loaded, so a missing
 // texture is always reported and never shows as garbage.
 Texture2D assets_texture(const char *name);
