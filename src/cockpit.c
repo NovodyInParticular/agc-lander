@@ -896,6 +896,7 @@ static V3 look_dir_body(void)
 
 void cockpit_set_seat(int lmp) { seat = lmp ? 1 : 0; }
 void cockpit_set_view(double yaw_deg, double pitch_deg) { head_yaw = yaw_deg * DEG; head_pitch = pitch_deg * DEG; }
+void cockpit_set_fov(double fov_deg) { fov = fov_deg * DEG; }
 
 void cockpit_input(int w, int h)
 {

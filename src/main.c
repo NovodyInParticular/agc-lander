@@ -15,6 +15,13 @@ __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void *module, c
 #include "raymath.h"
 #include "rlgl.h"
 
+// AGC_PERF=1: print per-section frame timings once a second (GPU-synced).
+extern void *glfwGetProcAddress(const char *);
+static void (*perf_finish)(void);
+static int perf_on;
+static double perf_t[8], perf_n;
+static double perf_mark(void) { if (perf_on) { rlDrawRenderBatchActive(); if (!perf_finish) perf_finish = (void (*)(void))glfwGetProcAddress("glFinish"); perf_finish(); } return GetTime(); }
+
 #include "agc_host.h"
 #include "cockpit.h"
 #include "sky_extras.h"
@@ -64,6 +71,7 @@ typedef struct {
     int host;              // two players: host as Commander
     const char *join;      // two players: join this host as LM Pilot
     int crash;             // test: cut the engine when the flight starts (screenshots)
+    const char *audit;     // directory: render the fixed set of exterior + cockpit views there, then quit
 } Options;
 
 static void parse_args(int argc, char **argv, Options *o)
@@ -85,6 +93,7 @@ static void parse_args(int argc, char **argv, Options *o)
     for (int i = 1; i + 1 < argc; i++) {
         if (!strcmp(argv[i], "--shot")) o->shot = argv[++i];
         else if (!strcmp(argv[i], "--after")) o->after = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--audit")) o->audit = argv[++i];
         else if (!strcmp(argv[i], "--start")) o->start = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--camera")) o->camera = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--warp")) o->warp = atof(argv[++i]);
@@ -113,14 +122,30 @@ static double surface_cb(void *ctx, double lat, double lon)
     return terrain_radius_at(lat, lon);
 }
 
+// Surface audit (--audit): the LM is shown parked upright on the landing site,
+// facing west as Eagle did, whatever the simulation is doing.
+static int pose_override;
+static V3 pose_pos;
+static M3 pose_rot;
+
+static void pose_park(void)
+{
+    pose_pos = terrain_plane_to_site(0, 0, terrain_height(0, 0, 0) + 2.75);
+    // Body X (up) -> site +Y, body Y (right) -> north (-Z), body Z (forward) -> west (-X).
+    pose_rot = m3_rows(v3(0, 0, -1), v3(1, 0, 0), v3(0, -1, 0));
+    pose_override = 1;
+}
+
 static V3 lm_site_pos(void)
 {
+    if (pose_override) return pose_pos;
     V3 fixed = moon_inertial_to_fixed(lm.r, lm.t + lm.tephem);
     return terrain_fixed_to_site(fixed);
 }
 
 static M3 lm_site_rot(void)
 {
+    if (pose_override) return pose_rot;
     M3 s = terrain_site_from_fixed();
     M3 m = moon_matrix(lm.t + lm.tephem);
     return m3_mul(s, m3_mul(m, q4_to_m3(lm.q)));
@@ -264,7 +289,8 @@ static void draw_world(const ViewCam *cam, int w, int h, float film, int camera)
     double ground_dist = lm.altitude + 2.75;
     V3 ground = v3_sub(v3_add(lm_pos, v3_scale(up, -ground_dist)), cam->pos);
     float dust = 0;
-    if (lm.thrust > 500 && lm.altitude < 70)
+    if (pose_override) ground_dist = 2.75;
+    if (!pose_override && lm.thrust > 500 && lm.altitude < 70)
         dust = (float)fmin(1.0, pow(1.0 - lm.altitude / 70.0, 1.3) * lm.thrust / 11000.0);
     float crash_age = lm.land_result == LAND_CRASH ? (float)(lm.t - lm.crash_t) : -1.0f;
     if (crash_age >= 0 && crash_age < 8) {
@@ -287,9 +313,9 @@ static void draw_world(const ViewCam *cam, int w, int h, float film, int camera)
     render_set_lm_extras(0.0f, 1.0f, NULL, NULL, 0);
 
     LmFx fx = { 0 };
-    fx.thrust = (float)lm.thrust;
+    fx.thrust = pose_override ? 0 : (float)lm.thrust;
     for (int j = 0; j < LM_NJETS; j++) {
-        fx.jet[j] = lm.jet_level[j];
+        fx.jet[j] = pose_override ? 0 : lm.jet_level[j];
         fx.jet_pos[j] = lm_jet_position(j);
         fx.jet_dir[j] = lm_jet_direction(j);
     }
@@ -535,10 +561,33 @@ static void spawn_outside_view(void)
     if (system(cmd) != 0) TraceLog(LOG_WARNING, "could not start the outside view");
 }
 
+// --audit views: exterior all round (chase camera: yaw rad, pitch rad, distance m)
+// and the cabin from the Commander's seat (head yaw deg, pitch deg, fov deg).
+typedef struct { const char *name; int cockpit; double a, b, c; } AuditView;
+static const AuditView audit_views[] = {
+    { "ext_01_front", 0, 3.14159, 0.10, 13 },      { "ext_02_front_right", 0, 2.35619, 0.22, 13 },
+    { "ext_03_right", 0, 1.57080, 0.10, 13 },      { "ext_04_aft_right", 0, 0.78540, 0.22, 13 },
+    { "ext_05_aft", 0, 0.0, 0.10, 13 },            { "ext_06_aft_left", 0, -0.78540, 0.22, 13 },
+    { "ext_07_left", 0, -1.57080, 0.10, 13 },      { "ext_08_front_left", 0, -2.35619, 0.22, 13 },
+    { "ext_09_top", 0, 2.6, 1.15, 12 },            { "ext_10_low", 0, -2.0, -0.12, 11 },
+    { "ext_11_close_front", 0, 2.9, 0.30, 6.5 },   { "ext_12_close_aft", 0, -0.4, 0.32, 6.5 },
+    { "ext_13_close_left", 0, -1.9, 0.25, 6.5 },   { "ext_14_close_right", 0, 1.2, 0.25, 6.5 },
+    { "ck_01_window", 1, 0, -36, 80 },             { "ck_02_panels_1_2", 1, 22, -38, 62 },
+    { "ck_03_panel_1", 1, 14, -42, 34 },           { "ck_04_tapes", 1, 21, -40, 16 },
+    { "ck_05_panel_3_dsky", 1, 30, -64, 62 },      { "ck_06_dsky", 1, 36, -70, 28 },
+    { "ck_07_panel_5", 1, -8, -68, 40 },           { "ck_08_left_wall", 1, -80, -25, 80 },
+    { "ck_09_right_side", 1, 75, -25, 80 },        { "ck_10_overhead", 1, 0, 55, 80 },
+    { "ck_11_aft", 1, 150, -15, 80 },              { "ck_12_floor", 1, 60, -75, 80 },
+};
+#define N_AUDIT ((int)(sizeof audit_views / sizeof audit_views[0]))
+
 int main(int argc, char **argv)
 {
     Options opt;
     parse_args(argc, argv, &opt);
+    if (opt.audit && opt.start < 0) opt.start = 3;
+    int capture = opt.shot || opt.audit;
+    int audit_i = -1, audit_frames = 0;
 
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT | FLAG_MSAA_4X_HINT);
     InitWindow(1600, 900, opt.spectator ? "AGC Lander - Outside View" : "AGC Lander - Apollo 11 / Luminary099");
@@ -551,7 +600,7 @@ int main(int argc, char **argv)
         else snprintf(self_exe, sizeof self_exe, "%s", argv[0]);
     }
 #endif
-    if (!opt.shot && !opt.windowed) set_fullscreen(1, opt.monitor);
+    if (!capture && !opt.windowed) set_fullscreen(1, opt.monitor);
     else if (opt.monitor >= 0 && opt.monitor < GetMonitorCount()) SetWindowMonitor(opt.monitor);
     int outside_on = 0;
     double last_pkt = 0;
@@ -623,16 +672,18 @@ int main(int argc, char **argv)
     }
 
     RenderTexture2D shot_rt = { 0 };
-    if (opt.shot) shot_rt = LoadRenderTexture(1920, 1080);
+    if (capture) shot_rt = LoadRenderTexture(1920, 1080);
 
+    perf_on = getenv("AGC_PERF") != NULL;
     while (!WindowShouldClose()) {
+        double pf0 = perf_on ? perf_mark() : 0, pf1 = 0, pf2 = 0, pf3 = 0, pf4 = 0;
         float dt = GetFrameTime();
         if (dt > 0.1f) dt = 0.1f;
         wall += dt;
         int w = GetScreenWidth(), h = GetScreenHeight();
-        if (opt.shot) { w = 1920; h = 1080; }
+        if (capture) { w = 1920; h = 1080; }
         render_set_output(w, h);
-        render_set_output_fbo(opt.shot ? shot_rt.id : 0);
+        render_set_output_fbo(capture ? shot_rt.id : 0);
         // The DSKY floats over the bottom-right corner; the 3D view always fills the screen.
         int dsky_w = (show_dsky && gs != GS_MENU) ? (int)(h * 0.30f) : 0;
 
@@ -885,7 +936,23 @@ int main(int argc, char **argv)
         }
         (void)manual_takeover;
 
+        // Surface audit: park the LM, hide the overlays, step through the views.
+        if (opt.audit && gs == GS_FLY) {
+            if (audit_i < 0) { audit_i = 0; audit_frames = 0; pose_park(); paused = 1; show_hud = 0; show_dsky = 0; }
+            const AuditView *av = &audit_views[audit_i];
+            if (av->cockpit) {
+                camera = CAM_CDR;
+                cockpit_set_view(av->a, av->b);
+                cockpit_set_fov(av->c);
+            } else {
+                camera = CAM_CHASE;
+                orbit_yaw = av->a; orbit_pitch = av->b; orbit_dist = av->c;
+            }
+            prev_camera = camera;
+        }
+
         // ---------------- Rendering ----------------
+        if (perf_on) pf1 = perf_mark();
         if (!opt.spectator && gs != GS_MENU) dsky_frame();
         int scene_w0 = w;
         if (opt.look_set) { cockpit_set_view(opt.look_yaw, opt.look_pitch); opt.look_set = 0; }
@@ -903,13 +970,16 @@ int main(int argc, char **argv)
         float film_now = film > 0 || camera == CAM_DAC ? 1.0f : 0.0f;
         if ((show_hud && gs != GS_MENU) || camera == CAM_CDR) hud_prepare();
         if (gs != GS_MENU && !opt.spectator) cockpit_update(dt);
+        if (perf_on) pf2 = perf_mark();
         if (camera == CAM_CDR) cockpit_prepare(lm_site_rot(), sun_site, local_up_at(lm_site_pos()), dt);
+        if (perf_on) pf3 = perf_mark();
         BeginDrawing();
-        if (opt.shot) BeginTextureMode(shot_rt);
+        if (capture) BeginTextureMode(shot_rt);
         ClearBackground(BLACK);
         int scene_w = w;
         draw_world(&cam, scene_w > 64 ? scene_w : w, h, film_now, gs == GS_MENU ? CAM_CHASE : camera);
         (void)draw_lpd;
+        if (perf_on) pf4 = perf_mark();
 
         if (gs == GS_MENU) {
             DrawRectangleGradientV(0, 0, w, h, (Color){ 0, 0, 0, 120 }, (Color){ 0, 0, 0, 230 });
@@ -945,7 +1015,7 @@ int main(int argc, char **argv)
             if (gs == GS_FLY && lm.land_result != LAND_NONE && !lm.dps_on && !results_hidden &&
                 lm.t - (lm.land_result == LAND_CRASH ? lm.crash_t : lm.touchdown_t) > 3)
                 draw_results(scene_w, h, coop_role == COOP_CLIENT);
-            if (camera == CAM_CDR && gs == GS_FLY) cockpit_overlay(scene_w, h);
+            if (camera == CAM_CDR && gs == GS_FLY && !opt.audit) cockpit_overlay(scene_w, h);
             if (coop_role != COOP_OFF) {
                 float sc = h / 1080.0f;
                 if (sc < 0.7f) sc = 0.7f;
@@ -992,12 +1062,28 @@ int main(int argc, char **argv)
                              i == coop_first ? (Color){ 120, 220, 255, 255 } : (Color){ 220, 224, 230, 255 });
             }
         }
-        if (opt.shot) {
+        if (capture) {
             EndTextureMode();
             DrawTexturePro(shot_rt.texture, (Rectangle){ 0, 0, 1920, -1080 },
                            (Rectangle){ 0, 0, (float)GetScreenWidth(), (float)GetScreenHeight() }, (Vector2){ 0, 0 }, 0, WHITE);
         }
-        EndDrawing();
+        if (perf_on) {
+            double pf5 = perf_mark();
+            EndDrawing();
+            double pf6 = GetTime();
+            double d[6] = { pf1 - pf0, pf2 - pf1, pf3 - pf2, pf4 - pf3, pf5 - pf4, pf6 - pf5 };
+            for (int i = 0; i < 6; i++) perf_t[i] += d[i];
+            perf_n++;
+            if (perf_n >= 60) {
+                fprintf(stderr, "PERF %dx%d cam=%d fps=%d  sim %.1f  pre %.1f  ckatlas %.1f  world %.1f  hud %.1f  swap %.1f ms\n",
+                        w, h, camera, GetFPS(), perf_t[0] / perf_n * 1e3, perf_t[1] / perf_n * 1e3, perf_t[2] / perf_n * 1e3,
+                        perf_t[3] / perf_n * 1e3, perf_t[4] / perf_n * 1e3, perf_t[5] / perf_n * 1e3);
+                memset(perf_t, 0, sizeof perf_t);
+                perf_n = 0;
+            }
+        } else {
+            EndDrawing();
+        }
 
         if (getenv("AGC_DBG") && ((int)(wall * 2) != (int)((wall - dt) * 2))) {
             int dn, ld, pd;
@@ -1012,6 +1098,16 @@ int main(int argc, char **argv)
             pack_state(&p, 0);
             if (outside_on) net_send(&p, sizeof p);
             if (coop_role == COOP_HOST && gs != GS_MENU) coop_host_send_state(&p, sizeof p);
+        }
+        if (opt.audit && audit_i >= 0 && ++audit_frames >= (audit_i == 0 ? 120 : 10)) {
+            char path[1200];
+            snprintf(path, sizeof path, "%s/%s.png", opt.audit, audit_views[audit_i].name);
+            Image img = LoadImageFromTexture(shot_rt.texture);
+            ImageFlipVertical(&img);
+            ExportImage(img, path);
+            UnloadImage(img);
+            audit_frames = 0;
+            if (++audit_i >= N_AUDIT) break;
         }
         if (opt.shot && wall >= opt.after) {
             Image img = LoadImageFromTexture(shot_rt.texture);

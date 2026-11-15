@@ -12,10 +12,12 @@ ROPE    := build/Luminary099.bin
 ROPE_C  := build/rope_luminary099.c
 SYMS_C  := build/agc_symbols.c
 FONTS_C := build/font_jbm.c build/font_rc.c build/font_rcb.c
+# Baked surface maps (tools/bake_textures.py), embedded in the PC executables.
+TEX_NAMES := lm_panel lm_foil lm_blanket rock cabin
 
 AGC_CORE := $(VAGC)/yaAGC/agc_engine.c $(VAGC)/yaAGC/agc_engine_init.c $(VAGC)/yaAGC/agc_utilities.c
 HOST     := src/agc_host.c src/agc_mem.c src/moon.c src/lm.c src/coop.c src/net.c $(ROPE_C) $(SYMS_C)
-GAME     := src/main.c src/dsky.c src/scenario.c src/crew.c src/hints.c src/terrain.c src/render.c src/lmmodel.c src/hud.c src/cockpit.c src/cockpit_panels.c src/sky_extras.c src/controls.c src/rocks.c data/a11_pdi_lgc.c $(FONTS_C)
+GAME     := src/main.c src/dsky.c src/scenario.c src/crew.c src/hints.c src/terrain.c src/render.c src/lmmodel.c src/hud.c src/cockpit.c src/cockpit_panels.c src/sky_extras.c src/controls.c src/rocks.c src/assets.c data/a11_pdi_lgc.c $(FONTS_C)
 
 # Vendor core: build quietly, it predates modern warning sets.
 CORE_FLAGS := -O2 -w -I$(VAGC)/yaAGC
@@ -25,7 +27,7 @@ LINUX_CC   := gcc
 WIN_CC     := x86_64-w64-mingw32-gcc
 WIN_AR     := x86_64-w64-mingw32-ar
 
-.PHONY: all linux windows test test-wine rope clean distclean install uninstall dist
+.PHONY: all linux windows test test-wine rope clean distclean install uninstall dist textures
 
 all: linux
 
@@ -57,6 +59,24 @@ build/font_rcb.c: data/fonts/RobotoCondensed-Bold.ttf tools/embed_bin.py
 	@mkdir -p $(dir $@)
 	python3 -I tools/embed_bin.py $< font_rcb $@
 
+# Surface maps: embedded as C arrays, compiled once per platform.
+.PRECIOUS: build/tex_%.c
+build/tex_%.c: data/textures/%.png tools/embed_bin.py
+	@mkdir -p $(dir $@)
+	python3 -I tools/embed_bin.py $< tex_$* $@
+build/linux/tex_%.o: build/tex_%.c
+	@mkdir -p $(dir $@)
+	$(LINUX_CC) -c -o $@ $<
+build/win/tex_%.o: build/tex_%.c
+	@mkdir -p $(dir $@)
+	$(WIN_CC) -c -o $@ $<
+LINUX_TEX := $(TEX_NAMES:%=build/linux/tex_%.o)
+WIN_TEX   := $(TEX_NAMES:%=build/win/tex_%.o)
+
+# Re-bake the surface maps (needs numpy + Pillow); the results are committed.
+textures:
+	python3 tools/bake_textures.py data/textures
+
 rope: $(ROPE)
 
 # ---- raylib static libraries.
@@ -83,8 +103,8 @@ linux: build/linux/agc-lander build/linux/agc-selftest build/linux/agc-lab
 build/linux/agc-lab: src/lab.c src/scenario.c src/crew.c data/a11_pdi_lgc.c $(HOST) src/*.h build/linux/core.a
 	$(LINUX_CC) $(APP_FLAGS) -o $@ src/lab.c src/scenario.c src/crew.c data/a11_pdi_lgc.c $(HOST) build/linux/core.a -lm
 
-build/linux/agc-lander: $(GAME) $(HOST) src/*.h build/linux/core.a build/raylib-linux/libraylib.a
-	$(LINUX_CC) $(APP_FLAGS) -o $@ $(GAME) $(HOST) build/linux/core.a build/raylib-linux/libraylib.a -lm -lpthread -ldl
+build/linux/agc-lander: $(GAME) $(HOST) src/*.h build/linux/core.a build/raylib-linux/libraylib.a $(LINUX_TEX)
+	$(LINUX_CC) $(APP_FLAGS) -o $@ $(GAME) $(HOST) $(LINUX_TEX) build/linux/core.a build/raylib-linux/libraylib.a -lm -lpthread -ldl
 
 build/linux/agc-selftest: src/selftest.c $(HOST) src/agc_host.h build/linux/core.a
 	$(LINUX_CC) $(APP_FLAGS) -o $@ src/selftest.c $(HOST) build/linux/core.a -lm
@@ -103,8 +123,8 @@ WIN_LINK := -static -lopengl32 -lgdi32 -lwinmm -lws2_32 -lpthread
 
 windows: build/win/agc-lander.exe build/win/agc-selftest.exe
 
-build/win/agc-lander.exe: $(GAME) $(HOST) src/*.h build/win/core.a build/raylib-win/libraylib.a
-	$(WIN_CC) $(APP_FLAGS) -DWIN32 -mwindows -o $@ $(GAME) $(HOST) build/win/core.a build/raylib-win/libraylib.a $(WIN_LINK)
+build/win/agc-lander.exe: $(GAME) $(HOST) src/*.h build/win/core.a build/raylib-win/libraylib.a $(WIN_TEX)
+	$(WIN_CC) $(APP_FLAGS) -DWIN32 -mwindows -o $@ $(GAME) $(HOST) $(WIN_TEX) build/win/core.a build/raylib-win/libraylib.a $(WIN_LINK)
 
 build/win/agc-selftest.exe: src/selftest.c $(HOST) src/agc_host.h build/win/core.a
 	$(WIN_CC) $(APP_FLAGS) -DWIN32 -o $@ src/selftest.c $(HOST) build/win/core.a -static -lws2_32
