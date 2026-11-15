@@ -31,6 +31,9 @@ void cockpit_overlay(int scene_w, int scene_h);
 // Set head yaw/pitch in degrees (0,0 = looking straight ahead).
 void cockpit_set_view(double yaw_deg, double pitch_deg);
 void cockpit_set_fov(double fov_deg);
+// Aim at a point on panel `panel` (u, v = 0..1 across and down it); fov_deg <= 0 frames the whole panel.
+int cockpit_panel_count(void);
+void cockpit_look_at_panel(int panel, double u, double v, double fov_deg, double aspect);
 void cockpit_set_seat(int lmp);   // 0 Commander, 1 LM Pilot
 
 // Hand controller deflections for the 3D ACA (-1..1).

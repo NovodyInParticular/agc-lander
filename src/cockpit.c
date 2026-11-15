@@ -18,6 +18,7 @@
 #include "raymath.h"
 #include "rlgl.h"
 
+#include "assets.h"
 #include "cockpit.h"
 #include "cockpit_int.h"
 #include "hud.h"
@@ -72,7 +73,7 @@ static const V3 EYE_LMP = { 2.84, 0.66, 0.30 };
 
 // --- Mesh builder --------------------------------------------------------------------
 
-enum { M_PANEL = 1, M_PAINT, M_METAL, M_BLACK, M_EMIT, M_ETCH, M_GLASS };
+enum { M_PANEL = 1, M_PAINT, M_METAL, M_BLACK, M_EMIT, M_ETCH, M_GLASS, M_WALL };   // M_WALL: pressure-shell structure
 
 typedef struct {
     float *p, *n, *t;
@@ -284,7 +285,7 @@ static void build_front_wall(void)
             if (in_window(y0, s0) || in_window(y1, s0) || in_window(y0, s1) || in_window(y1, s1) ||
                 in_window((y0 + y1) / 2, (s0 + s1) / 2))
                 continue;
-            quad(int_pt(y0, s0), int_pt(y1, s0), int_pt(y1, s1), int_pt(y0, s1), K_WALL, M_PAINT);
+            quad(int_pt(y0, s0), int_pt(y1, s0), int_pt(y1, s1), int_pt(y0, s1), K_WALL, M_WALL);
         }
     // Window wells and frames.
     for (int side = -1; side <= 1; side += 2) {
@@ -324,15 +325,15 @@ static void build_shell(void)
         double z = -0.9 + i * 0.3;
         box(v3(F, -0.95, z), v3(F + 0.004, 0.95, z + 0.02), K_BLACK, M_BLACK);   // floor rails
     }
-    quad(v3(F, -H, A), v3(F, H, A), v3(C, H, A), v3(C, -H, A), K_WALL, M_PAINT);
+    quad(v3(F, -H, A), v3(F, H, A), v3(C, H, A), v3(C, -H, A), K_WALL, M_WALL);
     // Lower forward wall (hatch) and upper bevel.
-    quad(v3(F, -H, 1.00), v3(2.00, -H, 1.00), v3(2.00, H, 1.00), v3(F, H, 1.00), K_WALL, M_PAINT);
-    quad(int_pt(-H, 1.199), int_pt(H, 1.199), v3(C, H, 0.10), v3(C, -H, 0.10), K_WALL, M_PAINT);
+    quad(v3(F, -H, 1.00), v3(2.00, -H, 1.00), v3(2.00, H, 1.00), v3(F, H, 1.00), K_WALL, M_WALL);
+    quad(int_pt(-H, 1.199), int_pt(H, 1.199), v3(C, H, 0.10), v3(C, -H, 0.10), K_WALL, M_WALL);
     // Ceiling with the docking-window opening.
-    quad(v3(C, -H, A), v3(C, H, A), v3(C, H, DW_Z0), v3(C, -H, DW_Z0), K_WALL, M_PAINT);
-    quad(v3(C, -H, DW_Z1), v3(C, H, DW_Z1), v3(C, H, 0.10), v3(C, -H, 0.10), K_WALL, M_PAINT);
-    quad(v3(C, -H, DW_Z0), v3(C, DW_Y0, DW_Z0), v3(C, DW_Y0, DW_Z1), v3(C, -H, DW_Z1), K_WALL, M_PAINT);
-    quad(v3(C, DW_Y1, DW_Z0), v3(C, H, DW_Z0), v3(C, H, DW_Z1), v3(C, DW_Y1, DW_Z1), K_WALL, M_PAINT);
+    quad(v3(C, -H, A), v3(C, H, A), v3(C, H, DW_Z0), v3(C, -H, DW_Z0), K_WALL, M_WALL);
+    quad(v3(C, -H, DW_Z1), v3(C, H, DW_Z1), v3(C, H, 0.10), v3(C, -H, 0.10), K_WALL, M_WALL);
+    quad(v3(C, -H, DW_Z0), v3(C, DW_Y0, DW_Z0), v3(C, DW_Y0, DW_Z1), v3(C, -H, DW_Z1), K_WALL, M_WALL);
+    quad(v3(C, DW_Y1, DW_Z0), v3(C, H, DW_Z0), v3(C, H, DW_Z1), v3(C, DW_Y1, DW_Z1), K_WALL, M_WALL);
     // Docking window well.
     double xo = 3.39;
     quad(v3(C, DW_Y0, DW_Z0), v3(xo, DW_Y0, DW_Z0), v3(xo, DW_Y1, DW_Z0), v3(C, DW_Y1, DW_Z0), K_CONSOLE, M_PAINT);
@@ -346,10 +347,10 @@ static void build_shell(void)
         for (int i = 0; i < 6; i++) {
             int j = (i + 1) % 6;
             V3 c = v3(2.35, side * H, -0.10);
-            tri(c, v3(px[i], side * H, pz[i]), v3(px[j], side * H, pz[j]), K_WALL, M_PAINT);
+            tri(c, v3(px[i], side * H, pz[i]), v3(px[j], side * H, pz[j]), K_WALL, M_WALL);
         }
     // Slanted front wall edge closure between the lower wall and the slant.
-    quad(v3(2.00, -H, 1.00), v3(2.00, H, 1.00), int_pt(H, 0.01825), int_pt(-H, 0.01825), K_WALL, M_PAINT);
+    quad(v3(2.00, -H, 1.00), v3(2.00, H, 1.00), int_pt(H, 0.01825), int_pt(-H, 0.01825), K_WALL, M_WALL);
     build_front_wall();
 }
 
@@ -431,7 +432,7 @@ static void build_details(void)
     box(v3(1.55, 0.16, 0.955), v3(1.57, 0.20, 0.975), K_METAL, M_METAL);
 
     // Overhead (docking) hatch with its handle.
-    tube(v3(CABIN_CEIL - 0.002, 0, -0.30), v3(CABIN_CEIL - 0.03, 0, -0.30), 0.42, 0.40, 40, K_WALL, M_PAINT, 1);
+    tube(v3(CABIN_CEIL - 0.002, 0, -0.30), v3(CABIN_CEIL - 0.03, 0, -0.30), 0.42, 0.40, 40, K_WALL, M_WALL, 1);
     tube(v3(CABIN_CEIL - 0.03, -0.12, -0.30), v3(CABIN_CEIL - 0.03, 0.12, -0.30), 0.015, 0.015, 8, K_METAL, M_METAL, 1);
     for (int k = 0; k < 12; k++) {
         double a = k * 2 * PI_D / 12;
@@ -440,12 +441,12 @@ static void build_details(void)
     }
 
     // Ascent engine cover between the crew stations (aft).
-    tube(v3(CABIN_FLOOR, 0, -0.82), v3(1.86, 0, -0.82), 0.44, 0.44, 40, K_WALL, M_PAINT, 0);
-    tube(v3(1.86, 0, -0.82), v3(1.94, 0, -0.82), 0.44, 0.36, 40, K_WALL, M_PAINT, 1);
+    tube(v3(CABIN_FLOOR, 0, -0.82), v3(1.86, 0, -0.82), 0.44, 0.44, 40, K_WALL, M_WALL, 0);
+    tube(v3(1.86, 0, -0.82), v3(1.94, 0, -0.82), 0.44, 0.36, 40, K_WALL, M_WALL, 1);
     box(v3(1.94, -0.12, -0.95), v3(1.96, 0.12, -0.70), K_CLOTH, M_PAINT);   // stowed checklist pad
 
     // Aft equipment: ECS package, LiOH canisters, hoses, PLSS stowage.
-    box(v3(1.95, -0.60, -1.24), v3(2.90, 0.60, -1.05), K_WALL, M_PAINT);
+    box(v3(1.95, -0.60, -1.24), v3(2.90, 0.60, -1.05), K_WALL, M_WALL);
     tube(v3(2.20, -0.45, -1.04), v3(2.60, -0.45, -1.04), 0.07, 0.07, 18, K_METAL, M_METAL, 1);
     tube(v3(2.20, -0.25, -1.04), v3(2.60, -0.25, -1.04), 0.07, 0.07, 18, K_METAL, M_METAL, 1);
     box(v3(2.15, 0.10, -1.06), v3(2.70, 0.50, -0.98), K_BLACK, M_BLACK);
@@ -655,6 +656,15 @@ static const char *ck_fs =
     "#version 330\n"
     "in vec3 bodyPos; in vec3 bodyN; in vec2 uv; in vec4 vcol; in vec3 camPos;\n"
     "uniform sampler2D texture0; uniform sampler2D texture1; uniform sampler2D texture2;\n"
+    "uniform sampler2D cabinMap; uniform sampler2D wallMap;\n"
+    "vec4 triMap(sampler2D t, vec3 p, vec3 n, out vec3 bump){\n"
+    "  vec3 w = abs(n); w = w * w; w = w * w * w; w /= (w.x + w.y + w.z);\n"
+    "  vec3 dx = dFdx(p), dy = dFdy(p); vec4 s = vec4(0.0); bump = vec3(0.0);\n"
+    "  if (w.x > 0.004) { vec4 c = textureGrad(t, p.yz, dx.yz, dy.yz); s += c * w.x; bump += vec3(0.0, c.rg * 2.0 - 1.0) * w.x; }\n"
+    "  if (w.y > 0.004) { vec4 c = textureGrad(t, p.xz, dx.xz, dy.xz); s += c * w.y; bump += vec3(c.r * 2.0 - 1.0, 0.0, c.g * 2.0 - 1.0) * w.y; }\n"
+    "  if (w.z > 0.004) { vec4 c = textureGrad(t, p.xy, dx.xy, dy.xy); s += c * w.z; bump += vec3(c.rg * 2.0 - 1.0, 0.0) * w.z; }\n"
+    "  return s;\n"
+    "}\n"
     "uniform mat4 shadowVP2; uniform vec3 shadowC2; uniform vec3 sunB; uniform float sunOn; uniform vec3 eyeB;\n"
     "uniform vec3 winC[3]; uniform vec3 winN[3]; uniform float winA[3]; uniform vec3 winL[3];\n"
     "uniform vec3 lampP[3]; uniform vec3 lampC[3];\n"
@@ -683,6 +693,12 @@ static const char *ck_fs =
     "  if (mat == 254) { float a = texture(texture0, uv).r; finalColor = vec4(vec3(0.03) * exposure, a * 0.85); return; }\n"
     "  if (mat == 6) { finalColor = vec4(vec3(0.03) * exposure, 0.85); return; }\n"
     "  float specK = mat == 3 ? 0.55 : mat == 1 ? 0.06 : mat == 4 ? 0.05 : 0.03;\n"
+    "  // Painted surfaces and the pressure shell take their relief, wear and sheen from the baked maps.\n"
+    "  if (mat == 2 || mat == 4 || mat == 8) {\n"
+    "    vec3 b; vec4 sm;\n"
+    "    if (mat == 8) sm = triMap(wallMap, bodyPos / 0.90, N, b); else sm = triMap(cabinMap, bodyPos / 0.60, N, b);\n"
+    "    alb *= sm.a * 2.0; N = normalize(N + b); specK *= clamp(1.0 - 3.0 * (sm.b - 0.5), 0.4, 2.2);\n"
+    "  }\n"
     "  float shin = mat == 3 ? 80.0 : 14.0;\n"
     "  vec3 col = vec3(0.0);\n"
     "  float NL = max(dot(N, sunB), 0.0) * sunOn;\n"
@@ -780,6 +796,10 @@ void cockpit_init(void)
     ck_mat.shader = ck_sh;
     ck_mat.maps[MATERIAL_MAP_DIFFUSE].texture = atlas_rt.texture;
     ck_mat.maps[MATERIAL_MAP_SPECULAR].texture = emit_rt.texture;
+    ck_sh.locs[SHADER_LOC_MAP_ROUGHNESS] = GetShaderLocation(ck_sh, "cabinMap");
+    ck_sh.locs[SHADER_LOC_MAP_OCCLUSION] = GetShaderLocation(ck_sh, "wallMap");
+    ck_mat.maps[MATERIAL_MAP_ROUGHNESS].texture = assets_texture("cabin");
+    ck_mat.maps[MATERIAL_MAP_OCCLUSION].texture = assets_texture("cabin_wall");
 
     sh2_fbo = rlLoadFramebuffer();
     rlEnableFramebuffer(sh2_fbo);
@@ -897,6 +917,32 @@ static V3 look_dir_body(void)
 void cockpit_set_seat(int lmp) { seat = lmp ? 1 : 0; }
 void cockpit_set_view(double yaw_deg, double pitch_deg) { head_yaw = yaw_deg * DEG; head_pitch = pitch_deg * DEG; }
 void cockpit_set_fov(double fov_deg) { fov = fov_deg * DEG; }
+
+int cockpit_panel_count(void) { return NPANELS; }
+
+// Aim the head at a point on a panel (u, v = 0..1 across and down it).
+// fov_deg <= 0 frames the whole panel for the given aspect ratio.
+void cockpit_look_at_panel(int panel, double u, double v, double fov_deg, double aspect)
+{
+    if (panel < 0 || panel >= NPANELS) return;
+    const PanelDef *p = &cp_panels[panel];
+    V3 eu = v3_sub(p->tr, p->tl), ev = v3_sub(p->bl, p->tl);
+    V3 e = eye_body();
+    V3 d = v3_norm(v3_sub(v3_add(p->tl, v3_add(v3_scale(eu, u), v3_scale(ev, v))), e));
+    head_pitch = asin(fmax(-1.0, fmin(1.0, d.x)));
+    head_yaw = atan2(d.y, d.z) - (seat ? 6 * DEG : -6 * DEG);
+    if (fov_deg > 0) { fov = fov_deg * DEG; return; }
+    V3 f = look_dir_body();
+    V3 r = v3_norm(v3_cross(f, v3(1, 0, 0)));
+    V3 up = v3_cross(r, f);
+    double need = 0;
+    for (int k = 0; k < 4; k++) {
+        V3 c = v3_sub(v3_add(p->tl, v3_add(v3_scale(eu, k & 1), v3_scale(ev, k >> 1))), e);
+        double z = fmax(0.05, v3_dot(c, f));
+        need = fmax(need, fmax(fabs(v3_dot(c, up)) / z, fabs(v3_dot(c, r)) / z / aspect));
+    }
+    fov = fmin(110 * DEG, 2 * atan(need * 1.08));
+}
 
 void cockpit_input(int w, int h)
 {

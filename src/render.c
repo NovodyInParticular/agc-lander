@@ -10,6 +10,7 @@
 #include "raymath.h"
 #include "rlgl.h"
 
+#include "assets.h"
 #include "render.h"
 
 #define FAR_PLANE 2.0e8
@@ -136,17 +137,26 @@ static const char *lm_vs = GLSL_HEADER LOGZ_VS
     "  fragLogZ = 1.0 + gl_Position.w;\n"
     "}\n";
 
-static const char *lm_fs = GLSL_HEADER LOGZ_FS NOISE_GLSL
+// Surface map (see tools/bake_textures.py): rg = tangent normal, b = roughness
+// offset, a = albedo / 2. Projected along the three object axes and blended by
+// the normal, so the meshes need no texture coordinates. Explicit gradients
+// keep the lookups valid inside branches.
+#define TRIMAP_GLSL \
+    "vec4 triMap(sampler2D t, vec3 p, vec3 n, out vec3 bump){\n" \
+    "  vec3 w = abs(n); w = w * w; w = w * w * w; w /= (w.x + w.y + w.z);\n" \
+    "  vec3 dx = dFdx(p), dy = dFdy(p); vec4 s = vec4(0.0); bump = vec3(0.0);\n" \
+    "  if (w.x > 0.004) { vec4 c = textureGrad(t, p.yz, dx.yz, dy.yz); s += c * w.x; bump += vec3(0.0, c.rg * 2.0 - 1.0) * w.x; }\n" \
+    "  if (w.y > 0.004) { vec4 c = textureGrad(t, p.xz, dx.xz, dy.xz); s += c * w.y; bump += vec3(c.r * 2.0 - 1.0, 0.0, c.g * 2.0 - 1.0) * w.y; }\n" \
+    "  if (w.z > 0.004) { vec4 c = textureGrad(t, p.xy, dx.xy, dy.xy); s += c * w.z; bump += vec3(c.rg * 2.0 - 1.0, 0.0) * w.z; }\n" \
+    "  return s;\n" \
+    "}\n"
+
+static const char *lm_fs = GLSL_HEADER LOGZ_FS
     "in vec3 fragPos; in vec3 fragNormal; in vec4 fragColor; in vec3 objPos; in vec3 objNormal;\n"
     "uniform vec3 sunDir; uniform float exposure; uniform float groundAlbedo;\n"
-    "// Surface detail (no texture maps): planar coordinates on the face's main axis.\n"
-    "vec2 faceUV(vec3 p, vec3 n){ vec3 a = abs(n); return a.x > a.y && a.x > a.z ? p.yz : (a.y > a.z ? p.xz : p.xy); }\n"
-    "// Distance (m) to the nearest panel seam, and the panel's cell id.\n"
-    "float seamDist(vec2 uv, float sp, out vec2 cell){ vec2 q = uv / sp; cell = floor(q); vec2 f = abs(fract(q) - 0.5); return (0.5 - max(f.x, f.y)) * sp; }\n"
-    "// Bump a world normal by a scalar height field (metres) using screen derivatives.\n"
-    "vec3 bump(vec3 N, float h){ vec3 dpx = dFdx(fragPos), dpy = dFdy(fragPos); float hx = dFdx(h), hy = dFdy(h);\n"
-    "  vec3 r1 = cross(dpy, N), r2 = cross(N, dpx); float det = dot(dpx, r1);\n"
-    "  if (abs(det) < 1e-12) return N; vec3 g = sign(det) * (hx * r1 + hy * r2); return normalize(abs(det) * N - g); }\n"
+    "uniform sampler2D texFoil; uniform sampler2D texPanel; uniform sampler2D texBlanket; uniform sampler2D texRock;\n"
+    "uniform mat4 matModel;\n"
+    TRIMAP_GLSL
     "uniform mat4 shadowVP; uniform sampler2D shadowMap; uniform vec3 shadowCenter; uniform float shadowOn;\n"
     "uniform vec3 upDir; uniform float nearCut; uniform float sunGain;\n"
     "uniform vec3 lampPos[4]; uniform vec3 lampCol[4];\n"
@@ -175,57 +185,20 @@ static const char *lm_fs = GLSL_HEADER LOGZ_FS NOISE_GLSL
     "  vec3 N = normalize(fragNormal);\n"
     "  vec3 V = normalize(-fragPos);\n"
     "  if (!gl_FrontFacing) N = -N;\n"
+    "  if (mat == 7) { finalColor = vec4(base * 6.0 * exposure, 1.0); return; }\n"  // emissive
     "  float metal = 0.0, rough = 0.6;\n"
-    "  if (mat == 1) {\n"   // gold / amber kapton foil, crinkled
-    "    float w = fbm3(objPos * 7.0);\n"
-    "    vec3 g = vec3(fbm3(objPos*9.0+1.3), fbm3(objPos*9.0+7.1), fbm3(objPos*9.0+3.7)) - 0.5;\n"
-    "    N = normalize(N + g * 0.32 + (w - 0.5) * 0.12);\n"
-    "    metal = 1.0; rough = 0.30 + 0.18 * w;\n"
-    "    base *= 0.85 + 0.3 * w;\n"
-    "  } else if (mat == 2) { metal = 1.0; rough = 0.35; }\n"          // aluminium / inconel
-    "  else if (mat == 3) { metal = 0.0; rough = 0.8; }\n"             // black paint
-    "  else if (mat == 4) { metal = 0.0; rough = 0.5; }\n"             // white paint
-    "  else if (mat == 5) {\n"                                        // silver/black mylar blanket
-    "    float w = fbm3(objPos * 5.0);\n"
-    "    vec3 g = vec3(fbm3(objPos*8.0+2.3), fbm3(objPos*8.0+5.1), fbm3(objPos*8.0+9.7)) - 0.5;\n"
-    "    N = normalize(N + g * 0.22);\n"
-    "    metal = 1.0; rough = 0.38 + 0.2 * w;\n"
-    "  } else if (mat == 6) { metal = 0.0; rough = 0.15; }\n"          // window glass (dark)
-    "  else if (mat == 7) { finalColor = vec4(base * 6.0 * exposure, 1.0); return; }\n"  // emissive
-    "  // Panel seams, rivets, blanket quilting and panel-to-panel tone, faded out\n"
-    "  // with distance so they never shimmer.\n"
-    "  float px = length(fwidth(objPos));\n"
-    "  float detail = 1.0 - smoothstep(0.03, 0.09, px);\n"
-    "  if (detail > 0.0 && mat >= 1 && mat <= 5) {\n"
-    "    vec3 on = normalize(objNormal);\n"
-    "    vec2 uv = faceUV(objPos, on) + on.zx * 0.37;\n"
-    "    vec2 cell; float h = 0.0;\n"
-    "    if (mat == 2 || mat == 4) {\n"   // riveted sheet-metal panels
-    "      float d = seamDist(uv, 0.42, cell);\n"
-    "      h -= 0.003 * smoothstep(0.012, 0.0, d);\n"
-    "      vec2 r = uv / 0.06; vec2 rf = fract(r) - 0.5;\n"
-    "      float band = smoothstep(0.012, 0.004, abs(d - 0.028));\n"
-    "      float rivet = smoothstep(0.30, 0.12, length(rf)) * (1.0 - smoothstep(0.004, 0.012, px));\n"
-    "      h += 0.002 * band * rivet;\n"
-    "      base *= mix(1.0, 0.8 + 0.4 * hash12(cell + 7.0), detail);\n"
-    "      base *= 1.0 - 0.45 * smoothstep(max(0.008, px * 0.9), 0.0, d) * detail;\n"
-    "    } else if (mat == 5 || mat == 3) {\n"   // quilted thermal blanket / black-coated blanket
-    "      float d = seamDist(uv, 0.30, cell);\n"
-    "      vec2 f = fract(uv / 0.30) - 0.5;\n"
-    "      h += 0.018 * (1.0 - 4.0 * f.x * f.x) * (1.0 - 4.0 * f.y * f.y);\n"
-    "      h -= 0.004 * smoothstep(0.01, 0.0, d);\n"
-    "      base *= mix(1.0, 0.8 + 0.4 * hash12(cell + 3.0), detail);\n"
-    "      base *= 1.0 - 0.4 * smoothstep(max(0.006, px * 0.9), 0.0, d) * detail;\n"
-    "    } else if (mat == 1) {\n"   // kapton sheets joined with tape
-    "      float d = seamDist(uv, 0.55, cell);\n"
-    "      float tape = smoothstep(0.03, 0.022, d);\n"
-    "      base *= 1.0 - 0.4 * smoothstep(max(0.006, px * 0.9), 0.0, d) * detail;\n"
-    "      h += 0.002 * tape;\n"
-    "      base *= mix(1.0, mix(0.82 + 0.3 * hash12(cell + 11.0), 1.1, tape), detail);\n"
-    "      base = mix(base, base * vec3(1.05, 0.92, 0.7), 0.35 * hash12(cell + 5.0) * detail);\n"
-    "    }\n"
-    "    N = normalize(mix(N, bump(N, h), detail));\n"
-    "  }\n"
+    "  vec3 on = normalize(objNormal), bumpO = vec3(0.0); vec4 sm = vec4(0.5);\n"
+    "  if (mat == 1) { sm = triMap(texFoil, objPos / 1.10, on, bumpO); metal = 1.0; rough = 0.36; }\n"            // gold / amber kapton foil
+    "  else if (mat == 2) { sm = triMap(texPanel, objPos / 1.26, on, bumpO); metal = 1.0; rough = 0.35; }\n"     // aluminium / inconel
+    "  else if (mat == 3) { sm = triMap(texBlanket, objPos / 1.20, on, bumpO); rough = 0.8; }\n"                 // black-coated blanket
+    "  else if (mat == 4) { sm = triMap(texPanel, objPos / 1.26, on, bumpO); rough = 0.5; }\n"                   // white paint
+    "  else if (mat == 5) { sm = triMap(texBlanket, objPos / 1.20, on, bumpO); metal = 1.0; rough = 0.44; }\n"   // silver mylar blanket
+    "  else if (mat == 6) { rough = 0.15; }\n"                                                                   // window glass (dark)
+    "  else if (mat == 8) { sm = triMap(texRock, objPos / 1.50, on, bumpO); rough = 0.92; }\n"                   // lunar rock
+    "  else if (mat == 9) { rough = 0.95; }\n"                                                                   // plain matte (painted-on shadows)
+    "  base *= sm.a * 2.0;\n"
+    "  rough = clamp(rough + (sm.b - 0.5), 0.08, 1.0);\n"
+    "  N = normalize(N + mat3(matModel) * bumpO);\n"
     "  vec3 L = sunDir;\n"
     "  vec3 H = normalize(L + V);\n"
     "  float NL = max(dot(N, L), 0.0), NV = max(dot(N, V), 1e-3), NH = max(dot(N, H), 0.0), VH = max(dot(V, H), 0.0);\n"
@@ -420,6 +393,7 @@ static const char *depth_vs = GLSL_HEADER
 // ---------------------------------------------------------------------------
 
 static Shader sh_terrain, sh_lm, sh_fx, sh_sky, sh_down, sh_up, sh_final, sh_depth;
+static Texture2D tex_foil, tex_panel, tex_blanket, tex_rock;
 static float exposure = 1.0f;
 
 typedef struct { unsigned int fbo; Texture2D tex; unsigned int depth; int w, h; } Target;
@@ -511,6 +485,15 @@ void render_init(void)
     sh_final = LoadShaderFromMemory(post_vs, final_fs);
     sh_depth = LoadShaderFromMemory(depth_vs, depth_fs);
     sh_lm.locs[SHADER_LOC_MATRIX_NORMAL] = GetShaderLocation(sh_lm, "matNormal");
+    // Surface maps ride in the material map slots 0..3 (the shadow map uses unit 5).
+    sh_lm.locs[SHADER_LOC_MAP_ALBEDO] = GetShaderLocation(sh_lm, "texFoil");
+    sh_lm.locs[SHADER_LOC_MAP_METALNESS] = GetShaderLocation(sh_lm, "texPanel");
+    sh_lm.locs[SHADER_LOC_MAP_NORMAL] = GetShaderLocation(sh_lm, "texBlanket");
+    sh_lm.locs[SHADER_LOC_MAP_ROUGHNESS] = GetShaderLocation(sh_lm, "texRock");
+    tex_foil = assets_texture("lm_foil");
+    tex_panel = assets_texture("lm_panel");
+    tex_blanket = assets_texture("lm_blanket");
+    tex_rock = assets_texture("rock");
     set_logfar(sh_terrain);
     set_logfar(sh_lm);
     set_logfar(sh_fx);
@@ -535,6 +518,14 @@ void render_shutdown(void)
 
 Shader *render_terrain_shader(void) { return &sh_terrain; }
 Shader *render_lm_shader(void) { return &sh_lm; }
+void render_lm_material(Material *m)
+{
+    m->shader = sh_lm;
+    m->maps[MATERIAL_MAP_ALBEDO].texture = tex_foil;
+    m->maps[MATERIAL_MAP_METALNESS].texture = tex_panel;
+    m->maps[MATERIAL_MAP_NORMAL].texture = tex_blanket;
+    m->maps[MATERIAL_MAP_ROUGHNESS].texture = tex_rock;
+}
 Shader *render_fx_shader(void) { return &sh_fx; }
 Shader *render_depth_shader(void) { return &sh_depth; }
 void render_set_exposure(float e) { exposure = e; }

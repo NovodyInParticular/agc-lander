@@ -23,6 +23,7 @@ static double perf_t[8], perf_n;
 static double perf_mark(void) { if (perf_on) { rlDrawRenderBatchActive(); if (!perf_finish) perf_finish = (void (*)(void))glfwGetProcAddress("glFinish"); perf_finish(); } return GetTime(); }
 
 #include "agc_host.h"
+#include "assets.h"
 #include "cockpit.h"
 #include "sky_extras.h"
 #include "controls.h"
@@ -561,23 +562,35 @@ static void spawn_outside_view(void)
     if (system(cmd) != 0) TraceLog(LOG_WARNING, "could not start the outside view");
 }
 
-// --audit views: exterior all round (chase camera: yaw rad, pitch rad, distance m)
-// and the cabin from the Commander's seat (head yaw deg, pitch deg, fov deg).
-typedef struct { const char *name; int cockpit; double a, b, c; } AuditView;
+// --audit views: the exterior all round (chase camera: yaw rad, pitch rad, distance m),
+// the cabin from the Commander's seat (head yaw deg, pitch deg, fov deg), and
+// every panel and the main instruments framed from the same seat
+// (panel index, u, v across/down the panel, fov deg or 0 = whole panel).
+typedef struct { const char *name; int kind; double a, b, c, d; } AuditView;
+enum { AV_EXT, AV_HEAD, AV_PANEL };
 static const AuditView audit_views[] = {
-    { "ext_01_front", 0, 3.14159, 0.10, 13 },      { "ext_02_front_right", 0, 2.35619, 0.22, 13 },
-    { "ext_03_right", 0, 1.57080, 0.10, 13 },      { "ext_04_aft_right", 0, 0.78540, 0.22, 13 },
-    { "ext_05_aft", 0, 0.0, 0.10, 13 },            { "ext_06_aft_left", 0, -0.78540, 0.22, 13 },
-    { "ext_07_left", 0, -1.57080, 0.10, 13 },      { "ext_08_front_left", 0, -2.35619, 0.22, 13 },
-    { "ext_09_top", 0, 2.6, 1.15, 12 },            { "ext_10_low", 0, -2.0, -0.12, 11 },
-    { "ext_11_close_front", 0, 2.9, 0.30, 6.5 },   { "ext_12_close_aft", 0, -0.4, 0.32, 6.5 },
-    { "ext_13_close_left", 0, -1.9, 0.25, 6.5 },   { "ext_14_close_right", 0, 1.2, 0.25, 6.5 },
-    { "ck_01_window", 1, 0, -36, 80 },             { "ck_02_panels_1_2", 1, 22, -38, 62 },
-    { "ck_03_panel_1", 1, 14, -42, 34 },           { "ck_04_tapes", 1, 21, -40, 16 },
-    { "ck_05_panel_3_dsky", 1, 30, -64, 62 },      { "ck_06_dsky", 1, 36, -70, 28 },
-    { "ck_07_panel_5", 1, -8, -68, 40 },           { "ck_08_left_wall", 1, -80, -25, 80 },
-    { "ck_09_right_side", 1, 75, -25, 80 },        { "ck_10_overhead", 1, 0, 55, 80 },
-    { "ck_11_aft", 1, 150, -15, 80 },              { "ck_12_floor", 1, 60, -75, 80 },
+    { "ext_01_front", AV_EXT, 3.14159, 0.10, 13, 0 },      { "ext_02_front_right", AV_EXT, 2.35619, 0.22, 13, 0 },
+    { "ext_03_right", AV_EXT, 1.57080, 0.10, 13, 0 },      { "ext_04_aft_right", AV_EXT, 0.78540, 0.22, 13, 0 },
+    { "ext_05_aft", AV_EXT, 0.0, 0.10, 13, 0 },            { "ext_06_aft_left", AV_EXT, -0.78540, 0.22, 13, 0 },
+    { "ext_07_left", AV_EXT, -1.57080, 0.10, 13, 0 },      { "ext_08_front_left", AV_EXT, -2.35619, 0.22, 13, 0 },
+    { "ext_09_top", AV_EXT, 2.6, 1.15, 12, 0 },            { "ext_10_low", AV_EXT, -2.0, -0.12, 11, 0 },
+    { "ext_11_close_front", AV_EXT, 2.9, 0.30, 6.5, 0 },   { "ext_12_close_aft", AV_EXT, -0.4, 0.32, 6.5, 0 },
+    { "ext_13_close_left", AV_EXT, -1.9, 0.25, 6.5, 0 },   { "ext_14_close_right", AV_EXT, 1.2, 0.25, 6.5, 0 },
+    { "ext_15_rocks", AV_EXT, 2.2, 0.04, 30, 0 },
+    { "ck_01_window", AV_HEAD, 0, -36, 80, 0 },            { "ck_02_panels_1_2", AV_HEAD, 22, -38, 62, 0 },
+    { "ck_03_panel_3_dsky", AV_HEAD, 30, -64, 62, 0 },     { "ck_04_left_wall", AV_HEAD, -80, -25, 80, 0 },
+    { "ck_05_right_side", AV_HEAD, 75, -25, 80, 0 },       { "ck_06_overhead", AV_HEAD, 0, 55, 80, 0 },
+    { "ck_07_aft", AV_HEAD, 150, -15, 80, 0 },             { "ck_08_aft_left", AV_HEAD, -150, -20, 80, 0 },
+    { "ck_09_floor", AV_HEAD, 60, -75, 80, 0 },            { "ck_10_floor_aft", AV_HEAD, 170, -60, 80, 0 },
+    { "pn_01_panel_1", AV_PANEL, 0, 0.5, 0.5, 0 },         { "pn_02_panel_2", AV_PANEL, 1, 0.5, 0.5, 0 },
+    { "pn_03_panel_3", AV_PANEL, 2, 0.5, 0.5, 0 },         { "pn_04_panel_4", AV_PANEL, 3, 0.5, 0.5, 0 },
+    { "pn_05_panel_5", AV_PANEL, 4, 0.5, 0.5, 0 },         { "pn_06_panel_6", AV_PANEL, 5, 0.5, 0.5, 0 },
+    { "pn_07_panel_8", AV_PANEL, 6, 0.5, 0.5, 0 },         { "pn_08_panel_11", AV_PANEL, 7, 0.5, 0.5, 0 },
+    { "pn_09_panel_12", AV_PANEL, 8, 0.5, 0.5, 0 },        { "pn_10_panel_14", AV_PANEL, 9, 0.5, 0.5, 0 },
+    { "pn_11_panel_16", AV_PANEL, 10, 0.5, 0.5, 0 },
+    { "in_01_tapes", AV_PANEL, 0, 0.887, 0.325, 20 },      { "in_02_fdai", AV_PANEL, 0, 0.54, 0.31, 22 },
+    { "in_03_warning_lights", AV_PANEL, 0, 0.50, 0.05, 22 }, { "in_04_timers", AV_PANEL, 0, 0.33, 0.60, 16 },
+    { "in_05_dsky", AV_PANEL, 3, 0.50, 0.50, 24 },         { "in_06_panel_1_switches", AV_PANEL, 0, 0.45, 0.86, 26 },
 };
 #define N_AUDIT ((int)(sizeof audit_views / sizeof audit_views[0]))
 
@@ -587,7 +600,7 @@ int main(int argc, char **argv)
     parse_args(argc, argv, &opt);
     if (opt.audit && opt.start < 0) opt.start = 3;
     int capture = opt.shot || opt.audit;
-    int audit_i = -1, audit_frames = 0;
+    int audit_i = -1, audit_frames = 0, audit_fail = 0;
 
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT | FLAG_MSAA_4X_HINT);
     InitWindow(1600, 900, opt.spectator ? "AGC Lander - Outside View" : "AGC Lander - Apollo 11 / Luminary099");
@@ -940,10 +953,13 @@ int main(int argc, char **argv)
         if (opt.audit && gs == GS_FLY) {
             if (audit_i < 0) { audit_i = 0; audit_frames = 0; pose_park(); paused = 1; show_hud = 0; show_dsky = 0; }
             const AuditView *av = &audit_views[audit_i];
-            if (av->cockpit) {
+            if (av->kind == AV_HEAD) {
                 camera = CAM_CDR;
                 cockpit_set_view(av->a, av->b);
                 cockpit_set_fov(av->c);
+            } else if (av->kind == AV_PANEL) {
+                camera = CAM_CDR;
+                cockpit_look_at_panel((int)av->a, av->b, av->c, av->d, 16.0 / 9.0);
             } else {
                 camera = CAM_CHASE;
                 orbit_yaw = av->a; orbit_pitch = av->b; orbit_dist = av->c;
@@ -1107,7 +1123,12 @@ int main(int argc, char **argv)
             ExportImage(img, path);
             UnloadImage(img);
             audit_frames = 0;
-            if (++audit_i >= N_AUDIT) break;
+            if (++audit_i >= N_AUDIT) {
+                TraceLog(assets_missing() ? LOG_ERROR : LOG_INFO, "AUDIT: %d views saved to %s; textures loaded %d, missing %d",
+                         N_AUDIT, opt.audit, assets_loaded(), assets_missing());
+                audit_fail = assets_missing() != 0;
+                break;
+            }
         }
         if (opt.shot && wall >= opt.after) {
             Image img = LoadImageFromTexture(shot_rt.texture);
@@ -1130,5 +1151,5 @@ int main(int argc, char **argv)
     hud_shutdown();
     render_shutdown();
     CloseWindow();
-    return 0;
+    return audit_fail;
 }

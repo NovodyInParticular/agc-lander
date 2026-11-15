@@ -1,5 +1,5 @@
 // Boulders and cobbles around Tranquility Base, with their long low-sun
-// shadows. Drawn with the LM shader (diffuse "black paint" material, grey).
+// shadows. Drawn with the LM shader (material 8: rock, with the baked rock map).
 
 #include <math.h>
 #include <stdlib.h>
@@ -18,7 +18,7 @@ static Mesh rocks_mesh;
 static Material rock_mat;
 static int ready;
 
-static void push(V3 p, V3 n, Color c)
+static void push(V3 p, V3 n, Color c, int mat)
 {
     if (rb.count == rb.cap) {
         rb.cap = rb.cap ? rb.cap * 2 : 65536;
@@ -29,7 +29,7 @@ static void push(V3 p, V3 n, Color c)
     int k = rb.count++;
     rb.p[3 * k] = (float)p.x; rb.p[3 * k + 1] = (float)p.y; rb.p[3 * k + 2] = (float)p.z;
     rb.n[3 * k] = (float)n.x; rb.n[3 * k + 1] = (float)n.y; rb.n[3 * k + 2] = (float)n.z;
-    rb.c[4 * k] = c.r; rb.c[4 * k + 1] = c.g; rb.c[4 * k + 2] = c.b; rb.c[4 * k + 3] = 3;   // material 3: matte
+    rb.c[4 * k] = c.r; rb.c[4 * k + 1] = c.g; rb.c[4 * k + 2] = c.b; rb.c[4 * k + 3] = (unsigned char)mat;   // LM-shader material: 8 rock, 9 plain matte
 }
 
 static unsigned rng = 12345u;
@@ -68,7 +68,9 @@ static void rock(V3 centre, V3 up, double r, Color col)
                     }
                     V3 n = v3_norm(v3_cross(v3_sub(P[1], P[0]), v3_sub(P[2], P[0])));
                     if (v3_dot(n, v3_sub(P[0], centre)) < 0) { V3 t2 = P[1]; P[1] = P[2]; P[2] = t2; n = v3_scale(n, -1); }
-                    for (int k = 0; k < 3; k++) push(P[k], n, col);
+                    // Mostly radial normals: a rounded boulder, not a faceted gem.
+                    for (int k = 0; k < 3; k++)
+                        push(P[k], v3_norm(v3_add(v3_scale(v3_norm(v3_sub(P[k], centre)), 0.65), v3_scale(n, 0.35))), col, 8);
                     (void)q;
                 }
             }
@@ -90,8 +92,8 @@ static void shadow(double x, double z, double w, double len, double sdx, double 
         for (int k2 = 0; k2 < 4; k2++) P[k2] = terrain_plane_to_site(xs[k2], zs[k2], terrain_height(xs[k2], zs[k2], 0) + 0.04);
         V3 n = v3_norm(v3_cross(v3_sub(P[1], P[0]), v3_sub(P[2], P[0])));
         if (n.y < 0) n = v3_scale(n, -1);
-        push(P[0], n, k); push(P[1], n, k); push(P[2], n, k);
-        push(P[0], n, k); push(P[2], n, k); push(P[3], n, k);
+        push(P[0], n, k, 9); push(P[1], n, k, 9); push(P[2], n, k, 9);
+        push(P[0], n, k, 9); push(P[2], n, k, 9); push(P[3], n, k, 9);
     }
 }
 
@@ -133,7 +135,7 @@ void rocks_init(void)
     rocks_mesh = m;
     memset(&rb, 0, sizeof rb);
     rock_mat = LoadMaterialDefault();
-    rock_mat.shader = *render_lm_shader();
+    render_lm_material(&rock_mat);
     ready = 1;
     TraceLog(LOG_INFO, "rocks: %d triangles", m.triangleCount);
 }

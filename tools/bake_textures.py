@@ -178,6 +178,34 @@ def bake_cabin(path):
     pack(h, tile, rough, albedo, path)
 
 
+def bake_cabin_wall(path):
+    """Cabin pressure shell: painted chem-milled skin, 0.30 m pockets between raised stiffener ribs,
+    a riveted joint every third rib."""
+    tile, pitch = 0.90, 0.30
+    x, y = grid(N, tile)
+    fx = np.abs((x / pitch) % 1.0 - 0.5)
+    fy = np.abs((y / pitch) % 1.0 - 0.5)
+    d = (0.5 - (fx ** 6 + fy ** 6) ** (1 / 6)) * pitch          # distance to the rib centre line, round corners
+    rib = smoothstep(0.024, 0.014, d)
+    peel = band_noise(N, 90, 500, 0.6, 71)
+    broad = band_noise(N, 1, 10, 1.6, 72)
+    scuff = np.clip(band_noise(N, 3, 200, 1.1, 73, aniso=(0.08, 1.0)) - 1.6, 0, None)
+    scuff += np.clip(band_noise(N, 3, 200, 1.1, 74, aniso=(1.0, 0.1)) - 1.8, 0, None)
+    # Rivet rows along the panel joints (the tile edges), 45 mm apart.
+    jd, _, _ = seam_distance(x, y, tile)
+    along = np.where(np.abs((x / tile) % 1.0 - 0.5) > np.abs((y / tile) % 1.0 - 0.5), y, x)
+    rdist = np.sqrt(((along / 0.045) % 1.0 - 0.5) ** 2 * 0.045 ** 2 + (jd - 0.007) ** 2)
+    rivet = smoothstep(0.0048, 0.0022, rdist)
+    h = 0.0034 * rib + 0.0008 * rivet + 0.00003 * peel + 0.0004 * broad * (1 - rib)
+    h -= 0.0006 * smoothstep(0.0015, 0.0, jd)
+    shade = smoothstep(0.014, 0.055, d)                          # paint looks darker tucked against the ribs
+    albedo = (1.0 + 0.05 * broad + 0.02 * peel - 0.10 * np.clip(scuff, 0, 1.5)) * (0.86 + 0.14 * shade + 0.10 * rib)
+    albedo *= 1 - 0.35 * smoothstep(0.0015, 0.0, jd)
+    albedo *= 1 - 0.15 * smoothstep(0.007, 0.004, rdist) * (1 - rivet)
+    rough = 0.05 * broad - 0.12 * np.clip(scuff, 0, 1) - 0.05 * rib
+    pack(h, tile, rough, albedo, path)
+
+
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else "data/textures"
     os.makedirs(out, exist_ok=True)
@@ -186,6 +214,7 @@ def main():
     bake_blanket(os.path.join(out, "lm_blanket.png"))
     bake_rock(os.path.join(out, "rock.png"))
     bake_cabin(os.path.join(out, "cabin.png"))
+    bake_cabin_wall(os.path.join(out, "cabin_wall.png"))
 
 
 if __name__ == "__main__":

@@ -20,6 +20,9 @@ void render_end_scene(void);
 
 Shader *render_terrain_shader(void);
 Shader *render_lm_shader(void);
+// Material setup for meshes drawn with the LM shader: the shader plus its
+// surface maps (foil, panel, blanket, rock).
+void render_lm_material(Material *m);
 Shader *render_fx_shader(void);
 
 // Sky: stars, Sun glare, Earth. Directions in the site frame.

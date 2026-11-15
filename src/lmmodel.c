@@ -30,7 +30,7 @@ static const Mat MT_SILVER = { 200, 200, 205, M_METAL };
 static const Mat MT_GREY = { 150, 150, 152, M_METAL };
 static const Mat MT_DARKMETAL = { 70, 66, 62, M_METAL };
 static const Mat MT_BLACK = { 18, 18, 20, M_BLACK };
-static const Mat MT_WHITE = { 225, 225, 220, M_WHITE };
+static const Mat MT_WHITE = { 190, 190, 186, M_WHITE };   // aged thermal paint: keeps panel detail under full sun
 static const Mat MT_MYLAR = { 175, 175, 180, M_MYLAR };
 static const Mat MT_GLASS = { 20, 25, 35, M_GLASS };
 static const Mat MT_DPSIN = { 40, 34, 30, M_METAL };
@@ -517,7 +517,7 @@ void lmmodel_init(void)
     UploadMesh(&m, false);
     lm_mesh = m;
     lm_mat = LoadMaterialDefault();
-    lm_mat.shader = *render_lm_shader();
+    render_lm_material(&lm_mat);
     depth_mat = LoadMaterialDefault();
     depth_mat.shader = *render_depth_shader();
     fx_mat = LoadMaterialDefault();
