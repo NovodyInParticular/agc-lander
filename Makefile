@@ -114,6 +114,7 @@ test: build/linux/agc-selftest build/linux/agc-lab
 	./tools/test_landing.sh build/linux/agc-lab
 	./tools/test_ascent.sh build/linux/agc-lab
 	./tools/test_docking.sh build/linux/agc-lab
+	./tools/test_mission.sh build/linux/agc-lab
 
 # ---- Windows (single static .exe).
 build/win/core.a: $(AGC_CORE)

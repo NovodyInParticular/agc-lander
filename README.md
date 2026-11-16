@@ -1,9 +1,10 @@
 # AGC Lander
 
-Land Apollo 11's Lunar Module with the **real flight software**. Luminary099, the program that
-flew Eagle to Tranquility Base, runs here on an emulated Apollo Guidance Computer (Virtual AGC
-core). The game simulates the vehicle around it: the IMU, the landing radar, the descent engine,
-the RCS jets, the Moon and the crew procedures.
+Land Apollo 11's Lunar Module with the **real flight software**, then fly it home. Luminary099,
+the program that flew Eagle to Tranquility Base and back up to Columbia, runs here on an emulated
+Apollo Guidance Computer (Virtual AGC core). The game simulates the vehicle around it: the IMU, the
+landing radar, the descent and ascent engines, the stage separation, the RCS jets, the Moon, the
+CSM and the crew procedures.
 
 Single executable for Windows (`agc-lander.exe`) and Linux.
 
@@ -19,6 +20,7 @@ Pick a scenario with **Up/Down** and press **Enter**:
 | Powered descent | The AGC and the auto crew get you to 30 s before ignition. |
 | High gate | Fast-forwards to P64, with Tranquility Base coming into view. |
 | Final 500 ft | The computer brings you to 150 m, then it's yours in P66. |
+| Lunar lift-off | Tranquility Base, one minute before ascent: P12, orbit, then docking with Columbia. |
 
 New to this? Start with **Final 500 ft** and leave **plain-English hints** on (the last menu
 entry, or **H** in flight). A box at the top of the screen tells you what to do next: which key to
@@ -39,12 +41,50 @@ Cutting the engine at the blue CONTACT light drops the LM the last 1.7 m, so a g
 descent touches down at about 2.6 m/s. A crash folds the legs, throws debris, and if there is
 propellant left and the impact is hard, the hypergolic propellants go up in a fireball.
 
+## Lift-off and docking
+
+After a landing (yours, or the LUNAR LIFT-OFF scenario), press **L** on the results panel: the
+game skips the 21 hours on the surface and loads the computer exactly as Apollo 11's crew had it
+one minute before lift-off (from NASSP's mission state), wherever your LM is standing.
+
+1. **Lift-off.** The DSKY counts down in P12 (V06 N74, R1 = minutes and seconds to go). When it
+   flashes **V99**, do what Aldrin called out: **B** (ABORT STAGE fires the bolts between the
+   stages), **F7** (ENG ARM: ASC), then **P** (PRO). The ascent engine lights at ignition time;
+   the descent stage stays behind as the launch pad, and its gold foil blows off.
+2. **Ascent.** P12 flies a ten-second vertical rise, the pitch-over, and a seven-minute burn into
+   an orbit about 17 x 90 km (Apollo 11: 17.4 x 86.5 km), steering into Columbia's orbital plane.
+   Nothing to do; PgUp speeds up time.
+3. **Rendezvous.** The real one took 3 1/2 hours of burns (CSI, CDH, TPI, braking). **Enter** on the
+   orbit panel skips to the end of it: Eagle station-keeping 40 m (130 ft) from Columbia, nearly
+   lined up. The crew keys P00 and V48 for you (0.3 deg deadband, 2-jet translation).
+4. **Docking.** Tab to the **DOCKING WINDOW** view: the Commander's overhead window, with the COAS
+   sight. Columbia's docking target sits in the sight when the probe is on the drogue axis. Close at
+   0.1-0.3 m/s; capture needs the probe within 33 cm of the axis, the two axes within 10 deg, and
+   under 0.6 m/s. The readout on the right shows range, rate, offsets, drift, angle and roll.
+
+| Key (in orbit) | Action |
+|---|---|
+| T / G | Translate along +X (toward Columbia) / back |
+| Arrow keys | Translate sideways (as seen through the docking window) |
+| W / S, A / D | Tilt (pitch, roll) |
+| Q / E | Turn about the docking axis (yaw) |
+| Gamepad | Right stick / bumpers: translation, as in the landing |
+| Headset | Left stick + left grip / trigger: translation; right grip + right stick sideways: yaw |
+
+**Aborting the landing.** ABORT STAGE (**B**, or the guarded button on panel 1) during the
+descent does what it did in the real LM: the stages separate, the ascent engine is armed, and
+Luminary switches to P71 and flies the ascent stage back to orbit. From there, rendezvous and
+docking work the same way.
+
+Hitting the drogue or Columbia too fast (above 0.6 / 0.45 m/s) breaks something: **Enter** then
+backs off for another approach. A hard dock ends the mission.
+
 ## Controls
 
 ### General
 | Key | Action |
 |---|---|
-| Tab | Next camera: chase, **cockpit**, 16 mm DAC, tower, cinematic, **lunar orbit** |
+| Tab | Next camera: chase, **cockpit**, 16 mm DAC, tower, cinematic, **lunar orbit**, **docking window** |
 | F1 | Help overlay |
 | F2 | Automatic crew on/off |
 | F3 | 16 mm film look |
@@ -67,8 +107,10 @@ propellant left and the impact is hard, the hypergolic propellants go up in a fi
 | Q / E | Yaw |
 | Up / Down | ROD switch in P66: each click is −1 / +1 ft/s rate of descent |
 | Space | ENGINE STOP (press it at the LUNAR CONTACT light) |
-| F7 | Descent engine arm |
+| F7 | Engine arm: descent engine (or the ascent engine, after landing) |
 | F8 | PGNS mode control: AUTO / ATT HOLD |
+| B | ABORT STAGE (separates the stages; in flight it also arms the ascent engine and Luminary takes P71) |
+| L | After landing: lift off (21 hours later, P12) |
 
 ### Joysticks and gamepads
 
@@ -227,4 +269,5 @@ run `make install`.
 
 ## Building
 
-`make` (Linux), `make windows` (mingw-w64), `make test` (AGC self-test plus a full automatic landing).
+`make` (Linux), `make windows` (mingw-w64), `make test` (AGC self-test, an automatic landing, a P12 ascent,
+a docking flown with the hand controllers, and the whole mission from PDI to hard dock).

@@ -21,6 +21,7 @@
 
 #include "agc_host.h"
 #include "cockpit_int.h"
+#include "ascent.h"
 #include "crew.h"
 #include "dsky.h"
 #include "hints.h"
@@ -741,7 +742,11 @@ static void caution_matrix(float x, float y, const char *const *labels, int cols
 static const Color RED_L = { 255, 60, 45, 255 }, AMB_L = { 255, 175, 40, 255 }, BLU_L = { 90, 160, 255, 255 },
                    WHT_L = { 250, 245, 225, 255 }, GRN_L = { 90, 255, 120, 255 };
 
-static int prop_low(void) { return lm.m_dps / 8248.0 < 0.056; }
+static int prop_low(void)
+{
+    if (ascent_active() || lm.staged) return lm.aps_on && lm.m_aps / 2376.0 < 0.056;   // the ascent tanks
+    return lm.m_dps / 8248.0 < 0.056;
+}
 
 static void panel1(void)
 {
@@ -1449,6 +1454,7 @@ void cp_click(const Hot *h, float u, float v)
             int flying = !lm.touchdown;
             lm_abort_stage();
             if (flying && !lm.aps_on) lm_set_engine_arm(ARM_ASC);   // the abort-stage relays arm the ascent engine
+            if (flying && !ascent_active() && lm.staged) ascent_begin();
             crew_say(flying ? "ABORT STAGE: stages separated, ascent engine armed (P71)"
                             : "ABORT STAGE: the stage separation bolts have fired");
         } else if (h->id == ID_ABORT) {

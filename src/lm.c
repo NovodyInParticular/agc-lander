@@ -394,6 +394,7 @@ void lm_abort_stage(void)
     lm.dps_on = 0;
     lm.staged = 1;
     lm.cg = ASC_CG;
+    if (!lm.ds_landed) { lm.liftoff = 1; lm.liftoff_t = lm.t; }   // in flight: the stages part at once
 }
 
 void lm_descent_stage_pose(V3 *fixed, M3 *fixed_from_body)
@@ -612,12 +613,13 @@ static void rigid_body(double dt)
         lm.thrust += (0 - lm.thrust) * fmin(1.0, dt / 0.08);
         if (!lm.dps_on && !lm.aps_on) lm.flame_time = 0;
     }
+    if (lm.staged && !lm.thrust_aps && !aps) lm.thrust = 0;   // the DPS left with the descent stage
     if (lm.thrust > 1.0 && lm.thrust_aps) {
         V3 f = v3(lm.thrust, 0, 0);
         F_b = v3_add(F_b, f);
         T_b = v3_add(T_b, v3_cross(v3_sub(v3(STAGE_X, 0, 0), cg), f));
         lm.m_aps = fmax(0, lm.m_aps - lm.thrust / (APS_ISP * G0) * dt);
-    } else if (lm.thrust > 1.0) {
+    } else if (lm.thrust > 1.0 && !lm.staged) {
         // Trim gimbal driven by ch12 bits 9-12 (pitch +/-, roll +/-).
         int c12 = s->InputChannel[012];
         double pitch_rate = (c12 & 0400) ? GIMBAL_RATE : (c12 & 01000) ? -GIMBAL_RATE : 0;
@@ -678,7 +680,7 @@ static void rigid_body(double dt)
         F_i_contact = v3_add(F_i_contact, f);
         T_b = v3_add(T_b, v3_cross(v3_sub(pad_b, cg), lm_inertial_to_body(f)));
     }
-    if (lm.staged && lm.ds_landed && !lm.liftoff) {
+    if (lm.staged && lm.ds_landed && !lm.liftoff && lm.touchdown) {
         // The ascent stage sits on the descent stage's top deck until it lifts off.
         double t = lm.t + lm.tephem;
         M3 i_from_ds = m3_mul(m3_transpose(moon_matrix(t)), lm.ds_fixed_rot);
@@ -780,6 +782,49 @@ void lm_step(double dt)
 
     update_radar(dt);
     update_sensors_to_agc(dt);
+}
+
+// Raise or lower the LM along local vertical until its lowest footpad just
+// clears the ground (a fresh placement must not start with a pad buried).
+void lm_place_on_ground(void)
+{
+    for (int it = 0; it < 4; it++) {
+        double hmin = 1e9;
+        for (int k = 0; k < 4; k++) {
+            double ang = k * PI_D / 2;
+            V3 pad_b = v3(PAD_X + lm.collapse[k], PAD_R * sin(ang), PAD_R * cos(ang));
+            V3 pad_i = v3_add(lm.r, lm_body_to_inertial(pad_b));
+            double h = v3_len(pad_i) - surface_radius_at(pad_i);
+            if (h < hmin) hmin = h;
+        }
+        lm.r = v3_add(lm.r, v3_scale(v3_norm(lm.r), 0.02 - hmin));
+    }
+}
+
+// Let the vehicle come to rest on its legs: physics only, no jets, no
+// clock, nothing sent to the AGC (the caller re-reads the CDUs afterwards).
+void lm_settle(double seconds)
+{
+    unsigned c5 = lm.ch5, c6 = lm.ch6;
+    double t0 = lm.t;
+    lm.ch5 = lm.ch6 = 0;
+    // The ground turns with the Moon while the legs settle (the LM moves with it).
+    for (double s = 0; s < seconds; s += 0.001) {
+        rigid_body(0.001);
+        lm.t += 0.001;
+    }
+    // Same place and attitude on the Moon, at the original time.
+    M3 m1 = moon_matrix(lm.t + lm.tephem), m0 = moon_matrix(t0 + lm.tephem);
+    V3 fixed = m3_apply(m1, lm.r);
+    M3 fixed_from_b = m3_mul(m1, q4_to_m3(lm.q));
+    lm.t = t0;
+    lm.r = m3_apply(m3_transpose(m0), fixed);
+    lm.q = q4_normalize(m3_to_q4(m3_mul(m3_transpose(m0), fixed_from_b)));
+    lm.w = v3(0, 0, 0);
+    lm.v = v3_cross(moon_omega(lm.t + lm.tephem), lm.r);
+    lm.ch5 = c5;
+    lm.ch6 = c6;
+    for (int j = 0; j < LM_NJETS; j++) lm.jet_level[j] = 0;
 }
 
 void lm_run(double seconds)

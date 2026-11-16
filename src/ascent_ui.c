@@ -59,10 +59,6 @@ void ascent_overlay(int w, int h)
         snprintf(b, sizeof b, "RCS     %5.0f kg", lm.m_rcs);
         hud_text(font_mono, b, x + 16 * sc, y + ry * sc, 21 * sc, lm.m_rcs < 40 ? (Color){ 255, 90, 70, 255 } : (Color){ 200, 205, 212, 255 });
     }
-    const AscentStats *st = ascent_stats();
-    if (st->msg[0] && lm.t - st->msg_t < 6 && (ph == MP_PROX || ph == MP_DOCKED)) {
-        hud_text_centered(font_bold, st->msg, w / 2.0f, h - 150 * sc, 24 * sc, (Color){ 255, 220, 140, 255 });
-    }
 }
 
 static void row(float x, float y, float sc, const char *label, const char *val, Color c)

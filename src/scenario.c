@@ -218,8 +218,11 @@ void scenario_liftoff(int keep_pose)
         lm.m_rcs = keep_rcs;
         memcpy(lm.collapse, collapse, sizeof collapse);
     } else {
-        // At the LGC's landing site, upright on our terrain, attitude from the CDUs.
-        V3 rls = agc_get_vec("RLS", 27);
+        // At the landing target of our terrain (the LGC's own site, where NASSP's
+        // crew put Eagle, is ~750 m off and sits on a crater wall here), upright,
+        // heading from the CDUs; the legs then settle onto the slope.
+        V3 rls = scenario_info.rls;
+        if (v3_len(rls) < 1.5e6) rls = agc_get_vec("RLS", 27);
         double lat, lon, rad;
         moon_fixed_to_latlon(rls, &lat, &lon, &rad);
         double ground = sf ? sf(lm.surface_ctx, lat, lon) : rad;
@@ -238,8 +241,15 @@ void scenario_liftoff(int keep_pose)
     lm.m_ascent = a11_liftoff_ascemptymass;
     lm.m_aps = a11_liftoff_ascfuel;
     lm.surface = sf;
+    lm_set_landed();
+    if (!keep_pose) {
+        lm_place_on_ground();
+        lm_settle(4.0);   // onto our terrain's slope
+    }
 
-    // The CDUs read the attitude as it really is.
+    // The CDUs read the attitude as it really is, and the DAP's commanded
+    // attitude is that one: it holds the LM as it stands instead of firing
+    // jets against the ground until lift-off.
     V3 g = lm_gimbal_angles();
     lm.cdu_sent[0] = (int)(lround(g.x / (2.0 * PI_D / 32768.0)) & 077777);
     lm.cdu_sent[1] = (int)(lround(g.y / (2.0 * PI_D / 32768.0)) & 077777);
@@ -247,7 +257,9 @@ void scenario_liftoff(int keep_pose)
     s->Erasable[0][RegCDUX] = (int16_t)lm.cdu_sent[0];
     s->Erasable[0][RegCDUY] = (int16_t)lm.cdu_sent[1];
     s->Erasable[0][RegCDUZ] = (int16_t)lm.cdu_sent[2];
-    lm_set_landed();
+    agc_set_word("CDUXD", 0, lm.cdu_sent[0]);
+    agc_set_word("CDUYD", 0, lm.cdu_sent[1]);
+    agc_set_word("CDUZD", 0, lm.cdu_sent[2]);
 
     csm_reset();
     load_csm();

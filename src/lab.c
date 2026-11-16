@@ -316,6 +316,16 @@ int main(int argc, char **argv)
                    agc_host_read_channel(030));
             orbit_report();
         }
+        else if (!strcmp(a, "liftoffkeep")) {
+            // After a landing in this run: P12 from where the LM stands (the game's L key).
+            scenario_liftoff(1);
+            crew_reset();
+            crew.auto_crew = crew_on;
+            crew.landed = 1;
+            ascent_begin();
+            V3 g = lm_gimbal_angles();
+            printf("LIFTOFF from the landing: gimbals %.2f %.2f %.2f deg, tilt %.1f deg\n", g.x / DEG, g.y / DEG, g.z / DEG, lm_tilt() / DEG);
+        }
         else if (!strcmp(a, "stage")) lm_abort_stage();
         else if (!strcmp(a, "rndz")) { if (!ascent_active()) ascent_begin(); ascent_rendezvous(); dock_report(); }
         else if (!strncmp(a, "dock:", 5)) { ascent_debug_dock(atof(a + 5)); dock_report(); }

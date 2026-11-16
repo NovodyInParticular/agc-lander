@@ -148,9 +148,9 @@ void crew_step(void)
     if (lm.dps_on && lm.thrust > 40000 && !flat_said) { crew_say("\"Throttle up.\"  Full thrust"); flat_said = 1; }
     if (flat_said && lm.thrust < 30000 && lm.dps_on && !thr_said) { crew_say("\"Throttle down... better than the simulator.\""); thr_said = 1; }
     if (lm.lr_range_good && lm.dps_on && !lr_said) { crew_say("\"Radar data good.\"  Landing radar lock"); lr_said = 1; }
-    if (prog(64) && !p64_said) { crew_say("\"P64.\"  High gate: pitching over, the site is in view"); p64_said = 1; }
-    if (prog(65) && !p65_said) { crew_say("\"P65.\"  Automatic velocity nulling"); p65_said = 1; }
-    if (prog(66) && !p66_said) { crew_say("\"P66.\"  Rate of descent mode"); p66_said = 1; }
+    if (!crew.landed && prog(64) && !p64_said) { crew_say("\"P64.\"  High gate: pitching over, the site is in view"); p64_said = 1; }
+    if (!crew.landed && prog(65) && !p65_said) { crew_say("\"P65.\"  Automatic velocity nulling"); p65_said = 1; }
+    if (!crew.landed && prog(66) && !p66_said) { crew_say("\"P66.\"  Rate of descent mode"); p66_said = 1; }
     if (lm.dps_on && lm.altitude < 30 && !low_said) { crew_say("\"Picking up some dust...\""); low_said = 1; }
     if (d->prog_lamp && !prog_alarm_said) { crew_say("\"Program alarm.\""); prog_alarm_said = 1; }
     if (!d->prog_lamp) prog_alarm_said = 0;
@@ -161,17 +161,22 @@ void crew_step(void)
 
     // ---- Ascent callouts ----------------------------------------------------------------
     if (prog(12) && vn(99, 74) && !asc_count_said) { crew_say("\"...5, 4, 3, 2, 1. Abort Stage, Engine Arm Ascent, Proceed.\""); asc_count_said = 1; }
-    if (lm.liftoff && !asc_lift_said && lm.t - lm.liftoff_t > 1.5) { crew_say("\"Beautiful. 26, 36 feet per second up.\""); asc_lift_said = 1; }
+    if (lm.liftoff && crew.landed && !asc_lift_said && lm.t - lm.liftoff_t > 1.5) { crew_say("\"Beautiful. 26, 36 feet per second up.\""); asc_lift_said = 1; }
     if (asc_lift_said && !asc_pitch_said && lm_tilt() > 0.35) { crew_say("\"Be advised of the pitchover.\""); asc_pitch_said = 1; }
     if (asc_pitch_said && !asc_quiet_said && lm.t - lm.liftoff_t > 60) {
         crew_say("\"Very smooth... very quiet ride. Just a little slow wallowing back and forth.\"");
         asc_quiet_said = 1;
     }
+    if (lm.staged && !lm.touchdown && !asc_cut_said && !asc_lift_said && lm.aps_on && !prev_aps) {
+        crew_say("\"Abort stage.\"  P71: the ascent engine takes Eagle back to orbit");
+        asc_lift_said = asc_pitch_said = asc_quiet_said = 1;
+    }
     if (prev_aps && !lm.aps_on && lm.liftoff && !asc_cut_said && lm.altitude > 5000) {
         double pe, ap;
         orbit_nmi(&pe, &ap);
         char m[160];
-        snprintf(m, sizeof m, "\"Shutdown.\"  Orbit %.1f by %.1f nautical miles (Eagle had 9.4 by 46.7)", pe, ap);
+        snprintf(m, sizeof m, crew.landed ? "\"Shutdown.\"  Orbit %.1f by %.1f nautical miles (Eagle had 9.4 by 46.7)"
+                                          : "\"Shutdown.\"  Abort complete: orbit %.1f by %.1f nautical miles", pe, ap);
         crew_say(m);
         asc_cut_said = 1;
         crew.in_orbit = 1;

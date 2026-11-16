@@ -165,10 +165,7 @@ Milestones, each with a headless test in src/selftest*.c:
 
 ### Plan agreed with the user 2026-11-15 (in this order)
 1. DONE first pass: cabin realism from the photos; hatch, moonwalk, jump, flag.
-2. NEXT: ascent and docking. Split the LM mesh into descent and ascent stages (the descent
-   stage stays on the surface), ascent engine (15.6 kN, fixed thrust) lift-off from the cockpit,
-   a guided climb to orbit, then a rendezvous shortcut to a few hundred metres from the CSM
-   and a hand-flown docking. Needs a CSM model.
+2. DONE 2026-11-16: ascent and docking (see the section below).
 3. Two builds: PC "high" (i9-9900K 8c/16t, RTX 2070 Super, 32 GB: more terrain detail,
    shadows, 4K) and Quest 3 (72 fps, cut-down shaders). One code base, a quality tier switch.
 4. Quest APK itself (old phases 3-4) still needs: Android NDK, Khronos OpenXR loader, astcenc,
@@ -176,6 +173,51 @@ Milestones, each with a headless test in src/selftest*.c:
    the headset is accepted).
 - Still missing in the moonwalk: an astronaut body/shadow, footprints, the second crewman,
   rock collisions, VR hand interaction.
+
+## Lift-off, ascent, rendezvous shortcut, docking (2026-11-16, branch quest-vr)
+Plan step 2 is done. Everything is flown by the real Luminary099 except the skipped rendezvous.
+- Scenario: NASSP "Apollo 11 - 11 - Lunar Liftoff T-1m" LGC state, extracted with
+  `tools/extract_nassp.py SCN data/a11_liftoff_lgc.c a11_liftoff "Lunar Liftoff T-1m"` (the tool
+  now takes a prefix). scenario_liftoff(keep_pose): GOJAM restart resumes P12's countdown (V06 N74).
+  keep_pose=1 = the player's own landing (the L key): same spot and attitude, moon-fixed. Otherwise
+  the LM is put at our landing target (NASSP's own site is on a crater wall in our terrain),
+  lm_place_on_ground() (lowest pad touching) then lm_settle(4 s): physics only, the Moon turning
+  (freezing the clock made the LM skid at 4.6 m/s and tumble). CDUs and CDUXD/YD/ZD are written
+  from the real attitude so the DAP does not fire against the ground.
+- CSM: from the LGC's own CSM state vector (RCVCSM+DELTACSM, VCVCSM+NUVCSM, TETCSM), propagated;
+  src/csm.c (same integrator as the LM), model src/csmmodel.c (CSM axes: origin at the docking
+  ring, +X out along the probe; target at y +0.66 z +0.10 matches the LM CDR window offset).
+- APS + staging (lm.c): ENG ARM is 3-state (ARM_DES/ARM_ASC), ch11 ENGINE ON lights the armed
+  engine, 15570 N, Isp 311. ABORT STAGE (B key / panel 1 button) = lm_abort_stage(): ch30 bit 4
+  low, stages part. On the ground the ascent stage rests on the deck (4 contact points) until
+  thrust lifts it (lm.liftoff); in flight they part at once and the descent stage falls and stays
+  where it lands. After staging the body origin stays the model origin; the CG is lm.cg
+  (1.35, 0, 0.04) and rigid_body() integrates the CG (identical to before when cg = 0: the landing
+  test result did not change).
+- P12 result: 16.7 x 91 km above the site radius (Apollo 11 17.4 x 86.5), 423 s burn, wedge to
+  the CSM plane 0.04 deg, no alarms. ABORT STAGE during the descent: Luminary takes P71 and also
+  reaches orbit (tested from 13.6 km: 16 x 223 km), then the same rendezvous/docking.
+- src/ascent.c: phases (MP_COUNTDOWN .. MP_DOCKED), rendezvous shortcut (Eagle 40 m from Columbia,
+  OUT OF Columbia's orbit plane with the same velocity: the line between them then stays fixed in
+  inertial space; along-track placement drifted 0.03 m/s against an inertially held LM), the crew's
+  docking DAP set-up keyed by watching the DSKY (V37E 00E, wait for P00, V48E, PRO, PRO with
+  DBSELECT/ACC4OR2X/RHCSCALE cleared: 0.3 deg deadband, 2-jet X, fine stick), probe-and-drogue
+  capture (33 cm, 10 deg, < 0.6 m/s), bounce, damage (> 0.45 m/s body contact), 8 s retract,
+  hard dock. src/ascent_ui.c: docking readout and results panels.
+- Keys in orbit: T/G along X, arrows sideways (docking-window screen axes: right = LM -Y), Q/E
+  roll about the docking axis (Q lowers a positive roll error), W/S A/D tilt. Camera
+  CAM_DOCK = overhead window + COAS reticle. Headset: left stick/grip/trigger translate.
+- Tests (all in `make test`): test_ascent.sh, test_docking.sh (lab `dockpilot`: THC pulses + RHC
+  only, through the real DAP), test_mission.sh (PDI -> landing -> liftoffkeep -> orbit -> dock).
+- Audit: 55 views now (asc_* ascent stage above the descent stage, csm_* round Columbia); all 7
+  texture maps load, 0 missing (also checked with the installed ~/.local/bin binary).
+- Debug switches: AGC_AUTOCREW=1 (--start 4 with the auto crew), AGC_DOCK=metres (+AGC_DOCKCAM=n)
+  starts lined up near Columbia, AGC_FAKE_RHC=p,y,r[,tx,ty,tz], AGC_DBGDOCK=1, AGC_DBGJETS=1,
+  AGC_LMFOCUS=1 (chase camera on the LM only while docking). Lab: liftoff, liftoffkeep, stage,
+  orbit, ascent:S, rndz, dock:M, dockpilot:S, thc:x,y,z.
+- Still open: plan step 3 (PC high / Quest quality tiers), step 4 (Quest APK); the descent
+  stage's own crash when it falls after an abort is not animated; the flag is not blown over at
+  lift-off; ascent sound is the DPS rumble scaled, not its own.
 
 ## Next
 - GitHub: public repo + v0.1.0 release (2026-11-02). GPLv2 (Virtual AGC, NASSP data).

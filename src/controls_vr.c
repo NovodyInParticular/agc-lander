@@ -3,6 +3,9 @@
 // Right thumbstick = the ACA (attitude: forward/back pitch, left/right roll),
 // left thumbstick = yaw (left/right) and the ROD switch (a flick up or down).
 // A = ENGINE STOP, B = PRO (hold), left trigger = ENTR.
+// Docking (controls_vr_docking set): the left stick and left grip/trigger are
+// the translation controller instead (the game maps them to the arrow keys and
+// T/G), and yaw is the right stick left/right with the right grip held.
 // A keyboard still works (PC stand-in, or one paired with the headset).
 
 #include <math.h>
@@ -13,6 +16,8 @@
 #include "controls.h"
 #include "input.h"
 #include "vr.h"
+
+int controls_vr_docking;
 
 static double dz(double v)
 {
@@ -32,6 +37,19 @@ void controls_poll(Controls *c)
     c->stop = IsKeyPressed(KEY_SPACE);
 
     const VrInput *in = vr_input();
+    if (controls_vr_docking) {
+        c->pitch += dz(in->ry);
+        if (in->rgrip > 0.5f) c->yaw -= dz(in->rx);
+        else c->roll += dz(in->rx);
+        if (IsKeyDown(VKEY_PRO)) c->pro = 1;
+        if (c->pitch > 1) c->pitch = 1;
+        if (c->pitch < -1) c->pitch = -1;
+        if (c->roll > 1) c->roll = 1;
+        if (c->roll < -1) c->roll = -1;
+        if (c->yaw > 1) c->yaw = 1;
+        if (c->yaw < -1) c->yaw = -1;
+        return;
+    }
     c->pitch += dz(in->ry);
     c->roll += dz(in->rx);
     // The left stick does two jobs, so each needs a clear push in its own direction.

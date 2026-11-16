@@ -199,7 +199,7 @@ static void ascent_hints(Hint *h)
         if (crew.auto_crew) { add(h, "The auto crew will light the ascent engine at V99 (F2 to do it yourself)"); return; }
         switch (crew.hint) {
         case HINT_ASC_STAGE:
-            add(h, "Lift-off! First press F9 (ABORT STAGE): it fires the bolts holding");
+            add(h, "Lift-off! First press B (ABORT STAGE): it fires the bolts holding");
             add(h, "the ascent stage to the descent stage, which stays on the Moon");
             h->urgent = 1;
             return;
@@ -213,14 +213,14 @@ static void ascent_hints(Hint *h)
             return;
         default:
             add(h, "Countdown to lift-off: the DSKY's top number is minutes and seconds to go.");
-            add(h, "When it flashes V99: F9 (ABORT STAGE), F7 (arm), then P (PRO)");
+            add(h, "When it flashes V99: B (ABORT STAGE), F7 (arm), then P (PRO)");
             return;
         }
     }
     if (ph == MP_ASCENT) {
         if (lm.aps_on && !lm.staged) {
             add(h, "The ascent engine is firing into the descent stage - you're still bolted to it!");
-            add(h, "Press F9 (ABORT STAGE) now");
+            add(h, "Press B (ABORT STAGE) now");
             h->urgent = 1;
             return;
         }
@@ -242,8 +242,10 @@ static void compute(Hint *h)
     if (lm.land_result == LAND_CRASH) return;   // the results panel takes over
     if (lm.touchdown) {
         if (lm.dps_on) { add(h, "You're on the ground: press SPACE to shut the engine off"); h->urgent = 1; }
-        else if (eva_phase() == EVA_INSIDE && eva_available())
-            add(h, "You are on the Moon. Press X to open the hatch and go for a walk");
+        else if (eva_phase() == EVA_INSIDE && eva_available()) {
+            add(h, "You are on the Moon. Press X to open the hatch and go for a walk,");
+            add(h, "or L to skip ahead to lift-off (P12) and the trip back to Columbia");
+        }
         else if (eva_phase() == EVA_SURFACE) {
             add(h, "Walk with W A S D (Shift to lope), Space to jump, F to plant the flag.");
             add(h, "To go back in, walk to the foot of the ladder and press X");

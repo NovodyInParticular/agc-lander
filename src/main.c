@@ -30,6 +30,7 @@ static double perf_mark(void) { if (perf_on) { rlDrawRenderBatchActive(); if (!p
 #endif
 
 #include "agc_host.h"
+#include "agc_mem.h"
 #include "ascent.h"
 #include "assets.h"
 #include "cockpit.h"
@@ -346,7 +347,7 @@ static ViewCam make_camera(int mode, V3 lm_pos, M3 R, double t_wall)
     default: {
         double d = orbit_dist;
         V3 focus = focus_override ? focus_site : v3_add(lm_pos, v3_scale(up, 0.5));
-        if (csm.valid && ascent_active() && ascent_phase() >= MP_PROX && !focus_override) {
+        if (csm.valid && ascent_active() && ascent_phase() >= MP_PROX && !focus_override && !getenv("AGC_LMFOCUS")) {
             // Docking: frame Eagle and Columbia together.
             V3 cp = csm_site_pos();
             double sep = v3_len(v3_sub(cp, lm_pos));
@@ -604,7 +605,7 @@ static const char *scen_desc[] = {
     "Fast-forwards the real AGC and crew through the pre-burn checklist and stops 30 seconds before ignition.",
     "Fast-forwards through the braking phase. Pitch-over is just ahead and Tranquility Base comes into view.",
     "The computer brings you to 150 m. Then it's yours: ROD switch (Up/Down arrows) in P66, ENGINE STOP at contact.",
-    "Tranquility Base, one minute to lift-off. At V99: ABORT STAGE (F9), ENG ARM ASC (F7), PRO. P12 flies you to orbit, then you dock.",
+    "Tranquility Base, one minute to lift-off. At V99: ABORT STAGE (B), ENG ARM ASC (F7), PRO. P12 flies you to orbit, then you dock.",
 };
 #define N_SCEN 5
 enum { ROW_HOST = N_SCEN, ROW_JOIN, ROW_HINTS, N_ROWS };
@@ -951,6 +952,17 @@ static void vr_map_keys(int menu, int results_showing)
     } else {
         in_set_key(VKEY_PRO, in->b && !hold_b);
     }
+    // Docking: the left hand works the translation controller.
+    extern int controls_vr_docking;
+    controls_vr_docking = ascent_active() && ascent_phase() >= MP_ORBIT && ascent_phase() <= MP_PROX;
+    if (controls_vr_docking && eva_phase() != EVA_SURFACE) {
+        in_set_key(KEY_UP, in->ly > 0.5f);
+        in_set_key(KEY_DOWN, in->ly < -0.5f);
+        in_set_key(KEY_LEFT, in->lx < -0.5f);
+        in_set_key(KEY_RIGHT, in->lx > 0.5f);
+        in_set_key(KEY_T, in->lgrip > 0.5f);
+        in_set_key(KEY_G, in->ltrig > 0.6f);
+    }
 }
 
 // The floating display and the pointing ray, drawn over the finished view of one eye.
@@ -1261,10 +1273,11 @@ int main(int argc, char **argv)
                 lm_set_engine_arm(arm);
                 crew_say(arm == ARM_ASC ? "ENG ARM: ASC (ascent engine)" : arm == ARM_DES ? "ENG ARM: DES (descent engine)" : "ENG ARM: OFF");
             }
-            if (IsKeyPressed(KEY_F9) && !lm.abort_stage) {
+            if (IsKeyPressed(KEY_B) && !lm.abort_stage) {
                 int flying = !lm.touchdown;
                 lm_abort_stage();
                 if (flying && !lm.aps_on) lm_set_engine_arm(ARM_ASC);
+                if (flying && !ascent_active() && lm.staged) ascent_begin();   // abort to orbit: then rendezvous and docking
                 crew_say(flying ? "ABORT STAGE: stages separated, ascent engine armed" : "ABORT STAGE: the stage separation bolts have fired");
             }
             if (IsKeyPressed(KEY_M)) {
@@ -1738,12 +1751,12 @@ int main(int argc, char **argv)
                     "Tab  camera (chase, cockpit, 16mm, tower, cinematic, lunar orbit)   Right-drag look/orbit",
                     "PgUp/PgDn  time warp   F5  pause   Esc  menu   F10  outside view on 2nd monitor   F11  fullscreen",
                     "F2  auto crew on/off  F3  16mm film  F4  DSKY  F6  HUD  H  plain-English hints  M  cabin sound",
-                    "F7  engine arm (DES, or ASC after landing)  F8  PGNS mode AUTO/ATT HOLD  F9  ABORT STAGE  Space  ENGINE STOP",
+                    "F7  engine arm (DES, or ASC after landing)  F8  PGNS mode AUTO/ATT HOLD  B  ABORT STAGE  Space  ENGINE STOP",
                     "W/S A/D Q/E or stick/gamepad: hand controller   Up/Down, d-pad or hat: ROD switch (P66)",
                     "",
                     "The crew procedure: R51 V50N25 -> ENTER,  V50N18 -> PRO (maneuver) then ENTER,",
                     "arm the engine, V99N62 -> PRO at TIG-5 s, after radar lock key V57E,",
-                    "engine stop at the contact light.  After landing: L lifts off (P12: at V99 F9, F7, PRO).",
+                    "engine stop at the contact light.  After landing: L lifts off (P12: at V99 B, F7, PRO).",
                     "Docking (in orbit): T/G translate toward/away, arrows sideways, Q/E W/S A/D attitude, Tab to the COAS view",
                     "",
                     "TWO PLAYERS (co-op, UDP port 47012 on the host, both on the same version)",
@@ -1820,6 +1833,14 @@ int main(int argc, char **argv)
         }
 #endif
 
+        if (getenv("AGC_DBGJETS") && ((int)(wall * 2) != (int)((wall - dt) * 2))) {
+            V3 g = lm_gimbal_angles();
+            printf("JETS wall %.1f t %.1f ch5 %03o ch6 %03o rcs %.1f w %+.3f %+.3f %+.3f deg/s  gimb %.2f %.2f %.2f  CDUD %05o %05o %05o  CDU %05o %05o %05o mode %d\n",
+                   wall, lm.t, lm.ch5, lm.ch6, lm.m_rcs, lm.w.x * 57.3, lm.w.y * 57.3, lm.w.z * 57.3, g.x * 57.3, g.y * 57.3, g.z * 57.3,
+                   agc_get_word("CDUXD", 0), agc_get_word("CDUYD", 0), agc_get_word("CDUZD", 0), agc_get_word("CDUX", 0),
+                   agc_get_word("CDUY", 0), agc_get_word("CDUZ", 0), lm_get_attitude_mode());
+            fflush(stdout);
+        }
         if (getenv("AGC_DBGDOCK") && ((int)(wall * 2) != (int)((wall - dt) * 2))) {
             DockGeo g;
             if (ascent_dock_geo(&g))

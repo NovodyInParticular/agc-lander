@@ -152,6 +152,9 @@ void lm_abort_stage(void);             // ABORT STAGE: fire the stage separation
 void lm_engine_stop_reset(void);       // pull the ENGINE STOP button back out
 // The LM stands on the surface (scenario start): no touchdown grading.
 void lm_set_landed(void);
+// Physics only, to let a freshly placed LM settle on its legs (no AGC, no clock).
+void lm_settle(double seconds);
+void lm_place_on_ground(void);   // lowest footpad just touching
 // Descent stage left behind: model origin and rotation in the moon-fixed frame.
 void lm_descent_stage_pose(V3 *fixed, M3 *fixed_from_body);
 void lm_engine_stop(void);             // DPS stop button (latched)
