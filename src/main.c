@@ -241,6 +241,57 @@ enum { CAM_EVA = CAM_COUNT };   // the astronaut's own eyes on the surface: not 
 static const char *cam_names[CAM_COUNT] = { "CHASE", "COCKPIT", "16MM DAC (LMP WINDOW)", "TOWER", "CINEMATIC", "LUNAR ORBIT",
                                             "DOCKING WINDOW (COAS)" };
 static double orbit_yaw = -0.9, orbit_pitch = 0.16, orbit_dist = 24;
+static int focus_override;   // audit: orbit the chase camera about focus_site instead of the LM
+static V3 focus_site;
+
+// Audit after lift-off: the descent stage stays parked, the ascent stage hangs
+// 9 m above it (or, for Columbia, the CSM sits 30 m away for a walk-round).
+static V3 site_to_fixed(V3 p)
+{
+    M3 r = terrain_site_from_fixed();
+    return v3_add(m3_apply(m3_transpose(r), p), v3_scale(m3_row(r, 1), terrain_ref_radius()));
+}
+
+static void audit_after_liftoff(int show_csm, int look_at_ds)
+{
+    static int staged_done;
+    double t = lm.t + lm.tephem;
+    M3 fixed_from_site = m3_transpose(terrain_site_from_fixed());
+    if (!staged_done) {
+        pose_park();
+        lm.staged = 1;
+        lm.ds_landed = 1;
+        lm.liftoff = 1;
+        lm.liftoff_t = lm.t - 100;
+        lm.ds_fixed = site_to_fixed(pose_pos);
+        lm.ds_fixed_rot = m3_mul(fixed_from_site, pose_rot);
+        pose_pos = v3_add(pose_pos, v3_scale(local_up_at(pose_pos), 9.0));
+        staged_done = 1;
+    }
+    focus_override = 0;
+    csm.valid = 0;
+    if (look_at_ds) {
+        focus_override = 1;
+        focus_site = terrain_fixed_to_site(lm.ds_fixed);
+    }
+    if (show_csm) {
+        // Columbia: long axis east-west, probe toward the LM (west), +Z up.
+        V3 up = local_up_at(pose_pos);
+        V3 centre = v3_add(pose_pos, v3_add(v3(30, 0, 0), v3_scale(up, 4)));
+        V3 x = v3(-1, 0, 0), z = up, y = v3_cross(z, x);
+        M3 site_rot;   // columns: body axes in site coordinates
+        site_rot.m[0][0] = x.x; site_rot.m[0][1] = y.x; site_rot.m[0][2] = z.x;
+        site_rot.m[1][0] = x.y; site_rot.m[1][1] = y.y; site_rot.m[1][2] = z.y;
+        site_rot.m[2][0] = x.z; site_rot.m[2][1] = y.z; site_rot.m[2][2] = z.z;
+        V3 origin = v3_sub(centre, m3_apply(site_rot, v3(-4.5, 0, 0)));   // docking ring end
+        csm.valid = 1;
+        csm.r = moon_fixed_to_inertial(site_to_fixed(origin), t);
+        csm.q = m3_to_q4(m3_mul(m3_transpose(moon_matrix(t)), m3_mul(fixed_from_site, site_rot)));
+        focus_override = 1;
+        focus_site = centre;
+    }
+}
+
 
 static ViewCam make_camera(int mode, V3 lm_pos, M3 R, double t_wall)
 {
@@ -294,9 +345,18 @@ static ViewCam make_camera(int mode, V3 lm_pos, M3 R, double t_wall)
         /* fall through */
     default: {
         double d = orbit_dist;
+        V3 focus = focus_override ? focus_site : v3_add(lm_pos, v3_scale(up, 0.5));
+        if (csm.valid && ascent_active() && ascent_phase() >= MP_PROX && !focus_override) {
+            // Docking: frame Eagle and Columbia together.
+            V3 cp = csm_site_pos();
+            double sep = v3_len(v3_sub(cp, lm_pos));
+            if (sep < 300) {
+                focus = v3_scale(v3_add(lm_pos, v3_add(cp, m3_apply(csm_site_rot(), v3(-3.5, 0, 0)))), 0.5);
+                d = fmax(d, sep * 1.1 + 14);
+            }
+        }
         V3 off = v3_add(v3_scale(up, sin(orbit_pitch) * d),
                         v3_scale(v3_add(v3_scale(east, cos(orbit_yaw)), v3_scale(north, sin(orbit_yaw))), cos(orbit_pitch) * d));
-        V3 focus = v3_add(lm_pos, v3_scale(up, 0.5));
         c.pos = v3_add(focus, off);
         c.fwd = v3_norm(v3_scale(off, -1));
         c.upv = up;
@@ -754,7 +814,7 @@ static void spawn_outside_view(void)
 // every panel and the main instruments framed from the same seat
 // (panel index, u, v across/down the panel, fov deg or 0 = whole panel).
 typedef struct { const char *name; int kind; double a, b, c, d; } AuditView;
-enum { AV_EXT, AV_HEAD, AV_PANEL };
+enum { AV_EXT, AV_HEAD, AV_PANEL, AV_STAGED, AV_CSM };
 static const AuditView audit_views[] = {
     { "ext_01_front", AV_EXT, 3.14159, 0.10, 13, 0 },      { "ext_02_front_right", AV_EXT, 2.35619, 0.22, 13, 0 },
     { "ext_03_right", AV_EXT, 1.57080, 0.10, 13, 0 },      { "ext_04_aft_right", AV_EXT, 0.78540, 0.22, 13, 0 },
@@ -778,6 +838,16 @@ static const AuditView audit_views[] = {
     { "in_01_tapes", AV_PANEL, 0, 0.887, 0.325, 20 },      { "in_02_fdai", AV_PANEL, 0, 0.54, 0.31, 22 },
     { "in_03_warning_lights", AV_PANEL, 0, 0.50, 0.05, 22 }, { "in_04_timers", AV_PANEL, 0, 0.33, 0.60, 16 },
     { "in_05_dsky", AV_PANEL, 3, 0.50, 0.50, 24 },         { "in_06_panel_1_switches", AV_PANEL, 0, 0.45, 0.86, 26 },
+    // After lift-off: the ascent stage 9 m up, the descent stage left on the ground.
+    { "asc_01_front", AV_STAGED, 3.14159, 0.05, 15, 0 },    { "asc_02_aft", AV_STAGED, 0.0, 0.10, 15, 0 },
+    { "asc_03_left", AV_STAGED, -1.57080, 0.0, 9, 0 },      { "asc_04_right", AV_STAGED, 1.57080, 0.0, 9, 0 },
+    { "asc_05_below", AV_STAGED, 2.4, -0.55, 10, 0 },       { "asc_06_descent_stage", AV_STAGED, -2.3, 0.45, 22, 1 },
+    // Columbia, parked beside the LM (yaw, pitch, distance about its middle).
+    // (the chase camera's yaw 0 looks from the site's west: Columbia's nose end)
+    { "csm_01_side", AV_CSM, 1.57080, 0.05, 16, 0 },        { "csm_02_nose", AV_CSM, 0.0, 0.10, 14, 0 },
+    { "csm_03_aft", AV_CSM, 3.14159, 0.15, 16, 0 },         { "csm_04_quarter", AV_CSM, 2.3, 0.35, 15, 0 },
+    { "csm_05_below", AV_CSM, -1.2, -0.45, 15, 0 },         { "csm_06_nose_close", AV_CSM, 0.12, 0.04, 6.5, 0 },
+    { "csm_07_aft_close", AV_CSM, 3.0, 0.05, 9, 0 },
 };
 #define N_AUDIT ((int)(sizeof audit_views / sizeof audit_views[0]))
 
@@ -1436,6 +1506,10 @@ int main(int argc, char **argv)
             } else if (av->kind == AV_PANEL) {
                 camera = CAM_CDR;
                 cockpit_look_at_panel((int)av->a, av->b, av->c, av->d, 16.0 / 9.0);
+            } else if (av->kind == AV_STAGED || av->kind == AV_CSM) {
+                audit_after_liftoff(av->kind == AV_CSM, av->d > 0);
+                camera = CAM_CHASE;
+                orbit_yaw = av->a; orbit_pitch = av->b; orbit_dist = av->c;
             } else {
                 camera = CAM_CHASE;
                 orbit_yaw = av->a; orbit_pitch = av->b; orbit_dist = av->c;

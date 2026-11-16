@@ -29,6 +29,7 @@ static const Mat K_BLACK = { 8, 8, 9, M_BLACK };
 static const Mat GLASS = { 20, 25, 35, M_GLASS };
 static const Mat SILVER = { 210, 210, 214, M_METAL };
 static const Mat NOZ_IN = { 30, 28, 27, M_METAL };
+static const Mat AFT_SHIELD = { 34, 32, 30, M_BLACK };   // black-coated blanket over the aft bulkhead
 static const Mat NOZ_OUT = { 78, 72, 66, M_METAL };
 static const Mat K_WHITE = { 215, 215, 210, M_WHITE };
 static const Mat K_RED = { 178, 34, 52, M_WHITE }, K_BLUE = { 40, 50, 120, M_WHITE };
@@ -62,13 +63,26 @@ static void quad(Vector3 a, Vector3 b, Vector3 c, Vector3 d, Mat m) { tri(a, b, 
 
 // Surface of revolution about X between two stations: (x0, r0) -> (x1, r1),
 // from angle t0 to t1 (radians), smooth normals. Faces outward.
+static void band_dir(float x0, float r0, float x1, float r1, float t0, float t1, int seg, Mat m, int inward);
 static void band(float x0, float r0, float x1, float r1, float t0, float t1, int seg, Mat m)
+{
+    band_dir(x0, r0, x1, r1, t0, t1, seg, m, 0);
+}
+
+// The same surface facing the axis (the inside of a nozzle).
+static void band_in(float x0, float r0, float x1, float r1, float t0, float t1, int seg, Mat m)
+{
+    band_dir(x0, r0, x1, r1, t0, t1, seg, m, 1);
+}
+
+static void band_dir(float x0, float r0, float x1, float r1, float t0, float t1, int seg, Mat m, int inward)
 {
     float dx = x1 - x0, dr = r1 - r0;
     float len = sqrtf(dx * dx + dr * dr);
     // Outward normal of the profile line, in the (x, r) plane.
     float nx = len > 0 ? -dr / len : 0, nr = len > 0 ? dx / len : 1;
     if (x1 < x0) { nx = -nx; nr = -nr; }
+    if (inward) { nx = -nx; nr = -nr; }
     for (int i = 0; i < seg; i++) {
         float a0 = t0 + (t1 - t0) * i / seg, a1 = t0 + (t1 - t0) * (i + 1) / seg;
         float c0 = cosf(a0), s0 = sinf(a0), c1 = cosf(a1), s1 = sinf(a1);
@@ -92,7 +106,8 @@ static void disc(float x, float r, int facing, int seg, Mat m)
     for (int i = 0; i < seg; i++) {
         float a0 = 2 * PI * i / seg, a1 = 2 * PI * (i + 1) / seg;
         Vector3 c = V(x, 0, 0), p0 = V(x, r * cosf(a0), r * sinf(a0)), p1 = V(x, r * cosf(a1), r * sinf(a1));
-        if (facing > 0) tri(c, p1, p0, m); else tri(c, p0, p1, m);
+        // Counter-clockwise seen from +X faces +X.
+        if (facing > 0) tri(c, p0, p1, m); else tri(c, p1, p0, m);
     }
 }
 
@@ -144,7 +159,14 @@ static void build(void)
     band(0.0f, 0.42f, -0.30f, 0.50f, 0, 2 * PI, 32, SILVER);          // docking ring / tunnel
     band(-0.30f, 0.50f, XB, R, 0, 2 * PI, 48, CM_SKIN);                // conical crew compartment
     band(XB, R, XB - 0.10f, R - 0.02f, 0, 2 * PI, 48, CM_DARK);        // heat shield shoulder
-    disc(0.0f, 0.42f, 1, 24, K_BLACK);                                   // tunnel opening
+    // The docking tunnel: its inner wall and, 0.28 m in, the forward hatch the probe mounts on.
+    band_in(0.0f, 0.415f, -0.28f, 0.415f, 0, 2 * PI, 32, CM_DARK);
+    disc(-0.28f, 0.42f, 1, 32, SILVER);
+    for (int k = 0; k < 8; k++) {   // hatch latch blocks round the rim
+        float a = k * PI / 4;
+        Vector3 c = V(-0.26f, 0.36f * cosf(a), 0.36f * sinf(a));
+        box(Vector3Subtract(c, V(0.02f, 0.03f, 0.03f)), Vector3Add(c, V(0.02f, 0.03f, 0.03f)), CM_DARK);
+    }
     // Five windows: two forward-looking rendezvous windows, two side windows, the hatch window.
     {
         const float wa[5] = { 0.45f, -0.45f, 1.45f, -1.45f, 0.0f };     // angle from +Z
@@ -200,7 +222,7 @@ static void build(void)
     for (int k = 0; k < 8; k++)
         skin_panel(R, 0.004f, XB - 0.34f, XB - 0.12f, k * PI / 4 + 0.05f, k * PI / 4 + 0.30f, SILVER);
     band(XB - 0.35f, R, XS, R, 0, 2 * PI, 48, SM_SKIN);                     // SM body
-    disc(XS, R, -1, 48, CM_DARK);                                           // aft bulkhead
+    disc(XS, R, -1, 48, AFT_SHIELD);                                        // aft bulkhead heat shield
     // EPS radiator panels (white) and the ECS radiators lower down; sector seams.
     for (int k = 0; k < 6; k++) {
         float a = k * PI / 3 + 0.18f;
@@ -245,7 +267,8 @@ static void build(void)
     // --- SPS engine: dark columbium nozzle extension below the aft heat shield ----------------
     band(XS, 0.62f, XS - 0.30f, 0.45f, 0, 2 * PI, 32, CM_DARK);
     band(XS - 0.30f, 0.45f, (float)CSM_NOZZLE_END, 1.25f, 0, 2 * PI, 40, NOZ_OUT);
-    band((float)CSM_NOZZLE_END, 1.235f, XS - 0.30f, 0.43f, 0, 2 * PI, 40, NOZ_IN);   // inner wall
+    band_in((float)CSM_NOZZLE_END, 1.235f, XS - 0.30f, 0.43f, 0, 2 * PI, 40, NOZ_IN);   // inner wall
+    disc(XS - 0.29f, 0.44f, -1, 24, K_BLACK);                                            // the throat
     for (int k = 1; k < 4; k++) {
         float t = k / 4.0f, x = XS - 0.30f + ((float)CSM_NOZZLE_END - (XS - 0.30f)) * t, r = 0.45f + 0.80f * t;
         band(x + 0.03f, r + 0.008f, x - 0.03f, r + 0.010f, 0, 2 * PI, 40, CM_DARK);
