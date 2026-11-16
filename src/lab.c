@@ -480,9 +480,11 @@ int main(int argc, char **argv)
         else if (!strncmp(a, "snapload:", 9)) { if (load_state(a + 9)) return 1; }
         else if (!strcmp(a, "nextevent")) {
             char why[160];
-            int on = milestone_on_track(why, sizeof why), ms = milestone_next_event();
-            printf("NEXTEVENT t=%.1f (TIG%+.1f s) %s; next event: %s\n", lm.t, lm.t - 369645, why, ms < 0 ? "none" : milestone_name(ms));
-            (void)on;
+            char why2[160];
+            milestone_on_track(why, sizeof why);
+            int ms = milestone_next_event(why2, sizeof why2);
+            printf("NEXTEVENT t=%.1f (TIG%+.1f s) %s; next event: %s%s%s\n", lm.t, lm.t - 369645, why, ms < 0 ? "none" : milestone_name(ms),
+                   ms < 0 ? " - " : "", ms < 0 ? why2 : "");
         }
         else if (!strcmp(a, "advance")) {
             double t = lm.t;

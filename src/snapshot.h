@@ -1,7 +1,8 @@
-// Save states: everything needed to resume a flight exactly - the AGC (core,
-// the engine's hidden counters, the host's queued keystrokes and counter
-// pulses), the LM, the CSM, the crew procedure, the mission, and (in the game)
-// the moonwalk, the cockpit switches and the game flow.
+// Save states: everything sim_advance needs to resume a flight exactly - the
+// AGC (core, the engine's hidden counters, the host's queued keystrokes and
+// counter pulses), the LM, the CSM, the crew procedure, the ascent and docking,
+// and the scenario. Game-side modules (moonwalk, cockpit) are not saved; a
+// program that needs them can add sections with snapshot_register.
 //
 // A blob is a header followed by tagged sections. Each module has one
 // serialiser that both saves and loads (so the two cannot drift apart); a

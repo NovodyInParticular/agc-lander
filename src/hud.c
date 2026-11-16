@@ -252,7 +252,7 @@ static const char *phase_name(void)
 static int minimal;
 void hud_set_minimal(int on) { minimal = on; }
 
-void hud_draw(int w, int h, int dsky_w, float warp, const char *camera_name, int paused)
+void hud_draw(int w, int h, int dsky_w, const char *next_event, const char *camera_name, int paused)
 {
     float scale = h / 1080.0f;
     if (scale < 0.7f) scale = 0.7f;
@@ -333,9 +333,13 @@ status:
         hud_text_centered(font_ui, crew.callout, cx, y0 - 46 * scale, 26 * scale, c);
     }
 
-    // Bottom-right of the scene: warp / camera / help.
-    snprintf(line, sizeof line, "%s   TIME x%.0f%s", camera_name, warp, paused ? "   PAUSED" : "");
+    // Top-right of the scene: camera / pause / help, and the next event to skip to.
+    snprintf(line, sizeof line, "%s%s", camera_name, paused ? "   PAUSED" : "");
     Vector2 m = MeasureTextEx(font_mono, line, 16 * scale, 0.3f);
     hud_text(font_mono, line, w - dsky_w - m.x - 18 * scale, 18 * scale, 16 * scale, TXT);
     hud_text(font_ui, "F1 help", w - dsky_w - 70 * scale, 40 * scale, 16 * scale, DIM);
+    if (next_event) {
+        m = MeasureTextEx(font_ui, next_event, 18 * scale, 0);
+        hud_text(font_ui, next_event, w - dsky_w - m.x - 18 * scale, 64 * scale, 18 * scale, (Color){ 120, 220, 255, 255 });
+    }
 }

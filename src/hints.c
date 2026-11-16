@@ -20,6 +20,9 @@
 
 int hints_on = 1;
 
+static const char *next_event = "";
+void hints_set_next_event(const char *title) { next_event = title ? title : ""; }
+
 #define FT 0.3048
 #define MAXL 3
 
@@ -268,7 +271,7 @@ static void ascent_hints(Hint *h)
             return;
         }
         add(h, "P12 is flying you to orbit: straight up, then the pitch-over. Nothing to do.");
-        add(h, VRT("It shuts the engine off at 5,500 ft/s. PgUp speeds up time", "It shuts the engine off at 5,500 ft/s (about seven minutes)"));
+        add(h, "It shuts the engine off at 5,500 ft/s (about seven minutes)");
         return;
     }
     if (ph == MP_ORBIT) {
@@ -381,7 +384,8 @@ static void compute(Hint *h)
     }
     if (p63 && lm.dps_on) {
         add(h, "Braking burn: the computer is slowing you down from orbit.");
-        add(h, VRT("Nothing to do yet. PgUp speeds up time", "Nothing to do yet: watch the Moon come up in the window"));
+        if (next_event[0]) add(h, VRT("Nothing to do yet. J skips ahead: %s", "Nothing to do yet. NEXT EVENT skips ahead: %s"), next_event);
+        else add(h, "Nothing to do yet: watch the Moon come up in the window");
         return;
     }
     if (p63) {
@@ -389,9 +393,7 @@ static void compute(Hint *h)
                                     "Waiting for the burn. The auto crew runs the checklist.")
                               : VRT("Waiting for the computer. Press F2 if you want the auto crew to do the checklist.",
                                     "Waiting for the computer: it will ask for each step on the DSKY."));
-#ifndef AGC_VR
-        add(h, "PgUp speeds up time");
-#endif
+        if (next_event[0]) add(h, VRT("J skips ahead: %s", "NEXT EVENT skips ahead: %s"), next_event);
     }
 }
 

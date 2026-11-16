@@ -17,10 +17,20 @@ Pick a scenario with **Up/Down** and press **Enter**:
 | Scenario | What happens |
 |---|---|
 | Full mission | P63 waiting at PDI −15 min. You run the real crew checklist. |
-| Powered descent | The AGC and the auto crew get you to 30 s before ignition. |
-| High gate | Fast-forwards to P64, with Tranquility Base coming into view. |
-| Final 500 ft | The computer brings you to 150 m, then it's yours in P66. |
+| Powered descent | 30 s before ignition: the AGC and the crew have run the checklist. PRO at V99. |
+| High gate | 8,500 ft, just before P64 pitches over, with Tranquility Base coming into view. |
+| Final 500 ft | 150 m up in P64; then it's yours in P66. |
 | Lunar lift-off | Tranquility Base, one minute before ascent: P12, orbit, then docking with Columbia. |
+
+Every scenario starts at once, with no fast-forwarding and no time warp. The later
+ones begin from save states of one real flight: the AGC, the crew and the vehicle exactly as they
+were at that moment of a descent the computer flew from PDI −15 min (`make snapshots` makes them).
+
+During the long quiet stretches (the coast to ignition, the braking burn, the approach to high
+gate) **J** skips to the next event: 30 s to ignition, landing radar data good, high gate. It is
+offered only when nothing needs doing before then and your flight is still the one that save state
+continues: same orbit, attitude, switches and computer state (programs, flags), no alarm. Fly it
+differently, or leave something undone, and the time is yours to fly in full.
 
 New to this? Start with **Final 500 ft** and leave **plain-English hints** on (the last menu
 entry, or **H** in flight). A box at the top of the screen tells you what to do next: which key to
@@ -53,7 +63,7 @@ one minute before lift-off (from NASSP's mission state), wherever your LM is sta
    the descent stage stays behind as the launch pad, and its gold foil blows off.
 2. **Ascent.** P12 flies a ten-second vertical rise, the pitch-over, and a seven-minute burn into
    an orbit about 17 x 90 km (Apollo 11: 17.4 x 86.5 km), steering into Columbia's orbital plane.
-   Nothing to do; PgUp speeds up time.
+   Nothing to do but watch.
 3. **Rendezvous.** The real one took 3 1/2 hours of burns (CSI, CDH, TPI, braking). **Enter** on the
    orbit panel skips to the end of it: Eagle station-keeping 40 m (130 ft) from Columbia, nearly
    lined up. The crew keys P00 and V48 for you (0.3 deg deadband, 2-jet translation).
@@ -95,7 +105,7 @@ backs off for another approach. A hard dock ends the mission.
 | M | Cabin sound on/off (heard in the cockpit and 16 mm window views; outside views are silent, as in vacuum) |
 | F10 | Outside view on your **second monitor** (press again to close it) |
 | F11 | Fullscreen / window |
-| PgUp / PgDn | Time warp |
+| J | Skip to the next event (only when nothing needs doing; see above) |
 | Esc | Back to the menu |
 | Right-drag, mouse wheel | Orbit and zoom the outside cameras |
 
@@ -246,7 +256,7 @@ The real LM flew with two crew, and so can you:
 - It uses **UDP port 47012** on the host. On a LAN that usually just works; on Windows allow the
   firewall prompt; on Linux with ufw: `sudo ufw allow 47012/udp`. Over the internet the host
   must forward UDP 47012 on their router.
-- The host owns time: pause and time warp are the Commander's.
+- The host owns time: pause and skipping ahead are the Commander's.
 - Esc on the LM Pilot's side leaves the game.
 
 ## Lunar orbit view

@@ -58,8 +58,12 @@ size_t track_encode(const TrackSample *s, int n, uint8_t **out);
 // Is the flight now the canonical one? 1 = yes. Otherwise why (for debugging).
 int milestone_on_track(char *why, size_t whyn);
 
-// The milestone "advance to next event" may jump to now, or -1.
-int milestone_next_event(void);
+// The milestone "advance to next event" may jump to now, or -1 (why, if
+// given, says what stands in the way).
+int milestone_next_event(char *why, size_t whyn);
+
+// What the player sees after the jump: "Landing radar data good", ...
+const char *milestone_title(int ms);
 
 // What Mission Control says after the jump to a milestone ("" if nothing).
 const char *milestone_callout(int ms);

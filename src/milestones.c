@@ -14,12 +14,22 @@
 extern const unsigned char ms_tig30[], ms_radar[], ms_highgate[], ms_150m[], ms_track[];
 extern const unsigned int ms_tig30_len, ms_radar_len, ms_highgate_len, ms_150m_len, ms_track_len;
 
-static const struct { const char *name; const unsigned char *data; const unsigned int *len; const char *callout; } table[MS_COUNT] = {
-    [MS_TIG30] = { "TIG-30", ms_tig30, &ms_tig30_len, "Houston: \"Eagle, Houston. If you read, you're GO for powered descent.\"" },
-    [MS_RADAR] = { "RADAR", ms_radar, &ms_radar_len, "Houston: \"Eagle, Houston. You are GO to continue powered descent.\"" },
-    [MS_HIGHGATE] = { "HIGH GATE", ms_highgate, &ms_highgate_len, "Houston: \"Eagle, Houston. You're GO for landing.\"" },
-    [MS_150M] = { "150 M", ms_150m, &ms_150m_len, "" },
+static const struct {
+    const char *name, *title;
+    const unsigned char *data;
+    const unsigned int *len;
+    const char *callout;   // Mission Control, as in the Apollo 11 air-to-ground transcript
+} table[MS_COUNT] = {
+    [MS_TIG30] = { "TIG-30", "30 seconds to ignition", ms_tig30, &ms_tig30_len,
+                   "Houston: \"Eagle, Houston. If you read, you're GO for powered descent.\"" },
+    [MS_RADAR] = { "RADAR", "Landing radar data good", ms_radar, &ms_radar_len,
+                   "Houston: \"Eagle, Houston. You are GO to continue powered descent.\"" },
+    [MS_HIGHGATE] = { "HIGH GATE", "High gate, 8,500 ft", ms_highgate, &ms_highgate_len,
+                      "Houston: \"Eagle, Houston. You're GO for landing.\"" },
+    [MS_150M] = { "150 M", "500 ft", ms_150m, &ms_150m_len, "" },
 };
+
+const char *milestone_title(int ms) { return ms >= 0 && ms < MS_COUNT ? table[ms].title : ""; }
 
 const char *milestone_name(int ms) { return ms >= 0 && ms < MS_COUNT ? table[ms].name : "?"; }
 const char *milestone_callout(int ms) { return ms >= 0 && ms < MS_COUNT ? table[ms].callout : ""; }
@@ -225,7 +235,7 @@ int milestone_on_track(char *why, size_t whyn)
 
 int milestone_advance(void)
 {
-    int ms = milestone_next_event();
+    int ms = milestone_next_event(NULL, 0);
     if (ms < 0) return -1;
     int ac = crew.auto_crew, al = crew.auto_land;
     char err[200];
@@ -235,20 +245,24 @@ int milestone_advance(void)
     return ms;
 }
 
-int milestone_next_event(void)
+int milestone_next_event(char *why, size_t whyn)
 {
     static const int targets[] = { MS_TIG30, MS_RADAR, MS_HIGHGATE };
+    char dummy[8];
+    if (!why) { why = dummy; whyn = sizeof dummy; }
     int i = track_index(lm.t);
-    if (i < 0) return -1;
+    if (i < 0) { snprintf(why, whyn, "no events ahead"); return -1; }
     for (size_t k = 0; k < sizeof targets / sizeof targets[0]; k++) {
         int ms = targets[k];
         double tm = milestone_time(ms);
         if (tm <= lm.t) continue;
-        if (tm < lm.t + MIN_JUMP) return -1;   // the next event is about to happen anyway
+        if (tm < lm.t + MIN_JUMP) { snprintf(why, whyn, "%s is only seconds away", milestone_title(ms)); return -1; }
         // Nothing for the crew to do between now and then.
         for (int j = i; j < ntrack && track[j].t <= tm; j++)
-            if (track[j].crew) return -1;
-        return milestone_on_track(NULL, 0) ? ms : -1;
+            if (track[j].crew) { snprintf(why, whyn, "something needs doing first"); return -1; }
+        if (!milestone_on_track(why, whyn)) return -1;
+        return ms;
     }
+    snprintf(why, whyn, "no events ahead");
     return -1;
 }

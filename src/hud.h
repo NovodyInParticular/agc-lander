@@ -13,7 +13,8 @@ void hud_set_minimal(int on);   // only status text (cockpit / orbit views)
 Texture2D hud_fdai_texture(void);   // call before BeginDrawing / any texture mode
 
 // Draw all instruments. dsky_w: width reserved on the right for the DSKY.
-void hud_draw(int w, int h, int dsky_w, float warp, const char *camera_name, int paused);
+// next_event: "J  NEXT EVENT: ..." when one can be skipped to, else NULL.
+void hud_draw(int w, int h, int dsky_w, const char *next_event, const char *camera_name, int paused);
 
 // Small helpers shared with other overlays.
 void hud_text(Font f, const char *s, float x, float y, float size, Color c);

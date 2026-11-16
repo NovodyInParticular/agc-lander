@@ -55,6 +55,7 @@ static double perf_mark(void) { if (perf_on) { rlDrawRenderBatchActive(); if (!p
 #include "render.h"
 #include "rocks.h"
 #include "scenario.h"
+#include "milestones.h"
 #include "sim.h"
 #include "snapshot.h"
 #include "terrain.h"
@@ -75,8 +76,6 @@ typedef struct {
     double after;          // seconds of wall time before the shot
     int start;             // scenario index, -1 = menu
     int camera;
-    double warp;
-    double fast_to_alt;    // fast-forward until altitude below this (m), 0 = off
     int film;
     double ufo;            // force the visitor after N seconds (0 = off)
     int base;              // start the orbit camera over the far side
@@ -98,7 +97,6 @@ static void parse_args(int argc, char **argv, Options *o)
     memset(o, 0, sizeof *o);
     o->after = 8;
     o->start = -1;
-    o->warp = 1;
     o->camera = 0;
     o->monitor = -1;
     for (int i = 1; i < argc; i++) {
@@ -115,8 +113,6 @@ static void parse_args(int argc, char **argv, Options *o)
         else if (!strcmp(argv[i], "--audit")) o->audit = argv[++i];
         else if (!strcmp(argv[i], "--start")) o->start = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--camera")) o->camera = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--warp")) o->warp = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--alt")) o->fast_to_alt = atof(argv[++i]);
         else if (!strcmp(argv[i], "--film")) o->film = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--yaw")) orbit_yaw_opt = atof(argv[++i]);
         else if (!strcmp(argv[i], "--pitch")) orbit_pitch_opt = atof(argv[++i]);
@@ -194,6 +190,29 @@ static void start_world(void)
         rocks_init();
     }
     lm.surface = surface_cb;
+}
+
+// A menu scenario: the world at PDI-15, then the scenario's own start - the
+// save state of the canonical descent it begins from (milestones.h), or the
+// lift-off. Returns 0, or -1 with the reason in err (the world stays at PDI-15).
+static void start_ascent(int keep_pose);
+static int start_scenario(int scen, char *err, size_t errn)
+{
+    start_world();
+    static const int ms_of[] = { -1, MS_TIG30, MS_HIGHGATE, MS_150M, -1 };
+    if (scen >= 1 && scen <= 3 && milestone_load(ms_of[scen], err, errn)) return -1;
+    if (scen == 4) start_ascent(0);
+    return 0;
+}
+
+// FINAL 500 FT: "I'm going to take it." PGNS ATT HOLD and a ROD click put
+// Luminary in P66; the player has the ROD switch.
+static void take_over_p66(void)
+{
+    crew.auto_crew = 0;
+    lm_set_attitude_mode(1);
+    lm_rod_click(-1);
+    crew_say("\"I'm going to take it.\"  P66: you have the ROD switch");
 }
 
 // The ascent from where the LM stands now (after a landing) or from the
@@ -597,7 +616,7 @@ static void draw_lpd(int w, int h, double fov_y)
 
 // ---------------------------------------------------------------------------
 
-typedef enum { GS_MENU, GS_FASTFWD, GS_FLY } GameState;
+typedef enum { GS_MENU, GS_FLY } GameState;
 
 static const char *scen_names[] = {
     "FULL MISSION  -  P63 at PDI -15 min",
@@ -608,8 +627,8 @@ static const char *scen_names[] = {
 };
 static const char *scen_desc[] = {
     "Luminary099 is in P63 waiting for the crew. The real procedure: fine-align option, auto maneuver, arm the descent engine, enable ignition at V99, then permit landing radar updates with V57.",
-    "Fast-forwards the real AGC and crew through the pre-burn checklist and stops 30 seconds before ignition.",
-    "Fast-forwards through the braking phase. Pitch-over is just ahead and Tranquility Base comes into view.",
+    "The real AGC and crew have run the pre-burn checklist: 30 seconds to ignition. At V99, PRO lets the engine light.",
+    "The end of the braking phase, 8,500 ft up. Pitch-over is just ahead and Tranquility Base comes into view.",
     "The computer brings you to 150 m. Then it's yours: ROD switch (Up/Down arrows) in P66, ENGINE STOP at contact.",
     "Tranquility Base, one minute to lift-off. At V99: ABORT STAGE (B), ENG ARM ASC (F7), PRO. P12 flies you to orbit, then you dock.",
 };
@@ -924,6 +943,16 @@ static ViewCam vr_eye_cam(const ViewCam *b, const VrEye *e)
 // Pointing at the floating display (a hand or a controller): where the ray
 // meets it, in display pixels (top-left origin); -1 when it misses.
 static float ui_ptr_x = -1, ui_ptr_y = -1;
+
+// The NEXT EVENT button on the floating display (shown while an event can be skipped to).
+static Rectangle next_btn = { 1600 / 2 - 260, 900 - 190, 520, 74 };
+static int next_btn_on;
+static int ptr_on_next_btn(void)
+{
+    return next_btn_on && ui_ptr_x >= next_btn.x && ui_ptr_x < next_btn.x + next_btn.width && ui_ptr_y >= next_btn.y &&
+           ui_ptr_y < next_btn.y + next_btn.height;
+}
+
 static void vr_ui_pointer(void)
 {
     const VrInput *in = vr_input();
@@ -992,6 +1021,8 @@ static void vr_map_keys(int menu, int results_showing)
         in_set_key(KEY_ENTER, (in->b && !hold_b) || (ui_ptr_x >= 0 && (in->rtrig > 0.6f || in->ltrig > 0.6f)));
     } else {
         in_set_key(VKEY_PRO, in->b && !hold_b);
+        // Pointing at NEXT EVENT and pulling a trigger (or pinching).
+        in_set_key(KEY_J, ptr_on_next_btn() && (in->rtrig > 0.6f || in->ltrig > 0.6f));
     }
     // Docking: the left hand works the translation controller.
     extern int controls_vr_docking;
@@ -1175,27 +1206,34 @@ int main(int argc, char **argv)
     if (opt.ufo > 0) extras_force_ufo(opt.ufo);
     if (opt.base) globe_goto(-84.6 + (opt.base > 1 ? opt.base : 9000) * 2.2 / 30300.0, 168.2, opt.base > 1 ? opt.base : 9000);
 
-    GameState gs = opt.start >= 0 ? GS_FASTFWD : GS_MENU;
+    GameState gs = opt.start >= 0 ? GS_FLY : GS_MENU;
     if (opt.spectator) gs = GS_FLY;
     int scen = opt.start >= 0 ? opt.start : 0, menu_sel = 0;
     int camera = opt.camera;
-    double warp = opt.warp;
     int paused = 0, show_dsky = camera != CAM_CDR && opt.start <= 0, show_help = 0, show_hud = 1;
     int prev_camera = camera;
     float film = (float)opt.film;
     double wall = 0, sim_acc = 0;
-    double ff_target_alt = 0;
     int manual_takeover = 0;
     int pgns_mode = 2;
     int retry_req = 0, results_hidden = 0;
-    if (gs == GS_FASTFWD) {
-        crew.auto_crew = 1;
-        ff_target_alt = opt.fast_to_alt > 0 ? opt.fast_to_alt : scen == 2 ? 2600 : scen == 3 ? 150 : 0;
-        if (scen == 0) gs = GS_FLY;
-        if (scen == 4) { start_ascent(0); crew.auto_crew = getenv("AGC_AUTOCREW") != NULL; gs = GS_FLY; show_dsky = camera != CAM_CDR; }
+    if (opt.start >= 0 && !opt.spectator) {
+        // Started from the command line: the full mission and high gate with the
+        // automatic crew (screenshots, --demo), the others as from the menu.
+        char err[200];
+        if (start_scenario(scen, err, sizeof err)) { fprintf(stderr, "agc-lander: %s\n", err); crew_say(err); }
+        crew.auto_crew = scen == 4 ? getenv("AGC_AUTOCREW") != NULL : scen == 0 || scen == 2;
+        if (scen == 3) { take_over_p66(); manual_takeover = 1; }
+        if (scen == 4) show_dsky = camera != CAM_CDR;
+        pgns_mode = lm_get_attitude_mode() == 1 ? 1 : 2;
+        if (opt.crash && scen >= 1 && scen <= 3) lm_engine_stop();
     }
+    // "Advance to next event": the milestone it would jump to (-1: none), checked twice a second.
+    int next_ev = -1;
+    double next_ev_wall = -1;
+    static char adv_text[200], next_label[96];
     // Fades to black between parts of the mission ("21 hours later").
-    enum { FADE_NONE, FADE_LIFTOFF, FADE_RNDZ };
+    enum { FADE_NONE, FADE_LIFTOFF, FADE_RNDZ, FADE_ADVANCE };
     int fade_kind = FADE_NONE, fade_done = 0;
     double fade_t = 0;
     const char *fade_text = "";
@@ -1264,6 +1302,22 @@ int main(int argc, char **argv)
         // The DSKY floats over the bottom-right corner; the 3D view always fills the screen.
         int dsky_w = (show_dsky && gs != GS_MENU) ? (int)(h * 0.30f) : 0;
 
+        // Can the flight skip ahead to the next event? (checked twice a second)
+        if (wall - next_ev_wall > 0.5 || wall < next_ev_wall) {
+            next_ev_wall = wall;
+            int possible = gs == GS_FLY && !paused && coop_role != COOP_CLIENT && !opt.spectator && !opt.audit &&
+                           fade_kind == FADE_NONE && eva_phase() == EVA_INSIDE && !ascent_active() && !lm.touchdown;
+            next_ev = possible ? milestone_next_event(NULL, 0) : -1;
+            if (next_ev >= 0) {
+                int secs = (int)(milestone_time(next_ev) - lm.t + 0.5);
+                snprintf(next_label, sizeof next_label, "J  NEXT EVENT: %s  (in %d:%02d)", milestone_title(next_ev), secs / 60, secs % 60);
+            }
+        }
+        hints_set_next_event(next_ev >= 0 ? milestone_title(next_ev) : "");
+#ifdef AGC_VR
+        next_btn_on = next_ev >= 0 && gs == GS_FLY && fade_kind == FADE_NONE;
+#endif
+
         // ---------------- Input ----------------
         if (opt.spectator) {
             if (IsKeyPressed(KEY_TAB)) camera = (camera + 1) % CAM_COUNT;
@@ -1327,16 +1381,18 @@ int main(int argc, char **argv)
                 scen = menu_sel;
                 coop_stop();
                 if (coop_host_on && coop_start_host() != 0) crew_say("Co-op: UDP port 47012 is busy");
-                start_world();
-                crew.auto_crew = 1;
+                char err[200];
+                if (start_scenario(scen, err, sizeof err)) crew_say(err);
+                crew.auto_crew = scen == 2;   // high gate: the computer lands unless you take over
                 manual_takeover = 0;
                 results_hidden = 0;
                 show_dsky = (scen == 0 || scen == 4) && camera != CAM_CDR;   // F4 shows it any time
-                ff_target_alt = scen == 2 ? 2600 : scen == 3 ? 150 : 0;
-                gs = scen == 0 || scen == 4 ? GS_FLY : GS_FASTFWD;
-                if (scen == 0) crew.auto_crew = 0;
-                if (scen == 4) { start_ascent(0); crew.auto_crew = 0; }
+                gs = GS_FLY;
+                if (scen == 3) { take_over_p66(); manual_takeover = 1; }
+                pgns_mode = lm_get_attitude_mode() == 1 ? 1 : 2;
+                sim_acc = 0;
                 fade_kind = FADE_NONE;
+                next_ev = -1;
             }
         } else {
             if (IsKeyPressed(KEY_TAB)) camera = (camera + 1) % CAM_COUNT;
@@ -1352,8 +1408,28 @@ int main(int argc, char **argv)
             if (IsKeyPressed(KEY_F4)) show_dsky = !show_dsky;
             if (IsKeyPressed(KEY_F5) || IsKeyPressed(KEY_PAUSE)) paused = !paused;
             if (IsKeyPressed(KEY_F6)) show_hud = !show_hud;
-            if (IsKeyPressed(KEY_PAGE_UP)) warp = warp >= 60 ? 60 : warp < 1 ? 1 : warp * (warp < 2 ? 2 : warp < 5 ? 2.5 : 2);
-            if (IsKeyPressed(KEY_PAGE_DOWN)) warp = warp <= 1 ? 1 : warp / (warp <= 2 ? 2 : warp <= 5 ? 2.5 : 2);
+            static int j_debug_done;   // AGC_PRESS_J=SECONDS: press J once at that wall time (screenshots, tests)
+            int j_debug = !j_debug_done && getenv("AGC_PRESS_J") && wall >= atof(getenv("AGC_PRESS_J"));
+            if (j_debug) j_debug_done = 1;
+            if ((IsKeyPressed(KEY_J) || j_debug) && fade_kind == FADE_NONE) {
+                // Advance to the next event: only where nothing needs doing and the
+                // flight is the one the save state continues.
+                char why[160];
+                int ms = coop_role == COOP_CLIENT ? -1 : milestone_next_event(why, sizeof why);
+                if (coop_role == COOP_CLIENT) crew_say("The Commander (host) decides when to skip ahead");
+                else if (ms < 0) {
+                    char m[220];
+                    snprintf(m, sizeof m, "Can't skip ahead: %s", why);
+                    crew_say(m);
+                } else {
+                    int secs = (int)(milestone_time(ms) - lm.t + 0.5);
+                    snprintf(adv_text, sizeof adv_text, "%d MIN %02d S LATER  -  %s", secs / 60, secs % 60, milestone_title(ms));
+                    fade_kind = FADE_ADVANCE;
+                    fade_t = 0;
+                    fade_done = 0;
+                    fade_text = adv_text;
+                }
+            }
             if (IsKeyPressed(KEY_F7)) {
                 int arm = lm.engine_armed ? ARM_OFF : (ascent_active() || lm.staged) ? ARM_ASC : ARM_DES;
                 lm_set_engine_arm(arm);
@@ -1561,31 +1637,8 @@ int main(int argc, char **argv)
             if (got) last_pkt = GetTime();
             if (bye || (last_pkt > 0 && GetTime() - last_pkt > 20) || (last_pkt == 0 && GetTime() > 60)) break;
             if (camera == CAM_CDR) camera = CAM_CHASE;
-        } else if (gs == GS_FASTFWD) {
-            // Run the real AGC flat out while the screen shows progress.
-            double t0 = GetTime();
-            int done = 0;
-            while (GetTime() - t0 < 0.025 && !done) {
-                sim_advance(1.0);
-                if (scen == 1) done = lm.t > 369615;                        // TIG - 30 s
-                else if (ff_target_alt > 0) done = lm.dps_on && lm.altitude < ff_target_alt;
-                if (lm.touchdown) done = 1;
-            }
-            if (done) {
-                gs = GS_FLY;
-                if (scen == 3) {
-                    crew.auto_crew = 0;
-                    manual_takeover = 1;
-                    pgns_mode = 1;
-                    lm_set_attitude_mode(1);   // PGNS ATT HOLD ...
-                    lm_rod_click(-1);          // ... and a ROD click: Luminary switches to P66
-                    crew_say("\"I'm going to take it.\"  P66: you have the ROD switch");
-                }
-                if (scen == 1) crew.auto_crew = 0;
-                if (opt.crash) lm_engine_stop();
-            }
         } else if (gs == GS_FLY && !paused && coop_role != COOP_CLIENT) {
-            sim_acc += dt * warp;
+            sim_acc += dt;
             double t0 = GetTime();
             while (sim_acc > 0.02 && GetTime() - t0 < 0.03) {
                 sim_advance(0.02);
@@ -1630,6 +1683,16 @@ int main(int argc, char **argv)
                     ascent_rendezvous();
                     camera = prev_camera = CAM_DOCK;
                     show_dsky = 0;
+                } else if (fade_kind == FADE_ADVANCE) {
+                    int ms = milestone_advance();
+                    if (ms >= 0) {
+                        pgns_mode = lm_get_attitude_mode() == 1 ? 1 : 2;
+                        sim_acc = 0;
+                        if (milestone_callout(ms)[0]) crew_say(milestone_callout(ms));
+                    } else {
+                        crew_say("Can't skip ahead: the flight changed during the fade");
+                    }
+                    next_ev = -1;
                 }
             }
             if (fade_t >= 3.8) fade_kind = FADE_NONE;
@@ -1734,6 +1797,7 @@ int main(int argc, char **argv)
             if (gs == GS_FLY && vcam == CAM_CDR && in->aim_ok[1] && !eva_at_hatch()) {
                 M3 Rt = m3_transpose(lm_site_rot());
                 V3 o = v3_add(cam.pos, vr_map(&cam, in->aim_pos[1])), d = v3_norm(vr_map(&cam, in->aim_dir[1]));
+                if (ptr_on_next_btn()) pressed = 0;   // the trigger is pressing NEXT EVENT on the display
                 double dist = cockpit_pointer(m3_apply(Rt, v3_sub(o, lm_site_pos())), m3_apply(Rt, d), pressed);
                 laser = 1;
                 laser_hit = dist > 0;
@@ -1798,7 +1862,12 @@ int main(int argc, char **argv)
         } else {
             hud_set_minimal(vcam == CAM_CDR || vcam == CAM_GLOBE || vcam == CAM_EVA || vcam == CAM_DOCK);
             if (vcam == CAM_DOCK) draw_coas(scene_w, h);
-            if (show_hud) hud_draw(w, h, 0, (float)warp, vcam == CAM_EVA ? "MOONWALK" : cam_names[vcam], paused);
+#ifdef AGC_VR
+            const char *nl = NULL;   // the headset has the NEXT EVENT button instead
+#else
+            const char *nl = next_ev >= 0 ? next_label : NULL;
+#endif
+            if (show_hud) hud_draw(w, h, 0, nl, vcam == CAM_EVA ? "MOONWALK" : cam_names[vcam], paused);
             hints_set_cockpit(vcam == CAM_CDR);
             hud_camera_is_docking = vcam == CAM_DOCK;
             if (show_hud && gs == GS_FLY) hints_draw(w, h, 0);
@@ -1825,13 +1894,6 @@ int main(int argc, char **argv)
                          coop_peer_connected() ? (Color){ 120, 220, 255, 255 } : (Color){ 255, 190, 60, 255 });
             }
             if (vcam == CAM_GLOBE) globe_overlay(&cam, scene_w, h, lm_site_pos());
-            if (gs == GS_FASTFWD) {
-                DrawRectangle(0, h / 2 - 50, scene_w, 100, (Color){ 0, 0, 0, 170 });
-                char b[96];
-                snprintf(b, sizeof b, "FAST-FORWARDING THE AGC   GET %03d:%02d:%02d   ALT %.0f ft",
-                         (int)(lm.t / 3600), (int)(lm.t / 60) % 60, (int)fmod(lm.t, 60), lm.altitude / 0.3048);
-                hud_text_centered(font_bold, b, scene_w / 2.0f, h / 2 - 18, 30, (Color){ 255, 190, 60, 255 });
-            }
             if (show_dsky && vcam != CAM_EVA) {   // out on the surface the computer stays in the cabin
                 float dh = dsky_w * DSKY_H / DSKY_W, m = h * 0.015f;
                 dsky_update_draw((Rectangle){ w - dsky_w - m, h - dh - m, (float)dsky_w, dh });
@@ -1840,7 +1902,7 @@ int main(int argc, char **argv)
                 const char *lines[] = {
                     "DSKY  0-9  V verb  N noun  Enter  C clr  R rset  P pro  K key rel  = +  - -",
                     "Tab  camera (chase, cockpit, 16mm, tower, cinematic, lunar orbit)   Right-drag look/orbit",
-                    "PgUp/PgDn  time warp   F5  pause   Esc  menu   F10  outside view on 2nd monitor   F11  fullscreen",
+                    "J  skip to the next event (when nothing needs doing)   F5  pause   Esc  menu   F10  2nd monitor   F11  fullscreen",
                     "F2  auto crew on/off  F3  16mm film  F4  DSKY  F6  HUD  H  plain-English hints  M  cabin sound",
                     "F7  engine arm (DES, or ASC after landing)  F8  PGNS mode AUTO/ATT HOLD  B  ABORT STAGE  Space  ENGINE STOP",
                     "W/S A/D Q/E or stick/gamepad: hand controller   Up/Down, d-pad or hat: ROD switch (P66)",
@@ -1853,7 +1915,7 @@ int main(int argc, char **argv)
                     "TWO PLAYERS (co-op, UDP port 47012 on the host, both on the same version)",
                     "Host:  menu TWO PLAYERS: HOST, then start a scenario   (or agc-lander --host)",
                     "Join:  menu JOIN A GAME AS LM PILOT, type the host's IP, Enter   (or --join IP)",
-                    "Commander (host): flies the LM, ROD switch, Space ENGINE STOP, F5 pause, PgUp/PgDn warp",
+                    "Commander (host): flies the LM, ROD switch, Space ENGINE STOP, F5 pause, J next event",
                     "LM Pilot (join): DSKY keys, panels, F7 engine arm, F8 PGNS mode, Space ENGINE STOP",
                     "The LM Pilot's stick/keys add to the Commander's.  Esc on the LM Pilot's side leaves.",
                 };
@@ -1873,6 +1935,14 @@ int main(int argc, char **argv)
             vr_stats(&load, &scale, &fps);
             snprintf(b, sizeof b, "%.0f fps   load %.0f%%   resolution %.0f%%", fps, load * 100, scale * 100);
             hud_text(font_mono, b, 18, h - 26, 14, (Color){ 120, 128, 138, 200 });
+        }
+        if (next_btn_on && show_hud) {
+            int over = ptr_on_next_btn();
+            DrawRectangleRounded(next_btn, 0.3f, 8, over ? (Color){ 40, 110, 150, 235 } : (Color){ 10, 30, 45, 215 });
+            DrawRectangleRoundedLinesEx(next_btn, 0.3f, 8, 2, (Color){ 120, 220, 255, 255 });
+            char b[128];
+            snprintf(b, sizeof b, "NEXT EVENT:  %s", milestone_title(next_ev));
+            hud_text_centered(font_bold, b, next_btn.x + next_btn.width / 2, next_btn.y + 20, 28, (Color){ 230, 245, 255, 255 });
         }
         if (ui_ptr_x >= 0) {   // where the hand / controller points on the display
             DrawCircleV((Vector2){ ui_ptr_x, ui_ptr_y }, 9, (Color){ 120, 255, 170, 230 });
