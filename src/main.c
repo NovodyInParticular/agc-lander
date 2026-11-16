@@ -1741,7 +1741,7 @@ int main(int argc, char **argv)
                          (int)(lm.t / 3600), (int)(lm.t / 60) % 60, (int)fmod(lm.t, 60), lm.altitude / 0.3048);
                 hud_text_centered(font_bold, b, scene_w / 2.0f, h / 2 - 18, 30, (Color){ 255, 190, 60, 255 });
             }
-            if (show_dsky) {
+            if (show_dsky && vcam != CAM_EVA) {   // out on the surface the computer stays in the cabin
                 float dh = dsky_w * DSKY_H / DSKY_W, m = h * 0.015f;
                 dsky_update_draw((Rectangle){ w - dsky_w - m, h - dh - m, (float)dsky_w, dh });
             }
