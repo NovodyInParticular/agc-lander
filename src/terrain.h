@@ -37,7 +37,8 @@ V3 terrain_fixed_dir_to_site(V3 dir);         // moon-fixed direction -> site fr
 M3 terrain_site_from_fixed(void);              // rotation, rows = east, up, south
 double terrain_ref_radius(void);
 
-// Moon radius below a selenographic lat/lon (rad), for physics.
+// Moon radius below a selenographic lat/lon (rad), for physics: the ground
+// plus any boulder there (terrain_shape.h).
 double terrain_radius_at(double lat, double lon);
 
 // Sun direction in the site frame (unit). Set before the first frame.

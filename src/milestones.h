@@ -20,6 +20,9 @@ enum {
     MS_RADAR,      // landing radar data good, V57 not yet keyed
     MS_HIGHGATE,   // 2600 m, about to pitch over into P64 (the HIGH GATE scenario)
     MS_150M,       // 150 m in P64 (FINAL 500 FT: the player takes over in P66)
+    // Scenarios from other flights (not on the canonical track):
+    MS_BOULDERS,   // Luminary aimed onto West crater's boulder-strewn rim; 150 m, ~100 s of hover fuel
+    MS_SITE2,      // retargeted 7 km downrange at PDI-15; high gate
     MS_COUNT
 };
 
@@ -33,6 +36,12 @@ int milestone_load(int ms, char *err, size_t errn);
 double milestone_time(int ms);
 
 // --- Canonical track ------------------------------------------------------------
+
+// Where the scenario flights aim (terrain plane, m east, m south of the site).
+#define BOULDERS_X -270.0   // West crater's east rim (the crater: -380, -120, radius 95 m)
+#define BOULDERS_Z -120.0
+#define SITE2_X -7000.0
+#define SITE2_Z -60.0
 
 #define TRACK_NFLAGS 16   // FLAGWRD0..9, FLGWRD10..13, DAPBOOLS, RADMODES
 
@@ -69,7 +78,7 @@ const char *milestone_title(int ms);
 const char *milestone_callout(int ms);
 
 // Jump to the next event if one is offered: returns the milestone, or -1.
-// Who flies (crew.auto_crew, auto_land) stays as it was.
+// Who flies (crew.auto_crew, auto_land) and the rendezvous radar fault stay as they were.
 int milestone_advance(void);
 
 #endif

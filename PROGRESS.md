@@ -168,9 +168,9 @@ Milestones, each with a headless test in src/selftest*.c:
 2. DONE 2026-11-16: ascent and docking (see the section below).
 3. Two builds: PC "high" (i9-9900K 8c/16t, RTX 2070 Super, 32 GB: more terrain detail,
    shadows, 4K) and Quest 3 (72 fps, cut-down shaders). One code base, a quality tier switch.
-4. Quest APK itself (old phases 3-4) still needs: Android NDK, Khronos OpenXR loader, astcenc,
-   and the headset authorised for USB debugging (it shows "unauthorized" until the prompt in
-   the headset is accepted).
+   DONE in part 2026-11-16 (render_quality() tiers, see the Quest section below); the PC-high
+   tier's extra detail and on-headset tuning are still open.
+4. DONE 2026-11-16: the Quest APK (org.agclander.quest) builds and runs on the Quest 3S.
 - Still missing in the moonwalk: an astronaut body/shadow, footprints, the second crewman,
   rock collisions, VR hand interaction.
 
@@ -218,6 +218,61 @@ Plan step 2 is done. Everything is flown by the real Luminary099 except the skip
 - Still open: plan step 3 (PC high / Quest quality tiers), step 4 (Quest APK); the descent
   stage's own crash when it falls after an abort is not animated; the flag is not blown over at
   lift-off; ascent sound is the DPS rumble scaled, not its own.
+
+## Quest session (2026-11-16, branch quest-vr: c631488, 9bdd4a1)
+- render_quality() tiers (high PC / low headset; AGC_QUALITY and AGC_Q_* overrides) as shader
+  #defines; the 2D UI as an OpenXR quad layer; hand tracking; menu pointer; controller models in
+  the hands (src/vrhands.c) with the hinted button lit; per-eye frustum culling of terrain chunks
+  and rock tiles; cockpit hull box-cut for leaning. Device 340YC10G9V07YY (Quest 3S). Unattended
+  testing on the headset is impossible (it must be worn). Options file on the headset:
+  /sdcard/Android/data/org.agclander.quest/files/agc-args.txt (always delete after a test run).
+- Unresolved reports: seams that look like gaps, missing textures (not reproduced on the PC or
+  the stand-in; screenshots from the headset wanted).
+
+## No fast-forward, no time warp: save states (2026-11-16, branch quest-vr)
+Goal from the user: every scenario starts at once, the full mission feels shorter without
+skipping time. Commits ca7e66f, 3268d90, 8769df0 and the scenarios commit after them.
+- src/snapshot.c/.h: tagged, versioned sections (AGC, LM, CSM, CREW, MISN, SCEN), each module has
+  ONE serialiser for save and load plus a layout fingerprint (a blob whose field list no longer
+  matches is refused); rope CRC checked. AGC section: all of agc_t except the rope, the engine's
+  hidden statics via agc_engine_hidden_io() (vendor patch in agc_engine.c, CountCDUX/Y/Z hoisted),
+  the host's key queue, pending counter pulses, mct_debt, RHC, RR dither. Function-local statics
+  in crew/csm/ascent moved to file scope. ANY NEW STATE that sim_advance reads must be added to
+  its module's *_snap(), then `make snapshots`.
+- agc-selftest: round trip (crew typing; mid-P63): hostile wipe (lift-off LGC, erasable XORed,
+  engine statics and queues poisoned), restore, 60 s, byte compare. Mutation-tested: catches
+  7 of 9 deliberately dropped fields; the 2 it cannot catch (pend_total, RHC counts) are
+  self-correcting / overwritten. Also: every embedded milestone must load (stale = test failure)
+  and the 150 M one must land.
+- src/terrain_shape.c: the ground's shape without raylib (lab command `terrain`). Boulders are
+  generated there too (rocks.c draws the same list, same RNG order: the old field is unchanged)
+  and the physics surface includes them (terrain_rock_height, 4 m grid, r >= 0.3 m).
+- `make snapshots` = agc-lab snapgen: the game's start + automatic crew from NASSP PDI-15 over the
+  terrain; milestones TIG-30, RADAR (data good, before V57), HIGH GATE (2600 m), 150 M, a 1 Hz
+  track, and two scenario flights; tools/embed_bin.py --multi -> data/snapshots.c (checked in).
+- Menu: POWERED DESCENT/HIGH GATE/FINAL 500 FT load TIG-30/HIGH GATE/150 M (FINAL 500 FT keeps the
+  P66 takeover). GS_FASTFWD, PgUp/PgDn, --warp, --alt, HUD "TIME x" removed.
+- Advance to next event: J (PC), NEXT EVENT button on the headset display (point + trigger).
+  Targets TIG-30, RADAR, HIGH GATE, offered only when milestones.c finds the flight on the
+  canonical track (30 m, 0.3 m/s, 1.5 deg, program, flashing display, engine arm, PGNS mode, 16
+  AGC flag words, no alarm, no keys going in) and the canonical crew does nothing before the
+  milestone. Fade + Mission Control line. Debug: AGC_PRESS_J=SECONDS. tools/test_advance.sh.
+- Scenarios (menu, under SCENARIOS): 1202 ALARMS = RADAR + agc_host_set_rr_dither(6400) (RR CDUs
+  CDUT 035 / CDUS 036 counted up and down, each count steals an MCT: Luminary overflows by itself,
+  1202 after V57, 1201 with V16N68); Houston's GO 20 s after each alarm (crew.c), the auto crew
+  does V05N09E then RSET/KEY REL. LOW FUEL OVER THE BOULDERS = its own flight retargeted onto
+  West crater's east rim (1500 blocks, ~8% of the rim covered), saved at 150 m with 100 s of
+  hover fuel; the generator picks a spot where an upright LM's bell/base hits a block and trims
+  the aim, so the computer's own landing is CRASH_BOULDER. Houston calls 60 / 30 s to bingo.
+  ANOTHER SITE = retargeted 7 km downrange (Site 2 features in terrain_shape.c), from high gate.
+  Retargeting = moving P63's LAND (stable-member, B24) by the same offset as RLS, like Apollo 12's
+  N69 update (changing RLS alone does nothing once P63 has run IGNALG; V37E63E re-selection stalls
+  on the astronaut clock). The canonical flight lands ~520 m E / 250 m N of its aim (navigation
+  error in the NASSP state); the scenario flights aim that much short. tools/test_scenarios.sh.
+- Found, not changed: the canonical touchdown point is on a 12.8 deg slope (it settles to ~12.6
+  deg); the results grade only first contact.
+- Possible next: an ascent milestone (insertion) so J can skip the 7-minute P12 burn; more
+  scenarios from the same machinery.
 
 ## Next
 - GitHub: public repo + v0.1.0 release (2026-11-02). GPLv2 (Virtual AGC, NASSP data).

@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "agc_host.h"
+#include "agc_mem.h"
 #include "crew.h"
 #include "lm.h"
 #include "moon.h"
@@ -20,6 +21,11 @@ static int v50n18_count, v57_done, stopped, armed_said, ign_said, lr_said, p64_s
            flat_said, thr_said, low_said, prev_dps, prog_alarm_said, contact_said;
 static int asc_count_said, asc_lift_said, asc_pitch_said, asc_quiet_said, asc_cut_said, prev_aps;
 static double next_action;   // the automatic crew's next allowed action (sim time)
+// Program alarms: FAILREG entries seen, Mission Control's GO pending (code, due
+// time), 1202s called so far, the automatic crew's V05N09 / RSET sequence.
+static int alarm_n, go_code, go_1202_n, alarm_step;
+static double go_t;
+static int fuel60_said, fuel30_said;   // Mission Control's propellant calls
 
 int crew_typing(void) { return keypos < keylen || pro_held; }
 
@@ -39,6 +45,9 @@ void crew_reset(void)
     v50n18_count = v57_done = stopped = armed_said = ign_said = lr_said = p64_said = p65_said = p66_said = 0;
     flat_said = thr_said = low_said = prev_dps = prog_alarm_said = contact_said = 0;
     asc_count_said = asc_lift_said = asc_pitch_said = asc_quiet_said = asc_cut_said = prev_aps = 0;
+    alarm_n = go_code = go_1202_n = alarm_step = 0;
+    go_t = 0;
+    fuel60_said = fuel30_said = 0;
 }
 
 // Orbit from the vehicle state: perilune and apolune heights above the
@@ -160,6 +169,33 @@ void crew_step(void)
     if (lm.dps_on && lm.altitude < 30 && !low_said) { crew_say("\"Picking up some dust...\""); low_said = 1; }
     if (d->prog_lamp && !prog_alarm_said) { crew_say("\"Program alarm.\""); prog_alarm_said = 1; }
     if (!d->prog_lamp) prog_alarm_said = 0;
+
+    // Mission Control on program alarms during the descent: a new entry in the
+    // FAILREGs (first, second, latest; RSET clears them), and the guidance
+    // officers' GO about 20 s later, as on Apollo 11.
+    {
+        int f0 = agc_get_word("FAILREG", 0) & 037777, f1 = agc_get_word("FAILREG", 1) & 037777;
+        int f2raw = agc_get_word("FAILREG", 2), f2 = f2raw & 037777;
+        int n = (f0 != 0) + (f1 != 0) + (f2 != 0) + ((f2raw & 040000) != 0);
+        int code = f2 ? f2 : f1 ? f1 : f0;
+        if (n > alarm_n && code && lm.dps_on && !go_code) { go_code = code; go_t = lm.t + 20; }
+        alarm_n = n;
+        if (go_code && lm.t >= go_t) {
+            if (go_code == 01202)
+                crew_say(go_1202_n++ == 0 ? "Houston: \"Roger. We got... We're GO on that alarm.\"" : "Houston: \"We're GO on that alarm.\"");
+            else if (go_code == 01201)
+                crew_say("Houston: \"Roger. 1201 alarm. We're GO. Same type. We're GO.\"");
+            go_code = 0;
+        }
+    }
+    // Mission Control's propellant calls: seconds to bingo (20 s of hovering
+    // left: land within them or abort).
+    if (lm.dps_on && !lm.staged && !lm.touchdown) {
+        double hover = lm_mass() * 1.62 / (305.0 * 9.80665);   // kg/s at hover thrust
+        double to_bingo = lm.m_dps / hover - 20;
+        if (to_bingo < 60 && !fuel60_said) { crew_say("Houston: \"60 seconds.\""); fuel60_said = 1; }
+        if (to_bingo < 30 && !fuel30_said) { crew_say("Houston: \"30 seconds.\""); fuel30_said = 1; }
+    }
     if (lm.probe_contact && !stopped && lm.dps_on && !crew.auto_crew && !contact_said) {
         crew_say("CONTACT LIGHT: press ENGINE STOP (Space)");
         contact_said = 1;
@@ -192,7 +228,8 @@ void crew_step(void)
     if (lm.land_result == LAND_CRASH && !crew.landed) {
         crew.landed = 1;
         static const char *why[] = { "", "came down too fast, the legs folded",
-                                     "hit the ground moving sideways", "landed too tilted", "tipped over" };
+                                     "hit the ground moving sideways", "landed too tilted", "tipped over",
+                                     "came down on a boulder: the descent stage is holed" };
         char m[160];
         snprintf(m, sizeof m, "CRASH: the LM %s", why[lm.crash_cause]);
         crew_say(m);
@@ -228,6 +265,15 @@ void crew_step(void)
         lm_set_engine_arm(ARM_ASC);
         lm_set_attitude_mode(2);
         crew_type("Pp");
+    } else if (d->prog_lamp && alarm_step == 0) {
+        // Aldrin on a program alarm: the codes on the DSKY ...
+        crew_type("V05N09E");
+        alarm_step = 1;
+    } else if (alarm_step == 1 && !go_code) {
+        // ... and once Houston has called it, reset the light and give the
+        // display back to the program.
+        crew_type(d->key_rel ? "RK" : "R");
+        alarm_step = 0;
     } else {
         acted = 0;
     }
@@ -270,6 +316,8 @@ void crew_snap(Snap *s)
     snap_int(s, &crew.in_orbit); snap_int(s, &crew.outside);
     snap_chars(s, keybuf, sizeof keybuf); snap_int(s, &keypos); snap_int(s, &keylen);
     snap_f64(s, &key_wait); snap_int(s, &pro_held); snap_f64(s, &last_step_t); snap_f64(s, &next_action);
+    snap_int(s, &alarm_n); snap_int(s, &go_code); snap_int(s, &go_1202_n); snap_int(s, &alarm_step); snap_f64(s, &go_t);
+    snap_int(s, &fuel60_said); snap_int(s, &fuel30_said);
     int *flags[] = { &v50n18_count, &v57_done, &stopped, &armed_said, &ign_said, &lr_said, &p64_said, &p65_said, &p66_said,
                      &flat_said, &thr_said, &low_said, &prev_dps, &prog_alarm_said, &contact_said,
                      &asc_count_said, &asc_lift_said, &asc_pitch_said, &asc_quiet_said, &asc_cut_said, &prev_aps };

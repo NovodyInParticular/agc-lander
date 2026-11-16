@@ -22,6 +22,17 @@ Pick a scenario with **Up/Down** and press **Enter**:
 | Final 500 ft | 150 m up in P64; then it's yours in P66. |
 | Lunar lift-off | Tranquility Base, one minute before ascent: P12, orbit, then docking with Columbia. |
 
+Under **SCENARIOS**:
+
+| Scenario | What happens |
+|---|---|
+| 1202 alarms | Radar data good at 29,000 ft, as on Apollo 11: the rendezvous radar's two CDUs, powered out of phase, count up and down 6,400 times a second each and steal the computer's time. Luminary's executive overflows by itself: 1202 and 1201 alarms, software restarts, and the guidance keeps flying. V05N09E shows the code, RSET clears the light, Houston calls GO. |
+| Low fuel over the boulders | 500 ft, the LOW LEVEL light on, about 100 s of hovering left, and Luminary steering for West crater's boulder-strewn rim. The spot it has picked puts a block under the descent stage: take over in P66 and stop short or fly over. Houston calls 60 and 30 seconds. |
+| Another site | Luminary was given a landing site 7 km downrange (an update to its target, as later missions uplinked): high gate over new ground with an old crater, a fresh blocky one and a crater chain. |
+
+Boulders are solid: a block taller than the descent engine's bell clearance (about half a metre
+above the footpads) or the stage's base under the LM breaks the descent stage.
+
 Every scenario starts at once, with no fast-forwarding and no time warp. The later
 ones begin from save states of one real flight: the AGC, the crew and the vehicle exactly as they
 were at that moment of a descent the computer flew from PDI −15 min (`make snapshots` makes them).

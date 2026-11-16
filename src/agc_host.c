@@ -41,6 +41,12 @@ static int pend_total;
 
 static void (*out_hook)(int channel, int value);
 
+// The rendezvous radar CDU fault (agc_host_set_rr_dither).
+static double rr_dither_pps, rr_dither_acc;
+static int rr_dither_n;
+void agc_host_set_rr_dither(double pps) { rr_dither_pps = pps > 0 ? pps : 0; }
+double agc_host_rr_dither(void) { return rr_dither_pps; }
+
 int agc_host_keys_queued(void) { return (evq_tail - evq_head + EVQ_SIZE) % EVQ_SIZE; }
 
 static void evq_push(int type, int value)
@@ -198,6 +204,18 @@ int ChannelInput(agc_t *State)
     if (evq_cooldown)
         evq_cooldown--;
 
+    // RR CDU dither: CDUT and CDUS counted up and down in turn, so the angles
+    // stay put while the counts eat the computer's time.
+    if (rr_dither_pps > 0) {
+        rr_dither_acc += 2 * rr_dither_pps / AGC_MCT_PER_SECOND;
+        if (rr_dither_acc >= 1.0) {
+            rr_dither_acc -= 1.0;
+            int n = rr_dither_n++ & 3;
+            UnprogrammedIncrement(State, n & 1 ? 036 : 035, n & 2 ? 023 : 021);
+            return 1;
+        }
+    }
+
     if (pend_total) {
         for (int n = 0; n < 0200; n++) {
             int c = (pend_scan + n) & 0177;
@@ -262,6 +280,8 @@ int agc_host_init(void)
     memset(pend, 0, sizeof pend);
     memset(pend_kind, 0, sizeof pend_kind);
     pend_total = 0;
+    rr_dither_pps = rr_dither_acc = 0;
+    rr_dither_n = 0;
     if (agc_engine_init(&agc, NULL, NULL, 0) != 0)
         return 1;
     return load_rope(&agc, rope_image, rope_image_len);
@@ -408,4 +428,7 @@ void agc_host_snap(Snap *s)
     snap_i16(s, &rhc_pitch);
     snap_i16(s, &rhc_yaw);
     snap_i16(s, &rhc_roll);
+    snap_f64(s, &rr_dither_pps);
+    snap_f64(s, &rr_dither_acc);
+    snap_int(s, &rr_dither_n);
 }

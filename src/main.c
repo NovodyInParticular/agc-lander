@@ -175,6 +175,7 @@ static V3 local_up_at(V3 site)
 
 static void start_world(void)
 {
+    hints_set_note("", 0);
     agc_host_init();
     lm.surface = NULL;
     lm_reset();
@@ -192,28 +193,7 @@ static void start_world(void)
     lm.surface = surface_cb;
 }
 
-// A menu scenario: the world at PDI-15, then the scenario's own start - the
-// save state of the canonical descent it begins from (milestones.h), or the
-// lift-off. Returns 0, or -1 with the reason in err (the world stays at PDI-15).
 static void start_ascent(int keep_pose);
-static int start_scenario(int scen, char *err, size_t errn)
-{
-    start_world();
-    static const int ms_of[] = { -1, MS_TIG30, MS_HIGHGATE, MS_150M, -1 };
-    if (scen >= 1 && scen <= 3 && milestone_load(ms_of[scen], err, errn)) return -1;
-    if (scen == 4) start_ascent(0);
-    return 0;
-}
-
-// FINAL 500 FT: "I'm going to take it." PGNS ATT HOLD and a ROD click put
-// Luminary in P66; the player has the ROD switch.
-static void take_over_p66(void)
-{
-    crew.auto_crew = 0;
-    lm_set_attitude_mode(1);
-    lm_rod_click(-1);
-    crew_say("\"I'm going to take it.\"  P66: you have the ROD switch");
-}
 
 // The ascent from where the LM stands now (after a landing) or from the
 // LGC's landing site (the LUNAR LIFT-OFF scenario): P12 one minute to go.
@@ -624,6 +604,9 @@ static const char *scen_names[] = {
     "HIGH GATE  -  P64 approach phase",
     "FINAL 500 FT  -  you fly P66",
     "LUNAR LIFT-OFF  -  P12 ascent, then dock with Columbia",
+    "1202 ALARMS  -  the computer overloads in P63",
+    "LOW FUEL OVER THE BOULDERS  -  500 ft, 100 s of fuel",
+    "ANOTHER SITE  -  7 km downrange, from high gate",
 };
 static const char *scen_desc[] = {
     "Luminary099 is in P63 waiting for the crew. The real procedure: fine-align option, auto maneuver, arm the descent engine, enable ignition at V99, then permit landing radar updates with V57.",
@@ -631,9 +614,80 @@ static const char *scen_desc[] = {
     "The end of the braking phase, 8,500 ft up. Pitch-over is just ahead and Tranquility Base comes into view.",
     "The computer brings you to 150 m. Then it's yours: ROD switch (Up/Down arrows) in P66, ENGINE STOP at contact.",
     "Tranquility Base, one minute to lift-off. At V99: ABORT STAGE (B), ENG ARM ASC (F7), PRO. P12 flies you to orbit, then you dock.",
+    "Radar data good at 29,000 ft: key V57E. The rendezvous radar's CDUs steal the computer's time, as on Apollo 11: 1202 and 1201 alarms. V05N09E reads the code, RSET clears it, Houston calls GO.",
+    "Luminary is setting you down on West crater's boulder-strewn rim, LOW LEVEL lit: about 100 s of hovering left. Take over in P66 and find a clear spot - the computer's spot is on a boulder.",
+    "Luminary was retargeted 7 km downrange before PDI: high gate over new ground, an old crater, a fresh blocky one, a crater chain. The computer lands unless you take over.",
 };
-#define N_SCEN 5
+#define N_SCEN 8
+#define SCEN_EXTRA 5   // the scenarios after the mission: under their own heading
 enum { ROW_HOST = N_SCEN, ROW_JOIN, ROW_HINTS, N_ROWS };
+
+// Menu line positions (drawing and pointing): the mission, a SCENARIOS
+// heading, the scenarios, then the settings.
+static float menu_row_y(int r)
+{
+#ifdef AGC_VR
+    const float top = 226, step = 40;   // the headset's display is 900 px tall
+#else
+    const float top = 240, step = 42;
+#endif
+    return top + r * step + (r >= SCEN_EXTRA ? 40 : 0) + (r >= ROW_HOST ? 12 : 0) + (r >= ROW_HINTS ? 12 : 0);
+}
+
+// Text broken into lines no wider than maxw; returns the y below the last line.
+static float menu_wrapped(Font f, const char *s, float x, float y, float size, float maxw, float lh, Color c)
+{
+    char line[512];
+    while (*s) {
+        int n = 0, cut = 0;
+        for (;;) {
+            int e = n;
+            while (s[e] && s[e] != ' ') e++;
+            snprintf(line, sizeof line, "%.*s", e, s);
+            if (n && MeasureTextEx(f, line, size, size * 0.02f).x > maxw) break;
+            cut = e;
+            if (!s[e]) break;
+            n = e + 1;
+        }
+        snprintf(line, sizeof line, "%.*s", cut, s);
+        hud_text(f, line, x, y, size, c);
+        y += lh;
+        s += cut;
+        while (*s == ' ') s++;
+    }
+    return y;
+}
+
+// The line Mission Control / the hints keep up during a scenario.
+static const char *scen_note[N_SCEN] = {
+    [5] = "1202 ALARMS: the rendezvous radar is eating the computer's time. Program alarms will come.",
+    [6] = "LOW FUEL: the computer is putting you down on a boulder. Take over and find a clear spot.",
+};
+
+// A menu scenario: the world at PDI-15, then the scenario's own start - the
+// save state of the canonical descent it begins from (milestones.h), or the
+// lift-off. Returns 0, or -1 with the reason in err (the world stays at PDI-15).
+static int start_scenario(int scen, char *err, size_t errn)
+{
+    start_world();
+    static const int ms_of[N_SCEN] = { -1, MS_TIG30, MS_HIGHGATE, MS_150M, -1, MS_RADAR, MS_BOULDERS, MS_SITE2 };
+    hints_set_note(scen >= 0 && scen < N_SCEN ? scen_note[scen] : "", scen == 6);
+    if (scen >= 0 && scen < N_SCEN && ms_of[scen] >= 0 && milestone_load(ms_of[scen], err, errn)) return -1;
+    if (scen == 4) start_ascent(0);
+    if (scen == 5) agc_host_set_rr_dither(6400);   // Apollo 11: 6,400 counts a second on each RR CDU
+    return 0;
+}
+
+// FINAL 500 FT: "I'm going to take it." PGNS ATT HOLD and a ROD click put
+// Luminary in P66; the player has the ROD switch.
+static void take_over_p66(void)
+{
+    crew.auto_crew = 0;
+    lm_set_attitude_mode(1);
+    lm_rod_click(-1);
+    crew_say("\"I'm going to take it.\"  P66: you have the ROD switch");
+}
+
 
 // ---------------------------------------------------------------------------
 // Outside view on a second monitor: a second instance of the game, fed the
@@ -749,7 +803,8 @@ static void draw_results(int w, int h, int client)
     int crash = lm.land_result == LAND_CRASH;
     const char *title = crash ? "CRASH" : lm.land_result == LAND_HARD ? "HARD LANDING" : "THE EAGLE HAS LANDED";
     static const char *why[] = { "", "Came down too fast: the landing legs folded",
-                                 "Hit the ground moving sideways", "Touched down too tilted", "Tipped over after touchdown" };
+                                 "Hit the ground moving sideways", "Touched down too tilted", "Tipped over after touchdown",
+                                 "Came down on a boulder: it holed the descent stage" };
     const char *sub = crash ? why[lm.crash_cause]
                     : lm.land_result == LAND_HARD ? "Bent a few struts, but the crew is fine" : "A soft, steady landing";
     Color tc = crash ? (Color){ 255, 80, 64, 255 } : lm.land_result == LAND_HARD ? (Color){ 255, 190, 60, 255 }
@@ -977,8 +1032,8 @@ static int vr_menu_row(void)
 {
     if (ui_ptr_y < 0 || ui_ptr_x < 60 || ui_ptr_x > 1300) return -1;
     for (int r = 0; r < N_ROWS; r++) {
-        float y = 250 + r * 56 + (r >= ROW_HOST ? (r == ROW_HINTS ? 32 : 16) : 0);
-        if (ui_ptr_y >= y - 10 && ui_ptr_y < y + 40) return r;
+        float y = menu_row_y(r);
+        if (ui_ptr_y >= y - 6 && ui_ptr_y < y + 36) return r;
     }
     return -1;
 }
@@ -1222,9 +1277,9 @@ int main(int argc, char **argv)
         // automatic crew (screenshots, --demo), the others as from the menu.
         char err[200];
         if (start_scenario(scen, err, sizeof err)) { fprintf(stderr, "agc-lander: %s\n", err); crew_say(err); }
-        crew.auto_crew = scen == 4 ? getenv("AGC_AUTOCREW") != NULL : scen == 0 || scen == 2;
+        crew.auto_crew = scen == 4 ? getenv("AGC_AUTOCREW") != NULL : scen == 0 || scen == 2 || scen == 7;
         if (scen == 3) { take_over_p66(); manual_takeover = 1; }
-        if (scen == 4) show_dsky = camera != CAM_CDR;
+        if (scen == 4 || scen == 5) show_dsky = camera != CAM_CDR;
         pgns_mode = lm_get_attitude_mode() == 1 ? 1 : 2;
         if (opt.crash && scen >= 1 && scen <= 3) lm_engine_stop();
     }
@@ -1383,10 +1438,10 @@ int main(int argc, char **argv)
                 if (coop_host_on && coop_start_host() != 0) crew_say("Co-op: UDP port 47012 is busy");
                 char err[200];
                 if (start_scenario(scen, err, sizeof err)) crew_say(err);
-                crew.auto_crew = scen == 2;   // high gate: the computer lands unless you take over
+                crew.auto_crew = scen == 2 || scen == 7;   // high gate: the computer lands unless you take over
                 manual_takeover = 0;
                 results_hidden = 0;
-                show_dsky = (scen == 0 || scen == 4) && camera != CAM_CDR;   // F4 shows it any time
+                show_dsky = (scen == 0 || scen == 4 || scen == 5) && camera != CAM_CDR;   // F4 shows it any time
                 gs = GS_FLY;
                 if (scen == 3) { take_over_p66(); manual_takeover = 1; }
                 pgns_mode = lm_get_attitude_mode() == 1 ? 1 : 2;
@@ -1399,7 +1454,7 @@ int main(int argc, char **argv)
             if (camera != prev_camera) {
                 // The cockpit has its own DSKY: hide the side one there.
                 if (camera == CAM_CDR) show_dsky = 0;
-                else if (prev_camera == CAM_CDR) show_dsky = scen == 0 || ascent_active();   // only the full mission and the ascent need it
+                else if (prev_camera == CAM_CDR) show_dsky = scen == 0 || scen == 5 || ascent_active();   // the scenarios that need it
                 prev_camera = camera;
             }
             if (IsKeyPressed(KEY_F1)) show_help = !show_help;
@@ -1827,34 +1882,35 @@ int main(int argc, char **argv)
                      84, 182, 24, (Color){ 170, 176, 186, 255 });
             for (int i = 0; i < N_SCEN; i++) {
                 Color c = i == menu_sel ? (Color){ 255, 190, 60, 255 } : (Color){ 200, 205, 212, 255 };
-                hud_text(font_bold, scen_names[i], 100, 250 + i * 56, 30, c);
+                hud_text(font_bold, scen_names[i], 100, menu_row_y(i), 28, c);
             }
+            hud_text(font_ui, "SCENARIOS", 100, menu_row_y(SCEN_EXTRA) - 34, 20, (Color){ 130, 136, 146, 255 });
             {
                 Color c4 = menu_sel == ROW_HOST ? (Color){ 255, 190, 60, 255 } : (Color){ 200, 205, 212, 255 };
                 Color c5 = menu_sel == ROW_JOIN ? (Color){ 255, 190, 60, 255 } : (Color){ 200, 205, 212, 255 };
-                hud_text(font_bold, coop_host_on ? "TWO PLAYERS:  HOST  -  you are the Commander" : "TWO PLAYERS:  OFF", 100, 250 + ROW_HOST * 56 + 16, 30, c4);
+                hud_text(font_bold, coop_host_on ? "TWO PLAYERS:  HOST  -  you are the Commander" : "TWO PLAYERS:  OFF", 100, menu_row_y(ROW_HOST), 28, c4);
                 char jl[128];
                 snprintf(jl, sizeof jl, "JOIN A GAME AS LM PILOT:  %s%s", join_ip[0] ? join_ip : "type the host's IP",
                          menu_sel == ROW_JOIN && ((int)(GetTime() * 2) & 1) ? "_" : "");
-                hud_text(font_bold, jl, 100, 250 + ROW_JOIN * 56 + 16, 30, c5);
+                hud_text(font_bold, jl, 100, menu_row_y(ROW_JOIN), 28, c5);
                 Color c6 = menu_sel == ROW_HINTS ? (Color){ 255, 190, 60, 255 } : (Color){ 200, 205, 212, 255 };
-                hud_text(font_bold, hints_on ? "PLAIN-ENGLISH HINTS:  ON" : "PLAIN-ENGLISH HINTS:  OFF", 100, 250 + ROW_HINTS * 56 + 32, 30, c6);
+                hud_text(font_bold, hints_on ? "PLAIN-ENGLISH HINTS:  ON" : "PLAIN-ENGLISH HINTS:  OFF", 100, menu_row_y(ROW_HINTS), 28, c6);
             }
             const char *desc = menu_sel < N_SCEN ? scen_desc[menu_sel]
                              : menu_sel == ROW_HINTS ? "Enter toggles. A box at the top of the screen tells you what to do next in plain words: which key, which way to lean, when to cut the engine. H toggles it in flight."
                              : menu_sel == ROW_HOST ? "Enter toggles. With HOST on, start any scenario above: a second player can join you as LM Pilot (UDP port 47012). You fly; they run the DSKY and the panels."
                                                     : "Type the Commander's IP address (or name) and press Enter. You get the LMP station: DSKY, panels, switches. Same version of the game on both sides.";
 #ifdef AGC_VR
-            hud_text(font_ui, desc, 100, 250 + N_ROWS * 56 + 34, 25, (Color){ 175, 182, 192, 255 });   // a headset needs bigger type
+            menu_wrapped(font_ui, desc, 100, menu_row_y(N_ROWS - 1) + 44, 22, UI_W - 200, 26, (Color){ 175, 182, 192, 255 });
 #else
-            hud_text(font_ui, desc, 100, 250 + N_ROWS * 56 + 40, 21, (Color){ 160, 168, 178, 255 });
+            menu_wrapped(font_ui, desc, 100, menu_row_y(N_ROWS - 1) + 56, 21, w - 200, 27, (Color){ 160, 168, 178, 255 });
 #endif
 #ifdef AGC_VR
-            hud_text(font_ui, "Point at a line (or thumbstick up/down) and pull the trigger - or pinch, with bare hands - to start.", 100, h - 150, 25, (Color){ 165, 172, 182, 255 });
+            hud_text(font_ui, "Point at a line (or thumbstick up/down) and pull the trigger - or pinch, with bare hands - to start.", 100, h - 104, 21, (Color){ 165, 172, 182, 255 });
             hud_text(font_ui, "In flight:  right stick = hand controller   left stick = yaw, up/down = ROD switch   A = ENGINE STOP   B = PRO",
-                     100, h - 112, 23, (Color){ 150, 156, 166, 255 });
-            hud_text(font_ui, "Point at a switch and pull the trigger (or pinch)   X = hatch   Y = camera   Menu button = back here",
-                     100, h - 80, 23, (Color){ 150, 156, 166, 255 });
+                     100, h - 78, 19, (Color){ 150, 156, 166, 255 });
+            hud_text(font_ui, "Point at a switch and pull the trigger (or pinch)   X = hatch   Y = camera   NEXT EVENT skips ahead   Menu = back here",
+                     100, h - 54, 19, (Color){ 150, 156, 166, 255 });
 #else
             hud_text(font_ui, "Up/Down to choose, Enter to start.  In flight: F1 for help.", 100, h - 70, 22,
                      (Color){ 130, 136, 146, 255 });

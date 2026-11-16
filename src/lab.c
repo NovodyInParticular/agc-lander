@@ -23,6 +23,9 @@
 //   snapsave:FILE  save state now; snapload:FILE restore one (also a milestone name: snapload:HIGH GATE)
 //   nextevent      is the flight on the canonical track, and which event can it advance to?
 //   advance        advance to the next event if offered (prints ADVANCE <name> or ADVANCE none)
+//   plane          the LM's position on the terrain's plane (m east, m south of the site), heading of travel
+//   rrfault:PPS    rendezvous radar CDU dither (Apollo 11's 1202 alarms: 6400)
+//   alarms:SECS    run with the crew, printing every program alarm (PROG lamp, FAILREG)
 
 #include <math.h>
 #include <stdio.h>
@@ -38,8 +41,10 @@
 #include "csm.h"
 #include "ascent.h"
 #include "milestones.h"
+#include "sim.h"
 #include "snapshot.h"
 #include "terrain.h"
+#include "terrain_shape.h"
 
 #define DEG (PI_D / 180.0)
 
@@ -228,7 +233,136 @@ static int write_file(const char *path, const uint8_t *b, size_t n)
 // start (start_world, the automatic crew, the terrain under the radar), with
 // milestones saved at the moment their condition first holds and a sample of
 // the flight every second.
-static const char *snap_file[MS_COUNT] = { "tig30", "radar", "highgate", "150m" };
+static const char *snap_file[MS_COUNT] = { "tig30", "radar", "highgate", "150m", "boulders", "site2" };
+
+// Move Luminary's landing site to a spot on the terrain plane, as Apollo 12's
+// Noun 69 landing site update did: P63's guidance target LAND (stable-member
+// frame, set from RLS when P63 started) shifts by the same amount, and RLS
+// follows. The results measure from the new site; the terrain stays anchored
+// where it was (scenario_info.rls).
+static void retarget(double x, double z, double site_x, double site_z)
+{
+    V3 old = agc_get_vec("RLS", 27);
+    V3 rls = v3_scale(terrain_plane_to_dir(x, z), v3_len(old));
+    double t = scenario_info.tland + lm.tephem;
+    M3 sm = scenario_info.refsmmat;
+    V3 land = agc_get_vec("LAND", 24);
+    V3 check = m3_apply(sm, moon_fixed_to_inertial(old, t));
+    V3 d = m3_apply(sm, v3_sub(moon_fixed_to_inertial(rls, t), moon_fixed_to_inertial(old, t)));
+    agc_set_vec("LAND", v3_add(land, d), 24);
+    agc_set_vec("RLS", rls, 27);
+    double lat, lon, rad;
+    moon_fixed_to_latlon(terrain_plane_to_dir(site_x, site_z), &lat, &lon, &rad);
+    scenario_info.site_lat = lat;
+    scenario_info.site_lon = lon;
+    printf("SNAPGEN   retarget %.0f m; LAND from RLS reproduced to %.1f m\n", v3_len(d), v3_len(v3_sub(check, land)));
+}
+
+static void start_flight(void)
+{
+    agc_host_init();
+    lm.surface = NULL;
+    lm_reset();
+    lm_attach_agc();
+    crew_reset();
+    ascent_reset();
+    scenario_pre_pdi();
+    terrain_shape_init(scenario_info.rls);
+    lm.surface = terrain_surface_cb;
+    crew.auto_crew = 1;
+}
+
+// A scenario from its own flight: retargeted at PDI-15, saved when the
+// descent passes alt_m; fuel_s > 0 leaves that many seconds of hovering
+// propellant (the AGC's mass estimate follows).
+// Where the canonical flight touched down relative to its target (its
+// navigation error, much as Apollo 11 landed long); the scenario flights aim
+// that much short so they come down where they are meant to.
+static double miss_x, miss_z;
+
+// How surely an upright LM set down at x, z comes down on a boulder: the
+// least, over its spots within 3 m, of how far the worst block reaches into
+// the engine bell or the stage base (m, positive = a strike). As in lm.c.
+static double boulder_hazard(double x, double z)
+{
+    double worst = 1e9;
+    for (double ox = -3; ox <= 3; ox += 1.5)
+        for (double oz = -3; oz <= 3; oz += 1.5) {
+            double hit = -1e9, cx = x + ox, cz = z + oz;
+            for (int k = 0; k < 9; k++) {
+                static const double p[9][3] = { { 0.55, 0, 0 }, { 0.55, 0.75, 0 }, { 0.55, -0.75, 0 }, { 0.55, 0, 0.75 }, { 0.55, 0, -0.75 },
+                                                { 1.15, 1.9, 1.9 }, { 1.15, 1.9, -1.9 }, { 1.15, -1.9, 1.9 }, { 1.15, -1.9, -1.9 } };
+                double h = terrain_rock_height(cx + p[k][1], cz + p[k][2]) - p[k][0];
+                if (h > hit) hit = h;
+            }
+            if (hit < worst) worst = hit;
+        }
+    return worst;
+}
+
+static int snapgen_flight(const char *dir, int ms, double x, double z, double alt_m, double fuel_s, int onto_boulders)
+{
+    double aim_x = x - miss_x, aim_z = z - miss_z;
+    if (onto_boulders) {
+        // The block-strewn spot nearest the target where the computer would set
+        // Eagle down on a boulder; one test flight trims the aim onto it.
+        double best = -1e9, bx = x, bz = z;
+        for (double dx = -40; dx <= 40; dx += 1)
+            for (double dz = -40; dz <= 40; dz += 1) {
+                double hz = boulder_hazard(x + dx, z + dz) - 0.002 * sqrt(dx * dx + dz * dz);
+                if (hz > best) { best = hz; bx = x + dx; bz = z + dz; }
+            }
+        x = bx;
+        z = bz;
+        aim_x = x - miss_x;
+        aim_z = z - miss_z;
+        start_flight();
+        retarget(aim_x, aim_z, x, z);
+        while (!lm.touchdown && lm.t < 371000) sim_advance(0.5);
+        double lx, lz;
+        terrain_site_to_plane(terrain_fixed_to_site(moon_inertial_to_fixed(lm.r, lm.t + lm.tephem)), &lx, &lz);
+        aim_x += x - lx;
+        aim_z += z - lz;
+        printf("SNAPGEN   boulder spot %.0f, %.0f (blocks %.2f m into the stage); test flight landed %.1f m off it\n", x, z, best,
+               sqrt((x - lx) * (x - lx) + (z - lz) * (z - lz)));
+    }
+    start_flight();
+    retarget(aim_x, aim_z, x, z);
+    double t0 = lm.t, t_down = 0;
+    int saved = 0;
+    char path[512];
+    while (lm.t - t0 < 2400) {
+        sim_advance(0.1);
+        if (!saved && lm.dps_on && lm.altitude < alt_m) {
+            if (fuel_s > 0) {
+                double hover = lm_mass() * 1.62 / (305.0 * 9.80665);
+                double cut = lm.m_dps - fuel_s * hover;
+                lm.m_dps -= cut;
+                agc_set_dp("MASS", 0, agc_get_dp("MASS", 0, 16) - cut, 16);
+            }
+            uint8_t *b;
+            size_t n = snapshot_save(&b, milestone_name(ms), ms);
+            snprintf(path, sizeof path, "%s/%s.snap", dir, snap_file[ms]);
+            if (!n || write_file(path, b, n)) return 1;
+            free(b);
+            saved = 1;
+            double px, pz;
+            terrain_site_to_plane(terrain_fixed_to_site(moon_inertial_to_fixed(lm.r, lm.t + lm.tephem)), &px, &pz);
+            printf("SNAPGEN %-9s t=%.1f (TIG%+.1f s)  alt %7.0f m  at %.0f, %.0f (target %.0f, %.0f)  DPS %.0f kg  %zu bytes\n",
+                   milestone_name(ms), lm.t, lm.t - 369645, lm.altitude, px, pz, x, z, lm.m_dps, n);
+        }
+        if (lm.touchdown && !t_down) t_down = lm.t;
+        if (t_down && lm.t - t_down > 5) break;
+    }
+    if (!saved) { fprintf(stderr, "SNAPGEN: %s never reached\n", milestone_name(ms)); return 1; }
+    double px, pz;
+    terrain_site_to_plane(terrain_fixed_to_site(moon_inertial_to_fixed(lm.r, lm.t + lm.tephem)), &px, &pz);
+    static const char *res[] = { "none", "good", "hard", "crash" };
+    printf("SNAPGEN   the automatic crew: %s%s at %.0f, %.0f, %.2f m/s, tilt %.1f deg, DPS %.0f kg\n", res[lm.land_result],
+           lm.land_result == LAND_CRASH && lm.crash_cause == CRASH_BOULDER ? " (on a boulder)" : "", px, pz,
+           -lm.touchdown_speed, lm.touchdown_tilt * 180 / PI_D, lm.m_dps);
+    return 0;
+}
 
 static int snapgen(const char *dir)
 {
@@ -274,7 +408,7 @@ static int snapgen(const char *dir)
                 fire[MS_HIGHGATE] = lm.dps_on && lm.altitude < 2600;
                 fire[MS_150M] = lm.dps_on && lm.altitude < 150;
             }
-            for (int m = 0; m < MS_COUNT; m++) {
+            for (int m = 0; m < MS_BOULDERS; m++) {
                 if (have[m] || !fire[m]) continue;
                 uint8_t *b;
                 size_t n = snapshot_save(&b, milestone_name(m), m);
@@ -296,7 +430,7 @@ static int snapgen(const char *dir)
         if (lm.touchdown && !t_down) t_down = lm.t;
         if (t_down && lm.t - t_down > 5) break;
     }
-    for (int m = 0; m < MS_COUNT; m++)
+    for (int m = 0; m < MS_BOULDERS; m++)   // the canonical flight's own milestones
         if (!have[m]) { fprintf(stderr, "SNAPGEN: milestone %s never reached\n", milestone_name(m)); fails++; }
     // Advance targets must have a quiet lead-in (the track marks actions only to the second).
     int targets[] = { MS_TIG30, MS_RADAR, MS_HIGHGATE };
@@ -315,7 +449,12 @@ static int snapgen(const char *dir)
            t_down, t_down - 369645, lm.land_result == 1 ? "good" : lm.land_result == 2 ? "hard" : "crash");
     free(b);
     free(trk);
-    return fails;
+    if (fails) return fails;
+    terrain_site_to_plane(terrain_fixed_to_site(moon_inertial_to_fixed(lm.r, lm.t + lm.tephem)), &miss_x, &miss_z);
+    printf("SNAPGEN   canonical touchdown %.0f m east, %.0f m south of the target: the scenario flights aim that much short\n", miss_x, miss_z);
+    if (snapgen_flight(dir, MS_BOULDERS, BOULDERS_X, BOULDERS_Z, 150, 100, 1)) return 1;
+    if (snapgen_flight(dir, MS_SITE2, SITE2_X, SITE2_Z, 2600, 0, 0)) return 1;
+    return 0;
 }
 
 static int load_state(const char *arg)
@@ -478,6 +617,63 @@ int main(int argc, char **argv)
             free(b);
         }
         else if (!strncmp(a, "snapload:", 9)) { if (load_state(a + 9)) return 1; }
+        else if (!strncmp(a, "rrfault:", 8)) agc_host_set_rr_dither(atof(a + 8));
+        else if (!strncmp(a, "vec:", 4)) {
+            for (int sc = 22; sc <= 30; sc++) {
+                V3 v = agc_get_vec(a + 4, sc);
+                printf("   %s at B%d: |v| %.1f  (%.1f %.1f %.1f)\n", a + 4, sc, v3_len(v), v.x, v.y, v.z);
+            }
+        }
+        else if (!strncmp(a, "rockmap:", 8)) {
+            // Boulder cover around a point: fraction of a 1 m grid with a rock over 0.2 m high, the tallest.
+            double cx, cz, rad = 25;
+            sscanf(a + 8, "%lf,%lf,%lf", &cx, &cz, &rad);
+            int n = 0, hit = 0;
+            double top = 0, tx = 0, tz = 0;
+            for (double x = cx - rad; x <= cx + rad; x += 1)
+                for (double z = cz - rad; z <= cz + rad; z += 1) {
+                    double h = terrain_rock_height(x, z);
+                    n++;
+                    if (h > 0.2) hit++;
+                    if (h > top) { top = h; tx = x; tz = z; }
+                }
+            printf("ROCKMAP around %.0f, %.0f (+-%.0f m): %.1f%% covered by rocks over 0.2 m; tallest %.2f m at %.0f, %.0f\n", cx, cz, rad,
+                   100.0 * hit / n, top, tx, tz);
+        }
+        else if (!strncmp(a, "slope:", 6)) {
+            double x, z;
+            sscanf(a + 6, "%lf,%lf", &x, &z);
+            double d = 3.0, hx = (terrain_height(x + d, z, 0) - terrain_height(x - d, z, 0)) / (2 * d);
+            double hz = (terrain_height(x, z + d, 0) - terrain_height(x, z - d, 0)) / (2 * d);
+            printf("SLOPE at %.0f, %.0f: %.1f deg (over 6 m)\n", x, z, atan(sqrt(hx * hx + hz * hz)) * 180 / PI_D);
+        }
+        else if (!strcmp(a, "plane")) {
+            double t = lm.t + lm.tephem, x, z, x2, z2;
+            V3 f = moon_inertial_to_fixed(lm.r, t);
+            terrain_site_to_plane(terrain_fixed_to_site(f), &x, &z);
+            V3 f2 = moon_inertial_to_fixed(v3_add(lm.r, lm.v), t + 1);
+            terrain_site_to_plane(terrain_fixed_to_site(f2), &x2, &z2);
+            printf("PLANE t=%.1f x %.1f z %.1f (m east, m south of the site)  ground velocity %.1f %.1f m/s  alt %.1f m  rock here %.2f m\n",
+                   lm.t, x, z, x2 - x, z2 - z, lm.altitude, terrain_rock_height(x, z));
+        }
+        else if (!strncmp(a, "alarms:", 7)) {
+            int prev = 0, f0 = -1;
+            for (double t = 0; t < atof(a + 7); t += 0.1) {
+                lm_run(0.1);
+                crew_tick();
+                const DskyState *d = agc_host_dsky();
+                int f = agc_get_word("FAILREG", 0);
+                if ((d->prog_lamp && !prev) || f != f0) {
+                    char ds[200];
+                    dsky_str(ds, sizeof ds);
+                    printf("ALARM t=%.1f (TIG%+.1f s) alt %.0f m  FAILREG %05o %05o %05o  %s\n", lm.t, lm.t - 369645, lm.altitude, f,
+                           agc_get_word("FAILREG", 1), agc_get_word("FAILREG", 2), ds);
+                    f0 = f;
+                }
+                prev = d->prog_lamp;
+                if (lm.touchdown) break;
+            }
+        }
         else if (!strcmp(a, "nextevent")) {
             char why[160];
             char why2[160];

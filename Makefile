@@ -118,12 +118,13 @@ test: build/linux/agc-selftest build/linux/agc-lab
 	./tools/test_docking.sh build/linux/agc-lab
 	./tools/test_mission.sh build/linux/agc-lab
 	./tools/test_advance.sh build/linux/agc-lab
+	./tools/test_scenarios.sh build/linux/agc-lab
 
 # ---- Save states of the canonical descent (src/milestones.h), embedded in every
 # build as data/snapshots.c. Re-run after changing the simulation; a build whose
 # state layout no longer matches refuses them, and agc-selftest fails.
 SNAP_DIR   := build/snapshots
-SNAP_FILES := tig30:ms_tig30 radar:ms_radar highgate:ms_highgate 150m:ms_150m
+SNAP_FILES := tig30:ms_tig30 radar:ms_radar highgate:ms_highgate 150m:ms_150m boulders:ms_boulders site2:ms_site2
 snapshots: build/linux/agc-lab tools/embed_bin.py
 	@rm -rf $(SNAP_DIR) && mkdir -p $(SNAP_DIR)
 	./build/linux/agc-lab snapgen:$(SNAP_DIR)

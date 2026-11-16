@@ -11,21 +11,22 @@
 #include "render.h"
 #include "rocks.h"
 #include "terrain.h"
+#include "terrain_shape.h"
 
 typedef struct { float *p, *n; unsigned char *c; int count, cap; } Rb;
 static Rb rb;
 static Material rock_mat;
 static int ready;
 
-// The field is cut into tiles, small stones apart from big ones, so each eye
-// draws only the tiles in view and small stones only where they are bigger
-// than a pixel or so.
-#define TILES 8
-#define FIELD 1300.0
+// The rocks are cut into tiles (325 m squares), small stones apart from big
+// ones, so each eye draws only the tiles in view and small stones only where
+// they are bigger than a pixel or so.
+#define TILE_SIZE 325.0
+#define MAX_TILES 512
 #define SMALL_R 0.45
-typedef struct { Rb b; Mesh mesh; V3 ctr; double rad; int small; } Tile;
-static Tile tiles[TILES * TILES * 2];
-static int tile_tris;
+typedef struct { Rb b; Mesh mesh; V3 ctr; double rad; int small, ix, iz; } Tile;
+static Tile tiles[MAX_TILES];
+static int ntiles, tile_tris;
 
 static void push(V3 p, V3 n, Color c, int mat)
 {
@@ -41,24 +42,22 @@ static void push(V3 p, V3 n, Color c, int mat)
     rb.c[4 * k] = c.r; rb.c[4 * k + 1] = c.g; rb.c[4 * k + 2] = c.b; rb.c[4 * k + 3] = (unsigned char)mat;   // LM-shader material: 8 rock, 9 plain matte
 }
 
-static unsigned rng = 12345u;
-static double frand(void) { rng = rng * 1664525u + 1013904223u; return (rng >> 8) / 16777216.0; }
-
-// Lumpy rock: subdivided octahedron with per-vertex noise, scaled and rotated.
-static void rock(V3 centre, V3 up, double r, Color col)
+// Lumpy rock: subdivided octahedron with per-vertex noise, scaled and rotated
+// (its shape numbers come with it from terrain_shape.c).
+static void rock(V3 centre, V3 up, const TerrainRock *k, Color col)
 {
     static V3 base[6] = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
     static const int faces[8][3] = { { 0, 2, 4 }, { 4, 2, 1 }, { 1, 2, 5 }, { 5, 2, 0 }, { 0, 4, 3 }, { 4, 1, 3 }, { 1, 5, 3 }, { 5, 0, 3 } };
-    double sx = r * (0.8 + 0.5 * frand()), sy = r * (0.45 + 0.4 * frand()), sz = r * (0.8 + 0.5 * frand());
-    double rot = frand() * 2 * PI_D;
+    double sx = k->sx, sy = k->sy, sz = k->sz;
+    double rot = k->rot;
     V3 east = v3_norm(v3_cross(v3(0, 0, -1), up));
     V3 south = v3_cross(east, up);
     V3 ax = v3_add(v3_scale(east, cos(rot)), v3_scale(south, sin(rot)));
     V3 az = v3_cross(ax, up);
-    double seed = frand() * 100;
+    double seed = k->seed;
     for (int f = 0; f < 8; f++) {
-        // Subdivide each face into 4 x 4 small triangles.
-        const int N = 3;
+        // Subdivide each face into N x N small triangles (stones: fewer, they are a few pixels).
+        const int N = k->r < SMALL_R ? 2 : 3;
         V3 A = base[faces[f][0]], B = base[faces[f][1]], C = base[faces[f][2]];
         for (int i = 0; i < N; i++)
             for (int j = 0; j < N - i; j++) {
@@ -108,50 +107,43 @@ static void shadow(double x, double z, double w, double len, double sdx, double 
 
 static Tile *tile_for(double x, double z, int small)
 {
-    int ix = (int)floor((x + FIELD) / (2 * FIELD) * TILES), iz = (int)floor((z + FIELD) / (2 * FIELD) * TILES);
-    if (ix < 0) ix = 0;
-    if (ix >= TILES) ix = TILES - 1;
-    if (iz < 0) iz = 0;
-    if (iz >= TILES) iz = TILES - 1;
-    return &tiles[(iz * TILES + ix) * 2 + small];
+    int ix = (int)floor(x / TILE_SIZE), iz = (int)floor(z / TILE_SIZE);
+    for (int i = 0; i < ntiles; i++)
+        if (tiles[i].ix == ix && tiles[i].iz == iz && tiles[i].small == small) return &tiles[i];
+    if (ntiles == MAX_TILES) return &tiles[MAX_TILES - 1];
+    Tile *t = &tiles[ntiles++];
+    t->ix = ix;
+    t->iz = iz;
+    t->small = small;
+    return t;
 }
 
 void rocks_init(void)
 {
     if (ready) return;
-    rng = 1969u;
     V3 sun = terrain_sun();
     double sh = sqrt(sun.x * sun.x + sun.z * sun.z);
     double sdx = -sun.x / sh, sdz = -sun.z / sh;          // shadows point away from the Sun
     double slope = sun.y / sh;                            // tan(elevation)
-    const int N = 4500;
+    const TerrainRock *list;
+    int N = terrain_rocks(&list);
     for (int i = 0; i < N; i++) {
-        // Denser near the landing area, sparser out to ~1.2 km; a few clusters.
-        double rr = 1200 * pow(frand(), 0.75), th = frand() * 2 * PI_D;
-        double x = rr * cos(th), z = rr * sin(th);
-        if (i % 9 == 0) {   // boulder cluster around a few random centres
-            int cl = (int)(frand() * 6);
-            double cx = -300 + 140 * cl, cz = 120 - 90 * (cl % 3);
-            x = cx + (frand() - 0.5) * 60;
-            z = cz + (frand() - 0.5) * 60;
-        }
-        double r = 0.14 * pow(frand() + 1e-3, -0.6);
-        if (r > 2.8) r = 2.8;
+        const TerrainRock *k = &list[i];
+        double x = k->x, z = k->z, r = k->r;
         Tile *tl = tile_for(x, z, r < SMALL_R);
         rb = tl->b;
         double h = terrain_height(x, z, 0);
         V3 up = v3_norm(v3_sub(terrain_plane_to_site(x, z, h + 1), terrain_plane_to_site(x, z, h)));
         V3 c = terrain_plane_to_site(x, z, h + r * 0.15);
-        unsigned char g = (unsigned char)(28 + frand() * 16);
-        rock(c, up, r, (Color){ g, (unsigned char)(g * 0.97), (unsigned char)(g * 0.93), 255 });
+        unsigned char g = k->grey;
+        rock(c, up, k, (Color){ g, (unsigned char)(g * 0.97), (unsigned char)(g * 0.93), 255 });
         if (r > 0.12) shadow(x, z, r * 0.8, r * 0.75 / slope, sdx, sdz);
         tl->b = rb;
     }
     memset(&rb, 0, sizeof rb);
     int nt = 0;
-    for (int i = 0; i < TILES * TILES * 2; i++) {
+    for (int i = 0; i < ntiles; i++) {
         Tile *t = &tiles[i];
-        t->small = i & 1;
         if (t->b.count == 0) continue;
         // Bounding sphere of the tile's vertices.
         V3 lo = v3(1e30, 1e30, 1e30), hi = v3(-1e30, -1e30, -1e30);
@@ -186,7 +178,7 @@ void rocks_draw(V3 camera_site)
     // Small stones (under 0.45 m) are a pixel or less beyond this distance.
     double small_far = render_quality()->low ? 140.0 : 260.0;
     Matrix m = MatrixTranslate((float)-camera_site.x, (float)-camera_site.y, (float)-camera_site.z);
-    for (int i = 0; i < TILES * TILES * 2; i++) {
+    for (int i = 0; i < ntiles; i++) {
         Tile *t = &tiles[i];
         if (!t->mesh.vertexCount) continue;
         V3 c = v3_sub(t->ctr, camera_site);

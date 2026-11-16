@@ -24,6 +24,10 @@ void hints_set_cockpit(int in_cockpit);
 
 // The event "advance to next event" can skip to now ("" if none).
 void hints_set_next_event(const char *title);
+
+// A line about the scenario, shown first until the landing ("" for none);
+// take_over: the computer must not be left to land (no "let it fly").
+void hints_set_note(const char *line, int take_over);
 // The controller button the current hint wants pressed (headset): it glows on
 // the controller model. VB_RTRIG = point at the ringed switch and pull.
 enum { VB_NONE, VB_A, VB_B, VB_X, VB_Y, VB_LTRIG, VB_RTRIG, VB_LGRIP, VB_RGRIP, VB_LSTICK, VB_LSTICK_UP, VB_LSTICK_DOWN, VB_RSTICK };

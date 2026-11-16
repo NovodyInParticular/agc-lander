@@ -11,8 +11,8 @@
 #include "snapshot.h"
 
 // data/snapshots.c (tools/embed_bin.py --multi, `make snapshots`).
-extern const unsigned char ms_tig30[], ms_radar[], ms_highgate[], ms_150m[], ms_track[];
-extern const unsigned int ms_tig30_len, ms_radar_len, ms_highgate_len, ms_150m_len, ms_track_len;
+extern const unsigned char ms_tig30[], ms_radar[], ms_highgate[], ms_150m[], ms_boulders[], ms_site2[], ms_track[];
+extern const unsigned int ms_tig30_len, ms_radar_len, ms_highgate_len, ms_150m_len, ms_boulders_len, ms_site2_len, ms_track_len;
 
 static const struct {
     const char *name, *title;
@@ -27,6 +27,8 @@ static const struct {
     [MS_HIGHGATE] = { "HIGH GATE", "High gate, 8,500 ft", ms_highgate, &ms_highgate_len,
                       "Houston: \"Eagle, Houston. You're GO for landing.\"" },
     [MS_150M] = { "150 M", "500 ft", ms_150m, &ms_150m_len, "" },
+    [MS_BOULDERS] = { "BOULDERS", "Low fuel over the boulders", ms_boulders, &ms_boulders_len, "" },
+    [MS_SITE2] = { "SITE 2", "Site 2 high gate", ms_site2, &ms_site2_len, "" },
 };
 
 const char *milestone_title(int ms) { return ms >= 0 && ms < MS_COUNT ? table[ms].title : ""; }
@@ -238,10 +240,12 @@ int milestone_advance(void)
     int ms = milestone_next_event(NULL, 0);
     if (ms < 0) return -1;
     int ac = crew.auto_crew, al = crew.auto_land;
+    double rr = agc_host_rr_dither();   // the scenario's radar fault stays
     char err[200];
     if (milestone_load(ms, err, sizeof err)) return -1;
     crew.auto_crew = ac;
     crew.auto_land = al;
+    agc_host_set_rr_dither(rr);
     return ms;
 }
 

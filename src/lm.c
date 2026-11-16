@@ -740,6 +740,30 @@ static void rigid_body(double dt)
         lm_set_attitude_mode(0);
     }
 
+    // Boulders: the descent engine's bell clears the ground by about half a
+    // metre above the footpads, the stage's base by a little over a metre. A
+    // block taller than that under them (the terrain includes the boulders)
+    // breaks the stage, as the footpads alone would never notice.
+    if (lm.touchdown && !lm.staged && lm.land_result != LAND_CRASH && lm.t - lm.touchdown_t < 10) {
+        static const double under[][3] = {
+            { PAD_X + 0.55, 0, 0 }, { PAD_X + 0.55, 0.75, 0 }, { PAD_X + 0.55, -0.75, 0 }, { PAD_X + 0.55, 0, 0.75 }, { PAD_X + 0.55, 0, -0.75 },
+            { PAD_X + 1.15, 1.9, 1.9 }, { PAD_X + 1.15, 1.9, -1.9 }, { PAD_X + 1.15, -1.9, 1.9 }, { PAD_X + 1.15, -1.9, -1.9 },
+        };
+        for (size_t k = 0; k < sizeof under / sizeof under[0]; k++) {
+            V3 p = v3_add(lm.r, lm_body_to_inertial(v3(under[k][0], under[k][1], under[k][2])));
+            if (v3_len(p) - surface_radius_at(p) < -0.05) {
+                lm.land_result = LAND_CRASH;
+                lm.crash_cause = CRASH_BOULDER;
+                lm.crash_t = lm.t;
+                lm.crash_speed = v3_len(lm_surface_velocity());
+                engine_stop_latched = 1;
+                lm.dps_on = 0;
+                lm_set_attitude_mode(0);
+                break;
+            }
+        }
+    }
+
     // Translational: gravity + forces, semi-implicit Euler, on the centre of
     // mass (lm.r / lm.v are the model origin's: the same point until staging).
     M3 i_from_b = q4_to_m3(lm.q);

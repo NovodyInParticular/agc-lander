@@ -22,6 +22,9 @@ int hints_on = 1;
 
 static const char *next_event = "";
 void hints_set_next_event(const char *title) { next_event = title ? title : ""; }
+static const char *note = "";
+static int must_take_over;
+void hints_set_note(const char *line, int take_over) { note = line ? line : ""; must_take_over = take_over; }
 
 #define FT 0.3048
 #define MAXL 3
@@ -291,6 +294,7 @@ static void compute(Hint *h)
     memset(h, 0, sizeof *h);
     if (ascent_active()) { ascent_hints(h); return; }
     if (lm.land_result == LAND_CRASH) return;   // the results panel takes over
+    if (note[0] && !lm.touchdown) add(h, "%s", note);
     if (lm.touchdown) {
         if (lm.dps_on) { add(h, VRT("You're on the ground: press SPACE to shut the engine off", "You're on the ground: press A (ENGINE STOP)")); h->urgent = 1; h->vrbtn = VB_A; }
         else if (eva_phase() == EVA_INSIDE && eva_available()) {
@@ -358,8 +362,9 @@ static void compute(Hint *h)
             h->vrbtn = VB_RTRIG;
             return;
         case HINT_ALARM:
-            add(h, "Program alarm: the computer is busy but still flying.");
-            add(h, VRT("Press R (RSET) to clear the light", "Point at RSET on the cabin DSKY (ringed green) and pull the trigger"));
+            add(h, "Program alarm: the computer is overloaded (1202, 1201) but still flying the descent.");
+            add(h, VRT("V05N09E shows the code. R (RSET) clears the light; Houston will call GO",
+                       "Point at RSET on the cabin DSKY (ringed green) and pull the trigger; Houston will call GO"));
             h->vrbtn = VB_RTRIG;
             return;
         }
@@ -377,9 +382,14 @@ static void compute(Hint *h)
         return;
     }
     if (p64) {
-        add(h, "The computer is steering to the landing site. Let it fly,");
-        add(h, VRT("or take over: press F8 (ATT HOLD), then tap Up/Down",
-                   "or take over: set the PGNS mode switch to ATT HOLD, then flick the LEFT stick up/down"));
+        if (must_take_over) {
+            add(h, VRT("Take over now: press F8 (ATT HOLD), then tap Up/Down",
+                       "Take over now: set the PGNS mode switch to ATT HOLD, then flick the LEFT stick up/down"));
+        } else {
+            add(h, "The computer is steering to the landing site. Let it fly,");
+            add(h, VRT("or take over: press F8 (ATT HOLD), then tap Up/Down",
+                       "or take over: set the PGNS mode switch to ATT HOLD, then flick the LEFT stick up/down"));
+        }
         return;
     }
     if (p63 && lm.dps_on) {

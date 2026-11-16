@@ -101,7 +101,7 @@ extern Lm lm;
 
 enum { ARM_OFF, ARM_DES, ARM_ASC };
 enum { LAND_NONE, LAND_GOOD, LAND_HARD, LAND_CRASH };
-enum { CRASH_NONE, CRASH_VERTICAL, CRASH_SIDEWAYS, CRASH_TILT, CRASH_TOPPLED };
+enum { CRASH_NONE, CRASH_VERTICAL, CRASH_SIDEWAYS, CRASH_TILT, CRASH_TOPPLED, CRASH_BOULDER };
 
 // Landing limits (game tuning). ENGINE STOP at the contact light drops the LM
 // the last 1.7 m in free fall, so a careful 1 m/s descent touches at ~2.6 m/s.

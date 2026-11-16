@@ -80,6 +80,12 @@ int agc_host_pending(int counter);
 // Keystrokes queued for the AGC but not yet delivered.
 int agc_host_keys_queued(void);
 
+// Apollo 11's 1202/1201 alarms: the rendezvous radar's two CDUs, powered out
+// of phase with the AGC, dithered up and down at their maximum rate, each
+// count stealing a memory cycle. pps per CDU (Apollo 11: 6400); 0 = healthy.
+void agc_host_set_rr_dither(double pps);
+double agc_host_rr_dither(void);
+
 // Rotational hand controller (ACA), -1..1 per axis (pitch=Q, yaw=P, roll=R).
 void agc_host_set_rhc(double pitch, double yaw, double roll);
 
