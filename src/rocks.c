@@ -14,9 +14,18 @@
 
 typedef struct { float *p, *n; unsigned char *c; int count, cap; } Rb;
 static Rb rb;
-static Mesh rocks_mesh;
 static Material rock_mat;
 static int ready;
+
+// The field is cut into tiles, small stones apart from big ones, so each eye
+// draws only the tiles in view and small stones only where they are bigger
+// than a pixel or so.
+#define TILES 8
+#define FIELD 1300.0
+#define SMALL_R 0.45
+typedef struct { Rb b; Mesh mesh; V3 ctr; double rad; int small; } Tile;
+static Tile tiles[TILES * TILES * 2];
+static int tile_tris;
 
 static void push(V3 p, V3 n, Color c, int mat)
 {
@@ -97,6 +106,16 @@ static void shadow(double x, double z, double w, double len, double sdx, double 
     }
 }
 
+static Tile *tile_for(double x, double z, int small)
+{
+    int ix = (int)floor((x + FIELD) / (2 * FIELD) * TILES), iz = (int)floor((z + FIELD) / (2 * FIELD) * TILES);
+    if (ix < 0) ix = 0;
+    if (ix >= TILES) ix = TILES - 1;
+    if (iz < 0) iz = 0;
+    if (iz >= TILES) iz = TILES - 1;
+    return &tiles[(iz * TILES + ix) * 2 + small];
+}
+
 void rocks_init(void)
 {
     if (ready) return;
@@ -118,30 +137,61 @@ void rocks_init(void)
         }
         double r = 0.14 * pow(frand() + 1e-3, -0.6);
         if (r > 2.8) r = 2.8;
+        Tile *tl = tile_for(x, z, r < SMALL_R);
+        rb = tl->b;
         double h = terrain_height(x, z, 0);
         V3 up = v3_norm(v3_sub(terrain_plane_to_site(x, z, h + 1), terrain_plane_to_site(x, z, h)));
         V3 c = terrain_plane_to_site(x, z, h + r * 0.15);
         unsigned char g = (unsigned char)(28 + frand() * 16);
         rock(c, up, r, (Color){ g, (unsigned char)(g * 0.97), (unsigned char)(g * 0.93), 255 });
         if (r > 0.12) shadow(x, z, r * 0.8, r * 0.75 / slope, sdx, sdz);
+        tl->b = rb;
     }
-    Mesh m = { 0 };
-    m.vertexCount = rb.count;
-    m.triangleCount = rb.count / 3;
-    m.vertices = rb.p;
-    m.normals = rb.n;
-    m.colors = rb.c;
-    UploadMesh(&m, false);
-    rocks_mesh = m;
     memset(&rb, 0, sizeof rb);
+    int nt = 0;
+    for (int i = 0; i < TILES * TILES * 2; i++) {
+        Tile *t = &tiles[i];
+        t->small = i & 1;
+        if (t->b.count == 0) continue;
+        // Bounding sphere of the tile's vertices.
+        V3 lo = v3(1e30, 1e30, 1e30), hi = v3(-1e30, -1e30, -1e30);
+        for (int k = 0; k < t->b.count; k++) {
+            V3 p = v3(t->b.p[3 * k], t->b.p[3 * k + 1], t->b.p[3 * k + 2]);
+            lo = v3(fmin(lo.x, p.x), fmin(lo.y, p.y), fmin(lo.z, p.z));
+            hi = v3(fmax(hi.x, p.x), fmax(hi.y, p.y), fmax(hi.z, p.z));
+        }
+        t->ctr = v3_scale(v3_add(lo, hi), 0.5);
+        t->rad = v3_len(v3_sub(hi, lo)) * 0.5;
+        Mesh m = { 0 };
+        m.vertexCount = t->b.count;
+        m.triangleCount = t->b.count / 3;
+        m.vertices = t->b.p;
+        m.normals = t->b.n;
+        m.colors = t->b.c;
+        UploadMesh(&m, false);
+        t->mesh = m;
+        tile_tris += m.triangleCount;
+        memset(&t->b, 0, sizeof t->b);
+        nt++;
+    }
     rock_mat = LoadMaterialDefault();
     render_lm_material(&rock_mat);
     ready = 1;
-    TraceLog(LOG_INFO, "rocks: %d triangles", m.triangleCount);
+    TraceLog(LOG_INFO, "rocks: %d triangles in %d tiles", tile_tris, nt);
 }
 
 void rocks_draw(V3 camera_site)
 {
     if (!ready) return;
-    DrawMesh(rocks_mesh, rock_mat, MatrixTranslate((float)-camera_site.x, (float)-camera_site.y, (float)-camera_site.z));
+    // Small stones (under 0.45 m) are a pixel or less beyond this distance.
+    double small_far = render_quality()->low ? 140.0 : 260.0;
+    Matrix m = MatrixTranslate((float)-camera_site.x, (float)-camera_site.y, (float)-camera_site.z);
+    for (int i = 0; i < TILES * TILES * 2; i++) {
+        Tile *t = &tiles[i];
+        if (!t->mesh.vertexCount) continue;
+        V3 c = v3_sub(t->ctr, camera_site);
+        if (t->small && v3_len(c) - t->rad > small_far) continue;
+        if (!render_sphere_visible(c, t->rad)) continue;
+        DrawMesh(t->mesh, rock_mat, m);
+    }
 }

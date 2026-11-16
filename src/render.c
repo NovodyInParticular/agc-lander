@@ -116,6 +116,11 @@ static const char *terrain_fs = GLSL_HEADER LOGZ_FS NOISE_GLSL
     "      float rr = 0.08 + 0.30 * cu01(h3) * cu01(h3 >> 9 | h3 << 23);\n"
     "      vec2 d = f - ctr; float dl = length(d), r = dl / rr;\n"
     "      if (r > 1.9) continue;\n"
+    "      // A crater only a few pixels across can't be drawn steadily: it would\n"
+    "      // sparkle as the view moves (worst in a headset). Fade it by its own size.\n"
+    "      float pxd = 2.0 * rr * cell / fw;\n"
+    "      float aa = smoothstep(Q_CRATER_PX0, Q_CRATER_PX1, pxd);\n"
+    "      if (aa < 0.004) continue;\n"
     "      float fr = cu01(chash(c, seed + 303u)); fr = fr * fr * fr;\n"
     "      float depth = rr * (0.10 + 0.30 * fr), rim = depth * (0.18 + 0.12 * fr);\n"
     "      vec2 dir = d / max(dl, 1e-6); float g;\n"
@@ -128,11 +133,11 @@ static const char *terrain_fs = GLSL_HEADER LOGZ_FS NOISE_GLSL
     "        float tstar = ss * rr * rr / depth - 2.0 * pu;\n"
     "        float texit = -pu + sqrt(max(pu * pu + rr * rr - dl * dl, 0.0));\n"
     "        float sw = max(1.5 * fw / cell, 0.07 * rr);\n"
-    "        shadow *= mix(1.0, smoothstep(-sw, sw, tstar - texit), ws);\n"
+    "        shadow *= mix(1.0, smoothstep(-sw, sw, tstar - texit), ws * aa);\n"
     "      } else { float e = 1.0 / (1.0 + 5.0 * (r - 1.0)); e *= e; g = -15.0 * rim * e * e; }\n"
-    "      slope -= dir * (g / rr) * w;\n"
+    "      slope -= dir * (g / rr) * w * aa;\n"
     "      float halo = r < 1.0 ? 1.0 : (1.9 - r) / 0.9;\n"
-    "      fresh = max(fresh, fr * halo * w * (rr * cell < 400.0 ? 1.0 : 0.4));\n"
+    "      fresh = max(fresh, fr * halo * w * aa * (rr * cell < 400.0 ? 1.0 : 0.4));\n"
     "    }\n"
     "  }\n"
     "}\n"
@@ -288,7 +293,11 @@ static const char *lm_fs = GLSL_HEADER LOGZ_FS
     "  return ground * t + vec3(0.012);\n"
     "}\n"
     "void main(){\n"
-    "  if (nearCut > 0.0 && length(fragPos) < nearCut) discard;\n"
+    "  // Inside the cabin (cockpit and docking-window views) the LM's own outer\n"
+    "  // skin around the crew compartment is hidden by its shape, not by distance\n"
+    "  // from the eye: leaning back must not bring the hull or window glass into view.\n"
+    "  if (nearCut > 0.0 && (length(fragPos) < nearCut ||\n"
+    "      (all(greaterThan(objPos, vec3(1.30, -1.17, -1.42))) && all(lessThan(objPos, vec3(3.42, 1.17, 1.16)))))) discard;\n"
     "  writeDepth();\n"
     "  int mat = int(fragColor.a * 255.0 + 0.5);\n"
     "  vec3 base = fragColor.rgb;\n"
@@ -655,6 +664,10 @@ const RenderQuality *render_quality(void)
     q.shadow = low ? 1024 : 2048;
     q.star_grid = low ? 160.0f : 420.0f;
     q.star_boost = low ? 2.2f : 1.0f;
+    // Craters narrower than this many pixels fade out (wider in the headset,
+    // where the picture is coarser and never still).
+    q.crater_px0 = low ? 3.0f : 1.5f;
+    q.crater_px1 = low ? 7.0f : 4.0f;
     q.oct0 = env_int("AGC_Q_OCT0", q.oct0);
     q.oct1 = env_int("AGC_Q_OCT1", q.oct1);
     q.soil = env_int("AGC_Q_SOIL", q.soil);
@@ -666,6 +679,8 @@ const RenderQuality *render_quality(void)
     q.shadow = env_int("AGC_Q_SHADOW", q.shadow);
     q.star_grid = env_float("AGC_Q_STARGRID", q.star_grid);
     q.star_boost = env_float("AGC_Q_STARBOOST", q.star_boost);
+    q.crater_px0 = env_float("AGC_Q_CRATERPX0", q.crater_px0);
+    q.crater_px1 = env_float("AGC_Q_CRATERPX1", q.crater_px1);
     if (q.oct0 < 0) q.oct0 = 0;
     if (q.oct1 > 6) q.oct1 = 6;
     if (q.pcf != 9) q.pcf = 4;
@@ -682,8 +697,9 @@ Shader render_load_shader(const char *vs, const char *fs)
     char defs[512];
     snprintf(defs, sizeof defs,
              "#define Q_LOW %d\n#define Q_OCT0 %d\n#define Q_OCT1 %d\n#define Q_SOIL %d\n#define Q_TRI1 %d\n#define Q_PCF %d\n"
-             "#define Q_FBM %d\n#define Q_VZ %d\n#define Q_STARGRID %.1f\n#define Q_STARBOOST %.3f\n",
-             q->low, q->oct0, q->oct1, q->soil, q->tri1, q->pcf, q->fbm, q->vz, q->star_grid, q->star_boost);
+             "#define Q_FBM %d\n#define Q_VZ %d\n#define Q_STARGRID %.1f\n#define Q_STARBOOST %.3f\n"
+             "#define Q_CRATER_PX0 %.2f\n#define Q_CRATER_PX1 %.2f\n",
+             q->low, q->oct0, q->oct1, q->soil, q->tri1, q->pcf, q->fbm, q->vz, q->star_grid, q->star_boost, q->crater_px0, q->crater_px1);
 #ifdef AGC_GLES
     static const char *ver = "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n";
 #else
@@ -933,9 +949,37 @@ static Camera3D rl_cam;
 
 void render_set_shadow_center(V3 c) { shadow_center = c; }
 
+// The view frustum of the scene being drawn (camera-relative, through the
+// eye): left, right, bottom, top planes, unit inward normals.
+static V3 frust[4];
+static void set_frustum(const ViewCam *cam, int w, int h)
+{
+    V3 f = cam->fwd, r = v3_norm(v3_cross(cam->fwd, cam->upv)), u = v3_cross(r, f);
+    double tl, tr, td, tu;
+    if (cam->asym) { tl = cam->tan_l; tr = cam->tan_r; td = cam->tan_d; tu = cam->tan_u; }
+    else {
+        tu = tan(cam->fov_y / 2);
+        td = -tu;
+        tr = tu * (h > 0 ? (double)w / h : 1.0);
+        tl = -tr;
+    }
+    frust[0] = v3_norm(v3_sub(r, v3_scale(f, tl)));
+    frust[1] = v3_norm(v3_sub(v3_scale(f, tr), r));
+    frust[2] = v3_norm(v3_sub(u, v3_scale(f, td)));
+    frust[3] = v3_norm(v3_sub(v3_scale(f, tu), u));
+}
+
+int render_sphere_visible(V3 c, double radius)
+{
+    for (int k = 0; k < 4; k++)
+        if (v3_dot(c, frust[k]) < -radius) return 0;
+    return 1;
+}
+
 void render_begin_scene(const ViewCam *cam, int w, int h)
 {
     cur_cam = *cam;
+    set_frustum(cam, w, h);
     if (direct_out) {
         rlDrawRenderBatchActive();
         cur_w = w;

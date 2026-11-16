@@ -25,6 +25,11 @@ typedef struct {
     int aim_ok[2];                        // 0 = left hand, 1 = right hand
     V3 aim_pos[2], aim_dir[2];            // pointing ray, tracking space
     V3 head_pos, head_fwd, head_up;       // centre of the two eyes
+    // Where each controller is held (grip pose: origin in the palm, axes as
+    // OpenXR defines them: -z along the pointing finger), and whether the
+    // hand holds a controller (0: bare hand tracking, or nothing).
+    int grip_ok[2], controller[2];
+    V3 grip_pos[2], grip_x[2], grip_y[2], grip_z[2];
 } VrInput;
 
 // After the window (GL context) exists. Returns 0 on success.

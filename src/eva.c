@@ -61,8 +61,9 @@ int eva_phase(void) { return phase; }
 
 int eva_available(void)
 {
+    // On the pad before lift-off too: P12 just waits at V99 until the crew is back.
     return lm.touchdown && !lm.dps_on && lm.land_result != LAND_CRASH && lm.land_result != LAND_NONE && !lm.staged &&
-           !ascent_active();
+           !lm.abort_stage && !lm.aps_on && !lm.liftoff;
 }
 
 int eva_outside(void) { return phase == EVA_EGRESS || phase == EVA_SURFACE || phase == EVA_INGRESS; }

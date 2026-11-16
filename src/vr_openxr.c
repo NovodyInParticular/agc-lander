@@ -112,7 +112,9 @@ static float frame_dt = 1.0f / 72;
 // --- Actions --------------------------------------------------------------------------------
 
 static XrActionSet action_set;
-static XrAction act_stick, act_trigger, act_grip, act_a, act_b, act_x, act_y, act_menu, act_click, act_aim, act_haptic;
+static XrAction act_stick, act_trigger, act_grip, act_a, act_b, act_x, act_y, act_menu, act_click, act_aim, act_haptic, act_grip_pose;
+static XrSpace grip_space[2];
+static XrPath touch_profile;
 static XrPath hand_path[2];
 
 static int ok(XrResult r, const char *what)
@@ -265,6 +267,7 @@ static int init_actions(void)
     act_grip = make_action("grip", "Grip", XR_ACTION_TYPE_FLOAT_INPUT, 1);
     act_click = make_action("stick_click", "Thumbstick click", XR_ACTION_TYPE_BOOLEAN_INPUT, 1);
     act_aim = make_action("aim", "Pointing", XR_ACTION_TYPE_POSE_INPUT, 1);
+    act_grip_pose = make_action("grip_pose", "Hand", XR_ACTION_TYPE_POSE_INPUT, 1);
     act_haptic = make_action("haptic", "Vibration", XR_ACTION_TYPE_VIBRATION_OUTPUT, 1);
     act_a = make_action("a", "A", XR_ACTION_TYPE_BOOLEAN_INPUT, 0);
     act_b = make_action("b", "B", XR_ACTION_TYPE_BOOLEAN_INPUT, 0);
@@ -283,6 +286,8 @@ static int init_actions(void)
         { act_click, path("/user/hand/right/input/thumbstick/click") },
         { act_aim, path("/user/hand/left/input/aim/pose") },
         { act_aim, path("/user/hand/right/input/aim/pose") },
+        { act_grip_pose, path("/user/hand/left/input/grip/pose") },
+        { act_grip_pose, path("/user/hand/right/input/grip/pose") },
         { act_haptic, path("/user/hand/left/output/haptic") },
         { act_haptic, path("/user/hand/right/output/haptic") },
         { act_a, path("/user/hand/right/input/a/click") },
@@ -325,7 +330,10 @@ static int init_actions(void)
         ci.subactionPath = hand_path[h];
         ci.poseInActionSpace.orientation.w = 1;
         ok(xrCreateActionSpace(session, &ci, &aim_space[h]), "xrCreateActionSpace");
+        ci.action = act_grip_pose;
+        ok(xrCreateActionSpace(session, &ci, &grip_space[h]), "xrCreateActionSpace (grip)");
     }
+    touch_profile = path("/interaction_profiles/oculus/touch_controller");
     return 1;
 }
 
@@ -742,6 +750,23 @@ int vr_begin_frame(float *dt, int *quit)
         input.y = get_bool(act_y, -1);
         input.menu = get_bool(act_menu, -1);
         for (int h = 0; h < 2; h++) {
+            // Controllers in the hands (not bare-hand tracking)?
+            static XrPath profile[2];
+            static int profile_poll;
+            if ((profile_poll++ % 36) < 2) {
+                XrInteractionProfileState ps = { XR_TYPE_INTERACTION_PROFILE_STATE };
+                if (XR_SUCCEEDED(xrGetCurrentInteractionProfile(session, hand_path[h], &ps))) profile[h] = ps.interactionProfile;
+            }
+            input.controller[h] = profile[h] == touch_profile;
+            XrSpaceLocation gl = { XR_TYPE_SPACE_LOCATION };
+            if (XR_SUCCEEDED(xrLocateSpace(grip_space[h], local_space, frame_state.predictedDisplayTime, &gl)) &&
+                (gl.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) && (gl.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
+                input.grip_ok[h] = 1;
+                input.grip_pos[h] = v3(gl.pose.position.x, gl.pose.position.y, gl.pose.position.z);
+                input.grip_x[h] = qrot(gl.pose.orientation, v3(1, 0, 0));
+                input.grip_y[h] = qrot(gl.pose.orientation, v3(0, 1, 0));
+                input.grip_z[h] = qrot(gl.pose.orientation, v3(0, 0, 1));
+            }
             XrSpaceLocation loc = { XR_TYPE_SPACE_LOCATION };
             if (XR_SUCCEEDED(xrLocateSpace(aim_space[h], local_space, frame_state.predictedDisplayTime, &loc)) &&
                 (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) && (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {

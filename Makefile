@@ -153,7 +153,7 @@ OPENXR_LIB  := $(OPENXR_DIR)/jni/arm64-v8a/libopenxr_loader.so
 QUEST_KEY   ?= $(HOME)/.android/debug.keystore
 QUEST_APK   := build/quest/agc-lander-quest.apk
 QUEST_SO    := build/quest/apk/lib/arm64-v8a/libagclander.so
-VR_COMMON   := $(filter-out src/controls.c,$(GAME)) src/controls_vr.c src/input.c src/gles_shim.c
+VR_COMMON   := $(filter-out src/controls.c,$(GAME)) src/controls_vr.c src/input.c src/gles_shim.c src/vrhands.c
 QUEST_TEX   := $(TEX_NAMES:%=build/quest/tex_%.o)
 QUEST_FLAGS := -O2 -fPIC -std=gnu11 -DAGC_GLES -DAGC_VR -DPLATFORM_ANDROID -Wall -Wextra -Wno-unused-function -Wno-unused-parameter \
                -Wno-unused-variable -Wno-unused-but-set-variable -Wno-missing-field-initializers \

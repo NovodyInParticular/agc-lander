@@ -72,7 +72,15 @@ static int prog_is(int p)
     return agc_digit_char(d->prog[0]) == '0' + p / 10 && agc_digit_char(d->prog[1]) == '0' + p % 10;
 }
 
-typedef struct { char line[MAXL][160]; int n; int urgent; } Hint;
+typedef struct { char line[MAXL][160]; int n; int urgent; int vrbtn; } Hint;
+
+// The same hint in the headset's own terms (controller buttons, pointing at
+// the cabin's switches) instead of keyboard keys.
+#ifdef AGC_VR
+#define VRT(pc, vr) (vr)
+#else
+#define VRT(pc, vr) (pc)
+#endif
 
 static void add(Hint *h, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void add(Hint *h, const char *fmt, ...)
@@ -108,12 +116,13 @@ static void flying_hints(Hint *h)
     if (alt < 4)
         add(h, "Almost down: hold steady and wait for the blue CONTACT light");
     else if (down > target + 0.8)
-        add(h, "Coming down too fast (%.0f ft/s): tap Up about %d times to slow down",
-            down / FT, (int)lround(fmin(15, diff_ft)));
+        add(h, VRT("Coming down too fast (%.0f ft/s): tap Up about %d times to slow down",
+                   "Coming down too fast (%.0f ft/s): flick the LEFT stick up about %d times to slow down"),
+            down / FT, (int)lround(fmin(15, diff_ft))), h->vrbtn = VB_LSTICK_UP;
     else if (down < target * 0.4 - 0.15)
-        add(h, lm.hdot > 0.2 ? "You're climbing: tap Down about %d times to descend"
-                             : "Barely descending: tap Down about %d times",
-            (int)lround(fmin(15, fmax(1, -diff_ft))));
+        add(h, lm.hdot > 0.2 ? VRT("You're climbing: tap Down about %d times to descend", "You're climbing: flick the LEFT stick down about %d times")
+                             : VRT("Barely descending: tap Down about %d times", "Barely descending: flick the LEFT stick down about %d times"),
+            (int)lround(fmin(15, fmax(1, -diff_ft)))), h->vrbtn = VB_LSTICK_DOWN;
 
     // Horizontal drift, in the LM's own forward/right directions.
     V3 up = v3_norm(lm.r);
@@ -128,20 +137,26 @@ static void flying_hints(Hint *h)
     V3 up_b = lm_inertial_to_body(up);   // +z: leaning back, -y: leaning right
 
     if (fabs(vf) > lim && fabs(vf) >= fabs(vr))
-        add(h, vf > 0 ? "Drifting forward (%.0f ft/s): hold W briefly to lean back, then let go"
-                      : "Drifting backward (%.0f ft/s): hold S briefly to lean forward, then let go",
-            fabs(vf) / FT);
+        add(h, vf > 0 ? VRT("Drifting forward (%.0f ft/s): hold W briefly to lean back, then let go",
+                            "Drifting forward (%.0f ft/s): push the RIGHT stick forward briefly to lean back")
+                      : VRT("Drifting backward (%.0f ft/s): hold S briefly to lean forward, then let go",
+                            "Drifting backward (%.0f ft/s): pull the RIGHT stick back briefly to lean forward"),
+            fabs(vf) / FT), h->vrbtn = VB_RSTICK;
     else if (fabs(vr) > lim)
-        add(h, vr > 0 ? "Drifting right (%.0f ft/s): hold A briefly to lean left, then let go"
-                      : "Drifting left (%.0f ft/s): hold D briefly to lean right, then let go",
-            fabs(vr) / FT);
+        add(h, vr > 0 ? VRT("Drifting right (%.0f ft/s): hold A briefly to lean left, then let go",
+                            "Drifting right (%.0f ft/s): push the RIGHT stick left briefly to lean left")
+                      : VRT("Drifting left (%.0f ft/s): hold D briefly to lean right, then let go",
+                            "Drifting left (%.0f ft/s): push the RIGHT stick right briefly to lean right"),
+            fabs(vr) / FT), h->vrbtn = VB_RSTICK;
     else if (tilt > 10 * DEG2RAD) {
         if (fabs(up_b.z) >= fabs(up_b.y))
-            add(h, up_b.z > 0 ? "Leaning back %.0f deg: tap S to level out" : "Leaning forward %.0f deg: tap W to level out",
-                tilt * RAD2DEG);
+            add(h, up_b.z > 0 ? VRT("Leaning back %.0f deg: tap S to level out", "Leaning back %.0f deg: nudge the RIGHT stick back to level out")
+                               : VRT("Leaning forward %.0f deg: tap W to level out", "Leaning forward %.0f deg: nudge the RIGHT stick forward to level out"),
+                tilt * RAD2DEG), h->vrbtn = VB_RSTICK;
         else
-            add(h, up_b.y < 0 ? "Leaning right %.0f deg: tap A to level out" : "Leaning left %.0f deg: tap D to level out",
-                tilt * RAD2DEG);
+            add(h, up_b.y < 0 ? VRT("Leaning right %.0f deg: tap A to level out", "Leaning right %.0f deg: nudge the RIGHT stick left to level out")
+                               : VRT("Leaning left %.0f deg: tap D to level out", "Leaning left %.0f deg: nudge the RIGHT stick right to level out"),
+                tilt * RAD2DEG), h->vrbtn = VB_RSTICK;
     }
     if (tilt > LAND_CRASH_TILT * 0.8 && alt < 30) h->urgent = 1;
     if (down > LAND_CRASH_V * 0.8 && alt < 20) h->urgent = 1;
@@ -161,34 +176,49 @@ static void docking_hints(Hint *h)
     double closing = -g.rate;
     if (fabs(drift_r) > 0.05 || fabs(drift_u) > 0.05) {
         if (fabs(drift_r) >= fabs(drift_u))
-            add(h, "Columbia is drifting %s (%.2f m/s): tap the %s arrow to stop it", drift_r > 0 ? "right" : "left",
-                fabs(drift_r), drift_r > 0 ? "Right" : "Left");
+            add(h, VRT("Columbia is drifting %s (%.2f m/s): tap the %s arrow to stop it", "Columbia is drifting %s (%.2f m/s): nudge the LEFT stick %s to stop it"),
+                drift_r > 0 ? "right" : "left", fabs(drift_r), VRT(drift_r > 0 ? "Right" : "Left", drift_r > 0 ? "right" : "left"));
         else
-            add(h, "Columbia is drifting %s (%.2f m/s): tap the %s arrow to stop it", drift_u > 0 ? "up" : "down",
-                fabs(drift_u), drift_u > 0 ? "Up" : "Down");
+            add(h, VRT("Columbia is drifting %s (%.2f m/s): tap the %s arrow to stop it", "Columbia is drifting %s (%.2f m/s): nudge the LEFT stick %s to stop it"),
+                drift_u > 0 ? "up" : "down", fabs(drift_u), VRT(drift_u > 0 ? "Up" : "Down", drift_u > 0 ? "up" : "down"));
+        h->vrbtn = VB_LSTICK;
         return;
     }
     if (fabs(g.roll) > 4 * DEG2RAD) {
-        add(h, "Roll %.0f deg off: hold %s to turn until the target's cross is square in the sight", fabs(g.roll) * RAD2DEG,
-            g.roll > 0 ? "Q" : "E");
+        add(h, VRT("Roll %.0f deg off: hold %s to turn until the target's cross is square in the sight",
+                   "Roll %.0f deg off: hold the RIGHT grip and push the RIGHT stick %s until the cross is square"),
+            fabs(g.roll) * RAD2DEG, VRT(g.roll > 0 ? "Q" : "E", g.roll > 0 ? "left" : "right"));
+        h->vrbtn = VB_RGRIP;
         return;
     }
     if (g.angle > 3 * DEG2RAD) {
-        add(h, "Axes %.1f deg apart: tilt with W/S and A/D until the standoff cross sits in the middle of its disc",
+        add(h, VRT("Axes %.1f deg apart: tilt with W/S and A/D until the standoff cross sits in the middle of its disc",
+                   "Axes %.1f deg apart: tilt with the RIGHT stick until the standoff cross sits in the middle of its disc"),
             g.angle * RAD2DEG);
+        h->vrbtn = VB_RSTICK;
         return;
     }
     if (fabs(off_r) > 0.12 || fabs(off_u) > 0.12) {
         if (fabs(off_r) >= fabs(off_u))
-            add(h, "The probe is %.1f m %s of the drogue: tap the %s arrow, then stop the drift", fabs(off_r),
-                off_r > 0 ? "right" : "left", off_r > 0 ? "Right" : "Left");
+            add(h, VRT("The probe is %.1f m %s of the drogue: tap the %s arrow, then stop the drift", "The probe is %.1f m %s of the drogue: nudge the LEFT stick %s, then stop the drift"),
+                fabs(off_r), off_r > 0 ? "right" : "left", VRT(off_r > 0 ? "Right" : "Left", off_r > 0 ? "right" : "left"));
         else
-            add(h, "The probe is %.1f m %s of the drogue: tap the %s arrow, then stop the drift", fabs(off_u),
-                off_u > 0 ? "above" : "below", off_u > 0 ? "Up" : "Down");
+            add(h, VRT("The probe is %.1f m %s of the drogue: tap the %s arrow, then stop the drift", "The probe is %.1f m %s of the drogue: nudge the LEFT stick %s, then stop the drift"),
+                fabs(off_u), off_u > 0 ? "above" : "below", VRT(off_u > 0 ? "Up" : "Down", off_u > 0 ? "up" : "down"));
+        h->vrbtn = VB_LSTICK;
         return;
     }
-    if (g.axial > 2 && closing > 0.35) { add(h, "Closing at %.2f m/s: too fast. Tap G to slow to 0.1-0.3", closing); h->urgent = g.axial < 8; return; }
-    if (g.axial > 1 && closing < 0.04) { add(h, "Lined up. Tap T to close in at about 0.1-0.3 m/s (RATE about -0.2)"); return; }
+    if (g.axial > 2 && closing > 0.35) {
+        add(h, VRT("Closing at %.2f m/s: too fast. Tap G to slow to 0.1-0.3", "Closing at %.2f m/s: too fast. Tap the LEFT trigger to slow to 0.1-0.3"), closing);
+        h->urgent = g.axial < 8;
+        h->vrbtn = VB_LTRIG;
+        return;
+    }
+    if (g.axial > 1 && closing < 0.04) {
+        add(h, VRT("Lined up. Tap T to close in at about 0.1-0.3 m/s (RATE about -0.2)", "Lined up. Tap the LEFT grip to close in at about 0.1-0.3 m/s (RATE about -0.2)"));
+        h->vrbtn = VB_LGRIP;
+        return;
+    }
     add(h, "On the way in at %.2f m/s, %.0f m to go: keep the target centred", closing, fmax(0, g.axial));
 }
 
@@ -196,42 +226,60 @@ static void ascent_hints(Hint *h)
 {
     int ph = ascent_phase();
     if (ph == MP_COUNTDOWN) {
-        if (crew.auto_crew) { add(h, "The auto crew will light the ascent engine at V99 (F2 to do it yourself)"); return; }
+        if (eva_phase() == EVA_SURFACE) {
+            add(h, VRT("Walk with W A S D (Shift to lope), Space to jump, F to plant the flag.",
+                       "Walk with the LEFT stick (hold the left grip to lope), A to jump, left trigger plants the flag."));
+            add(h, "The countdown waits for you: walk to the ladder and press X to climb back in");
+            return;
+        }
+        if (crew.auto_crew) { add(h, VRT("The auto crew will light the ascent engine at V99 (F2 to do it yourself)", "The auto crew will light the ascent engine at V99")); return; }
         switch (crew.hint) {
         case HINT_ASC_STAGE:
-            add(h, "Lift-off! First press B (ABORT STAGE): it fires the bolts holding");
-            add(h, "the ascent stage to the descent stage, which stays on the Moon");
+            add(h, VRT("Lift-off! First press B (ABORT STAGE): it fires the bolts holding",
+                       "Lift-off! First point at ABORT STAGE (ringed green) and pull the trigger: it fires"));
+            add(h, VRT("the ascent stage to the descent stage, which stays on the Moon", "the bolts holding the stages together; the descent stage stays behind"));
             h->urgent = 1;
+            h->vrbtn = VB_RTRIG;
             return;
         case HINT_ASC_ARM:
-            add(h, "Now press F7 to arm the ascent engine (ENG ARM: ASC)");
+            add(h, VRT("Now press F7 to arm the ascent engine (ENG ARM: ASC)", "Now point at ENG ARM (ringed green) and pull the trigger: ASC"));
             h->urgent = 1;
+            h->vrbtn = VB_RTRIG;
             return;
         case HINT_ASC_PRO:
-            add(h, "Press P (PRO): the computer lights the ascent engine");
+            add(h, VRT("Press P (PRO): the computer lights the ascent engine", "Press B (PRO): the computer lights the ascent engine"));
             h->urgent = 1;
+            h->vrbtn = VB_B;
             return;
         default:
             add(h, "Countdown to lift-off: the DSKY's top number is minutes and seconds to go.");
-            add(h, "When it flashes V99: B (ABORT STAGE), F7 (arm), then P (PRO)");
+            add(h, VRT("When it flashes V99: B (ABORT STAGE), F7 (arm), then P (PRO). X: a moonwalk first",
+                       "At V99: ABORT STAGE, ENG ARM to ASC, then B (PRO). X for a moonwalk first"));
+            if (eva_available()) h->vrbtn = VB_X;
             return;
         }
     }
     if (ph == MP_ASCENT) {
         if (lm.aps_on && !lm.staged) {
             add(h, "The ascent engine is firing into the descent stage - you're still bolted to it!");
-            add(h, "Press B (ABORT STAGE) now");
+            add(h, VRT("Press B (ABORT STAGE) now", "Point at ABORT STAGE (ringed green) and pull the trigger now"));
             h->urgent = 1;
+            h->vrbtn = VB_RTRIG;
             return;
         }
         add(h, "P12 is flying you to orbit: straight up, then the pitch-over. Nothing to do.");
-        add(h, "It shuts the engine off at 5,500 ft/s. PgUp speeds up time");
+        add(h, VRT("It shuts the engine off at 5,500 ft/s. PgUp speeds up time", "It shuts the engine off at 5,500 ft/s (about seven minutes)"));
         return;
     }
-    if (ph == MP_ORBIT) { add(h, "In orbit, trailing Columbia. Press Enter to skip the 3 1/2-hour rendezvous"); return; }
+    if (ph == MP_ORBIT) {
+        add(h, VRT("In orbit, trailing Columbia. Press Enter to skip the 3 1/2-hour rendezvous", "In orbit, trailing Columbia. Press B to skip the 3 1/2-hour rendezvous"));
+        h->vrbtn = VB_B;
+        return;
+    }
     if (ph == MP_PROX) {
         docking_hints(h);
-        if (h->n && hud_camera_is_docking == 0) add(h, "Tab to the DOCKING WINDOW view: the target sits in the COAS sight");
+        if (h->n && hud_camera_is_docking == 0)
+            add(h, VRT("Tab to the DOCKING WINDOW view: the target sits in the COAS sight", "Press Y for the DOCKING WINDOW view: the target sits in the COAS sight"));
     }
 }
 
@@ -241,20 +289,25 @@ static void compute(Hint *h)
     if (ascent_active()) { ascent_hints(h); return; }
     if (lm.land_result == LAND_CRASH) return;   // the results panel takes over
     if (lm.touchdown) {
-        if (lm.dps_on) { add(h, "You're on the ground: press SPACE to shut the engine off"); h->urgent = 1; }
+        if (lm.dps_on) { add(h, VRT("You're on the ground: press SPACE to shut the engine off", "You're on the ground: press A (ENGINE STOP)")); h->urgent = 1; h->vrbtn = VB_A; }
         else if (eva_phase() == EVA_INSIDE && eva_available()) {
-            add(h, "You are on the Moon. Press X to open the hatch and go for a walk,");
+            add(h, VRT("You are on the Moon. Press X to open the hatch and go for a walk,", "You are on the Moon. Press X (left controller) to open the hatch and walk outside"));
+#ifndef AGC_VR
             add(h, "or L to skip ahead to lift-off (P12) and the trip back to Columbia");
+#endif
+            h->vrbtn = VB_X;
         }
         else if (eva_phase() == EVA_SURFACE) {
-            add(h, "Walk with W A S D (Shift to lope), Space to jump, F to plant the flag.");
-            add(h, "To go back in, walk to the foot of the ladder and press X");
+            add(h, VRT("Walk with W A S D (Shift to lope), Space to jump, F to plant the flag.",
+                       "Walk with the LEFT stick (hold the left grip to lope), A to jump, left trigger plants the flag."));
+            add(h, VRT("To go back in, walk to the foot of the ladder and press X", "To go back in, walk to the foot of the ladder and press X"));
         }
         return;
     }
     if (lm.probe_contact && lm.dps_on) {
-        add(h, "Blue CONTACT light! Press SPACE now to cut the engine");
+        add(h, VRT("Blue CONTACT light! Press SPACE now to cut the engine", "Blue CONTACT light! Press A now to cut the engine"));
         h->urgent = 1;
+        h->vrbtn = VB_A;
         return;
     }
 
@@ -263,29 +316,48 @@ static void compute(Hint *h)
         switch (crew.hint) {
         case HINT_FINE_ALIGN:
             add(h, "The computer asks if it should fine-tune its gyros. Not needed:");
-            add(h, "press Enter to skip");
+            add(h, VRT("press Enter to skip", "pull the LEFT trigger (ENTR) to skip"));
+            h->vrbtn = VB_LTRIG;
             return;
         case HINT_MANEUVER:
             add(h, "The computer wants to turn the LM to the burn attitude.");
-            add(h, "Make sure F8 says AUTO, then press P (PRO) to let it turn");
+            if (lm_get_attitude_mode() != 2) {
+                add(h, VRT("Make sure F8 says AUTO, then press P (PRO) to let it turn",
+                           "Point at the PGNS mode switch (ringed green), pull the trigger for AUTO, then press B (PRO)"));
+                h->vrbtn = VB_RTRIG;
+            } else {
+                add(h, VRT("Make sure F8 says AUTO, then press P (PRO) to let it turn", "Press B (PRO) to let it turn"));
+                h->vrbtn = VB_B;
+            }
             return;
         case HINT_MANEUVER_DONE:
-            add(h, "Turn finished. Press Enter to carry on");
+            add(h, VRT("Turn finished. Press Enter to carry on", "Turn finished. Pull the LEFT trigger (ENTR) to carry on"));
+            h->vrbtn = VB_LTRIG;
             return;
         case HINT_ARM:
-            add(h, "Press F7 to arm the descent engine before the burn starts");
+            add(h, VRT("Press F7 to arm the descent engine before the burn starts",
+                       "Arm the descent engine: point at ENG ARM (ringed green) and pull the trigger"));
+            h->vrbtn = VB_RTRIG;
             return;
         case HINT_ENABLE_IGN:
-            add(h, "The engine is ready to light. Press P (PRO) to allow ignition");
-            if (!lm.engine_armed) add(h, "...but arm it first with F7");
+            if (!lm.engine_armed) {
+                add(h, VRT("The engine is ready to light. Press P (PRO) to allow ignition", "The engine is ready to light, but not armed:"));
+                add(h, VRT("...but arm it first with F7", "point at ENG ARM (ringed green) and pull the trigger first"));
+                h->vrbtn = VB_RTRIG;
+            } else {
+                add(h, VRT("The engine is ready to light. Press P (PRO) to allow ignition", "The engine is ready to light. Press B (PRO) to allow ignition"));
+                h->vrbtn = VB_B;
+            }
             return;
         case HINT_V57:
             add(h, "The landing radar can see the ground. Tell the computer to use it:");
-            add(h, "type V 5 7 then Enter");
+            add(h, VRT("type V 5 7 then Enter", "on the cabin DSKY, point and pull the trigger on VERB, 5, 7, then ENTR (ringed green)"));
+            h->vrbtn = VB_RTRIG;
             return;
         case HINT_ALARM:
             add(h, "Program alarm: the computer is busy but still flying.");
-            add(h, "Press R (RSET) to clear the light");
+            add(h, VRT("Press R (RSET) to clear the light", "Point at RSET on the cabin DSKY (ringed green) and pull the trigger"));
+            h->vrbtn = VB_RTRIG;
             return;
         }
     }
@@ -298,23 +370,28 @@ static void compute(Hint *h)
     }
     if (p65) {
         add(h, "The computer is landing for you. Watch for the blue CONTACT light%s",
-            crew.auto_crew ? "" : ", then press SPACE");
+            crew.auto_crew ? "" : VRT(", then press SPACE", ", then press A"));
         return;
     }
     if (p64) {
         add(h, "The computer is steering to the landing site. Let it fly,");
-        add(h, "or take over: press F8 (ATT HOLD), then tap Up/Down");
+        add(h, VRT("or take over: press F8 (ATT HOLD), then tap Up/Down",
+                   "or take over: set the PGNS mode switch to ATT HOLD, then flick the LEFT stick up/down"));
         return;
     }
     if (p63 && lm.dps_on) {
         add(h, "Braking burn: the computer is slowing you down from orbit.");
-        add(h, "Nothing to do yet. PgUp speeds up time");
+        add(h, VRT("Nothing to do yet. PgUp speeds up time", "Nothing to do yet: watch the Moon come up in the window"));
         return;
     }
     if (p63) {
-        add(h, crew.auto_crew ? "Waiting for the burn. The auto crew runs the checklist (F2 to do it yourself)."
-                              : "Waiting for the computer. Press F2 if you want the auto crew to do the checklist.");
+        add(h, crew.auto_crew ? VRT("Waiting for the burn. The auto crew runs the checklist (F2 to do it yourself).",
+                                    "Waiting for the burn. The auto crew runs the checklist.")
+                              : VRT("Waiting for the computer. Press F2 if you want the auto crew to do the checklist.",
+                                    "Waiting for the computer: it will ask for each step on the DSKY."));
+#ifndef AGC_VR
         add(h, "PgUp speeds up time");
+#endif
     }
 }
 
@@ -410,6 +487,14 @@ int hints_target(HintTarget *t)
 static int in_cockpit;
 void hints_set_cockpit(int c) { in_cockpit = c; }
 
+int hints_vr_button(void)
+{
+    if (!hints_on) return VB_NONE;
+    Hint h;
+    compute(&h);
+    return h.n ? h.vrbtn : VB_NONE;
+}
+
 void hints_draw(int w, int h, int dsky_w)
 {
     if (!hints_on) return;
@@ -418,7 +503,7 @@ void hints_draw(int w, int h, int dsky_w)
     if (hint.n == 0) return;
     HintTarget ht;
     if (in_cockpit && hints_target(&ht) && hint.n < MAXL)
-        add(&hint, "In the cabin: the control to use is ringed in green");
+        add(&hint, VRT("In the cabin: the control to use is ringed in green", "The control to use is ringed in green; the button glows on your controller"));
 
     float scale = h / 1080.0f;
     if (scale < 0.7f) scale = 0.7f;

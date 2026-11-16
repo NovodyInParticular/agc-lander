@@ -21,6 +21,11 @@ typedef struct { int kind, arg; const char *text; } HintTarget;
 int hints_target(HintTarget *t);
 // Whether the view is the cockpit (the hint box then mentions the marker).
 void hints_set_cockpit(int in_cockpit);
+// The controller button the current hint wants pressed (headset): it glows on
+// the controller model. VB_RTRIG = point at the ringed switch and pull.
+enum { VB_NONE, VB_A, VB_B, VB_X, VB_Y, VB_LTRIG, VB_RTRIG, VB_LGRIP, VB_RGRIP, VB_LSTICK, VB_LSTICK_UP, VB_LSTICK_DOWN, VB_RSTICK };
+int hints_vr_button(void);
+
 // Set by the game: 1 while the docking-window view is up.
 extern int hud_camera_is_docking;
 

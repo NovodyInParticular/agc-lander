@@ -246,6 +246,8 @@ typedef struct Node {
     unsigned short *idx;
     int nverts, nidx;
     V3 origin;                        // site-frame chunk origin
+    V3 bctr;                          // bounding sphere (site frame), for culling
+    double brad;
     Mesh mesh;
     unsigned last_used;
     float fade;                       // 0 = just appeared (shown as the parent's surface), 1 = fully itself
@@ -785,8 +787,32 @@ void terrain_draw(V3 cam, void *shader_ptr)
     float dt = GetFrameTime();
     if (dt > 0.1f) dt = 0.1f;
     if (fade_hold) dt = 0;
+    static int no_cull = -1;   // AGC_NOCULL=1: draw every chunk (comparison)
+    if (no_cull < 0) no_cull = getenv("AGC_NOCULL") != NULL;
     for (int i = 0; i < draw_n; i++) {
         Node *n = draw_list[i];
+        // A chunk grows in over FADE_TIME whether or not this eye can see it.
+        if (settling || no_morph) n->fade = 1.0f;
+        n->fade += dt / FADE_TIME;
+        if (n->fade > 1.0f) n->fade = 1.0f;
+        if (n->brad <= 0) {
+            // Bounding sphere: half-diagonal, height span, the sphere's bulge, skirts, morph slack.
+            n->bctr = terrain_plane_to_site(n->x0 + n->size / 2, n->z0 + n->size / 2, (n->hmin + n->hmax) / 2);
+            n->brad = n->size * 0.72 + (n->hmax - n->hmin) / 2 + n->size * n->size / (8 * R0) + n->size * 0.05 + 20.0;
+        }
+        if (!no_cull && !render_sphere_visible(v3_sub(n->bctr, cam), n->brad)) {
+            if (getenv("AGC_CULLDBG")) {
+                for (int k = 0; k < 50; k++) {
+                    V3 q = terrain_plane_to_site(n->x0 + (k % 5) * 0.25 * n->size, n->z0 + ((k / 5) % 5) * 0.25 * n->size, (k >= 25) ? n->hmax : n->hmin);
+                    if (render_sphere_visible(v3_sub(q, cam), 0.0)) {
+                        printf("CULLBUG level %d size %.1f x0 %.1f z0 %.1f h %.2f..%.2f bctr (%.1f %.1f %.1f) rad %.1f corner (%.1f %.1f %.1f) cam (%.1f %.1f %.1f)\n",
+                               n->level, n->size, n->x0, n->z0, n->hmin, n->hmax, n->bctr.x, n->bctr.y, n->bctr.z, n->brad, q.x, q.y, q.z, cam.x, cam.y, cam.z);
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
         V3 o = v3_sub(n->origin, cam);
         Matrix t = MatrixTranslate((float)o.x, (float)o.y, (float)o.z);
         if (settling || no_morph) n->fade = 1.0f;
@@ -812,8 +838,6 @@ void terrain_draw(V3 cam, void *shader_ptr)
         SetShaderValue(*shader, chunk_loc, chunk, SHADER_UNIFORM_VEC4);
         SetShaderValueV(*shader, base_loc, base, SHADER_UNIFORM_IVEC2, SHADER_NOCT);
         SetShaderValueV(*shader, frac_loc, frac, SHADER_UNIFORM_VEC2, SHADER_NOCT);
-        n->fade += dt / FADE_TIME;
-        if (n->fade > 1.0f) n->fade = 1.0f;
         DrawMesh(n->mesh, mat, t);
         drawn_count++;
     }

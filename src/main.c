@@ -17,6 +17,9 @@ __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void *module, c
 
 #include "input.h"
 #include "vr.h"
+#ifdef AGC_VR
+#include "vrhands.h"
+#endif
 
 // AGC_PERF=1: print per-section frame timings once a second (GPU-synced).
 static int perf_on;
@@ -378,7 +381,17 @@ static V3 earth_site_g;
 // Once per frame, before any eye is drawn: terrain level of detail for the
 // viewpoint, the LM's sun shadow map, the dust simulation.
 static float world_dust;
-static V3 shadow_centre;   // site frame: where the shadow map is centred this frame
+static V3 shadow_centre;
+
+// Benchmarks: AGC_SKIP=terrain,sky,lm,shadow,rocks,cockpit leaves those stages
+// out, to see what each costs (the GPU can't time stages separately well).
+static int skip(const char *what)
+{
+    static const char *list;
+    static int read;
+    if (!read) { list = getenv("AGC_SKIP"); read = 1; }
+    return list && strstr(list, what);
+}   // site frame: where the shadow map is centred this frame
 static void world_prepare(const ViewCam *cam, int h, int camera)
 {
     if (camera == CAM_GLOBE) return;
@@ -388,7 +401,8 @@ static void world_prepare(const ViewCam *cam, int h, int camera)
 
     // LM shadow map (LM at the origin of the light space). After staging it
     // stays on the descent stage while the ascent stage is close above it.
-    if (lm.staged) {
+    if (skip("shadow")) {
+    } else if (lm.staged) {
         V3 dp;
         M3 dr;
         ds_site_pose(&dp, &dr);
@@ -448,7 +462,7 @@ static void world_draw(const ViewCam *cam, int w, int h, float film, int camera)
 
     render_set_film(film);
     render_begin_scene(cam, w, h);
-    render_sky(cam, sun_site, earth_site, sun_site);
+    if (!skip("sky")) render_sky(cam, sun_site, earth_site, sun_site);
     render_scene_3d_begin(w, h);
 
     V3 up = local_up_at(lm_pos);
@@ -459,14 +473,15 @@ static void world_draw(const ViewCam *cam, int w, int h, float film, int camera)
     V3 cam_mod = v3(fmod(cam->pos.x, 4096.0), fmod(cam->pos.y, 4096.0), fmod(cam->pos.z, 4096.0));
     render_set_scene_uniforms(sun_site, cam_mod, local_up_at(cam->pos), 0.11f, ground, dust);
 
-    globe_draw_backdrop(cam, sun_site, earth_site);
+    if (!skip("backdrop")) globe_draw_backdrop(cam, sun_site, earth_site);
     render_set_scene_uniforms(sun_site, cam_mod, local_up_at(cam->pos), 0.11f, ground, dust);
     if (getenv("AGC_NODEPTH")) rlDisableDepthTest();
-    terrain_draw(cam->pos, render_terrain_shader());
+    if (!skip("terrain")) terrain_draw(cam->pos, render_terrain_shader());
     rlEnableDepthTest();
-    rocks_draw(cam->pos);
+    if (!skip("rocks")) rocks_draw(cam->pos);
     if (camera == CAM_CDR || camera == CAM_DOCK) render_set_lm_extras(COCKPIT_NEAR_CUT, 1.0f, NULL, NULL, 0);
-    if (lm.staged) {
+    if (skip("lm")) {
+    } else if (lm.staged) {
         lmmodel_draw_stage(1, R, rel);
         render_set_lm_extras(0.0f, 1.0f, NULL, NULL, 0);
         V3 dp;
@@ -512,7 +527,7 @@ static void world_draw(const ViewCam *cam, int w, int h, float film, int camera)
     extras_draw_ufo(cam);
 
     render_scene_3d_end();
-    if (camera == CAM_CDR) cockpit_draw(R, rel, w, h);
+    if (camera == CAM_CDR && !skip("cockpit")) cockpit_draw(R, rel, w, h);
     render_end_scene();
 }
 
@@ -892,6 +907,7 @@ static void vr_game_init(void)
     static const unsigned char px[4] = { 255, 255, 255, 255 };
     Image img = { (void *)px, 1, 1, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
     ui_white = LoadTextureFromImage(img);
+    vrhands_init();
 }
 
 // Tracking-space vector -> site frame, for a seat whose view is `b`.
@@ -1003,6 +1019,7 @@ static void vr_map_keys(int menu, int results_showing)
 static void vr_draw_overlays(const ViewCam *base, const ViewCam *eye, int w, int h, int show_ui, int laser, V3 laser_from, V3 laser_to, int laser_hit)
 {
     render_scene_3d_begin_near(w, h, 0.05);
+    vrhands_draw(base, eye->pos, vr_input(), GetTime());   // the controllers in the hands, depth-tested against the cabin
     rlDisableDepthTest();
     rlDisableBackfaceCulling();
     rlSetBlendFactors(RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_FUNC_ADD);
@@ -1351,7 +1368,7 @@ int main(int argc, char **argv)
                 lm_set_engine_arm(arm);
                 crew_say(arm == ARM_ASC ? "ENG ARM: ASC (ascent engine)" : arm == ARM_DES ? "ENG ARM: DES (descent engine)" : "ENG ARM: OFF");
             }
-            if (IsKeyPressed(KEY_B) && !lm.abort_stage) {
+            if (IsKeyPressed(KEY_B) && !lm.abort_stage && eva_phase() == EVA_INSIDE) {
                 int flying = !lm.touchdown;
                 lm_abort_stage();
                 if (flying && !lm.aps_on) lm_set_engine_arm(ARM_ASC);
@@ -1367,7 +1384,7 @@ int main(int argc, char **argv)
                 hints_save();
                 crew_say(hints_on ? "Hints on (H hides them)" : "Hints off (H shows them)");
             }
-            if (IsKeyPressed(KEY_X) && !opt.spectator && !ascent_active()) {
+            if (IsKeyPressed(KEY_X) && !opt.spectator && (!ascent_active() || ascent_phase() == MP_COUNTDOWN)) {
                 if (eva_phase() == EVA_INSIDE && eva_available()) { results_hidden = 1; camera = CAM_CDR; }
                 eva_key();
             }
@@ -1513,6 +1530,7 @@ int main(int argc, char **argv)
         }
 
         // ---------------- Simulation ----------------
+        crew.outside = eva_phase() != EVA_INSIDE;   // the automatic crew does not launch without the walker
         coop_tick(GetTime());
         if (coop_role == COOP_HOST) coop_host_poll();
         if (coop_role == COOP_CLIENT && gs == GS_FLY) {
@@ -1962,6 +1980,13 @@ int main(int argc, char **argv)
         }
 #endif
 
+#ifdef AGC_VR
+        if ((int)(wall / 3) != (int)((wall - dt) / 3)) {
+            int dn, ld, pd;
+            terrain_stats(&dn, &ld, &pd);
+            TraceLog(LOG_INFO, "VR scene: camera %d, terrain chunks drawn %d (per eye), loaded %d, pending %d", vcam, dn, ld, pd);
+        }
+#endif
         if (getenv("AGC_DBGJETS") && ((int)(wall * 2) != (int)((wall - dt) * 2))) {
             V3 g = lm_gimbal_angles();
             printf("JETS wall %.1f t %.1f ch5 %03o ch6 %03o rcs %.1f w %+.3f %+.3f %+.3f deg/s  gimb %.2f %.2f %.2f  CDUD %05o %05o %05o  CDU %05o %05o %05o mode %d\n",

@@ -247,7 +247,11 @@ static void pcx_poly_lines(Vector2 c, int sides, float r, float rot, Color col) 
 
 // Lettering is drawn larger than the real 3 mm engraving so it reads from the
 // seat in a headset; LEG scales nomenclature, the layout leaves room for it.
+#ifdef AGC_VR
+#define LEG 1.45f   // the headset's lenses need bigger type still
+#else
 #define LEG 1.28f
+#endif
 
 static Color scale_col(Color c, float k)
 {

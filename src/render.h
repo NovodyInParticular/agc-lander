@@ -27,6 +27,7 @@ typedef struct {
     float lod;             // terrain detail scale
     int shadow;            // shadow map size
     float star_grid, star_boost;
+    float crater_px0, crater_px1;   // craters fade in between these sizes, pixels
 } RenderQuality;
 const RenderQuality *render_quality(void);
 
@@ -35,6 +36,8 @@ void render_shutdown(void);
 
 // Common uniforms for all scene shaders; call once per frame inside 3D mode.
 void render_begin_scene(const ViewCam *cam, int screen_w, int screen_h);
+// Inside the current view's frustum? c: centre relative to the camera, radius in metres.
+int render_sphere_visible(V3 c, double radius);
 void render_end_scene(void);
 
 // Scene output mode; set before render_init(). 0 = HDR target with bloom,

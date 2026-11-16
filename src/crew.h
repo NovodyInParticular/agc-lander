@@ -11,6 +11,7 @@ typedef struct {
     double callout_time;      // sim time of the callout
     int landed;
     int in_orbit;             // the ascent engine has cut off in orbit
+    int outside;              // a crewman is out on the surface (set by the game)
     int hint;                 // HINT_*: plain-English version of the prompt
 } Crew;
 

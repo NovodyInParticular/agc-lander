@@ -96,6 +96,32 @@ int vr_begin_frame(float *dt, int *quit)
     input.aim_pos[1] = v3_add(head, v3(0.18, -0.22, -0.15));
     input.aim_dir[1] = dir_of(ay, ap);
     input.rtrig = IsMouseButtonDown(MOUSE_BUTTON_LEFT) ? 1.0f : 0.0f;
+    // Two controllers held in front (AGC_VRSIM_HANDS=0: bare hands). The left
+    // one points straight ahead, the right one where the mouse aims.
+    // AGC_VRSIM_PRESS=a,b,x,y,lt,rt,lg,rg,ls,rs: buttons held (for screenshots).
+    const char *hands = getenv("AGC_VRSIM_HANDS");
+    int have = !hands || atoi(hands) != 0;
+    for (int h = 0; h < 2; h++) {
+        V3 dir = h ? input.aim_dir[1] : dir_of(-8 * DEG, -20 * DEG);
+        V3 z = v3_scale(dir, -1), x = v3_norm(v3_cross(v3(0, 1, 0), z)), y = v3_cross(z, x);
+        input.grip_ok[h] = 1;
+        input.controller[h] = have;
+        input.grip_pos[h] = v3_add(head, v3(h ? 0.17 : -0.17, -0.27, -0.30));
+        input.grip_x[h] = x; input.grip_y[h] = y; input.grip_z[h] = z;
+    }
+    const char *pr = getenv("AGC_VRSIM_PRESS");
+    if (pr) {
+        if (strstr(pr, "a")) input.a = 1;
+        if (strstr(pr, "b")) input.b = 1;
+        if (strstr(pr, "x")) input.x = 1;
+        if (strstr(pr, "y")) input.y = 1;
+        if (strstr(pr, "lt")) input.ltrig = 1;
+        if (strstr(pr, "rt")) input.rtrig = 1;
+        if (strstr(pr, "lg")) input.lgrip = 1;
+        if (strstr(pr, "rg")) input.rgrip = 1;
+        if (strstr(pr, "ls")) input.ly = 0.8f;
+        if (strstr(pr, "rs")) input.rx = 0.8f;
+    }
     return 1;
 }
 

@@ -217,7 +217,7 @@ void crew_step(void)
         }
     } else if (flashing && vn(99, 62)) {
         crew_type("Pp");
-    } else if (flashing && prog(12) && vn(99, 74)) {
+    } else if (flashing && prog(12) && vn(99, 74) && !crew.outside) {
         // Aldrin's call: "Abort Stage, Engine Arm Ascent, Proceed."
         lm_abort_stage();
         lm_set_engine_arm(ARM_ASC);

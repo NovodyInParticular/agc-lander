@@ -553,6 +553,16 @@ static unsigned long long mix(unsigned long long h, const void *data, size_t n)
     return h;
 }
 
+// In the headset the switches are drawn bigger than life: a real 2 mm bat
+// handle is a pixel or two wide at arm's length in the lenses.
+#ifdef AGC_VR
+#define TOG_R 1.7
+#define TOG_L 1.25
+#else
+#define TOG_R 1.0
+#define TOG_L 1.0
+#endif
+
 static void model_toggle(const Lever *l, V3 base, V3 n, V3 upv, V3 uv, double pos)
 {
     Color c = { l->r, l->g, l->b, 255 };
@@ -567,8 +577,8 @@ static void model_toggle(const Lever *l, V3 base, V3 n, V3 upv, V3 uv, double po
     static const double prof[6][2] = { { 0.0020, 0.00125 }, { 0.0065, 0.00125 }, { 0.0125, 0.00190 },
                                        { 0.0165, 0.00225 }, { 0.0183, 0.00190 }, { 0.0192, 0.00110 } };
     for (int k = 0; k < 5; k++)
-        cyl(v3_add(piv, v3_scale(d, prof[k][0])), v3_add(piv, v3_scale(d, prof[k + 1][0])), prof[k][1], prof[k + 1][1], 10, c,
-            M_METAL, k == 4 ? 2 : 0);
+        cyl(v3_add(piv, v3_scale(d, prof[k][0] * TOG_L)), v3_add(piv, v3_scale(d, prof[k + 1][0] * TOG_L)), prof[k][1] * TOG_R,
+            prof[k + 1][1] * TOG_R, 10, c, M_METAL, k == 4 ? 2 : 0);
     if (l->guard) {
         // Wicket guards: a hoop either side, taller than the handle's swing.
         Color g = { 176, 178, 182, 255 };
@@ -834,10 +844,12 @@ static const char *ck_fs =
     "  float specK = mat == 3 ? 0.55 : mat == 1 ? 0.06 : mat == 4 ? 0.05 : 0.03;\n"
     "  float shin = mat == 3 ? 80.0 : 14.0;\n"
     "  // Painted surfaces and the pressure shell take their relief, wear and sheen from the baked maps.\n"
-    "  if (mat == 2 || mat == 4 || mat == 8) {\n"
+    "  // Panel bodies and bare metal get the same wear at half strength (no flat plastic).\n"
+    "  if (mat == 1 || mat == 2 || mat == 3 || mat == 4 || mat == 8) {\n"
     "    vec3 b; vec4 sm;\n"
-    "    if (mat == 8) sm = triMap(wallMap, bodyPos / 0.90, N, b); else sm = triMap(cabinMap, bodyPos / 0.60, N, b);\n"
-    "    alb *= sm.a * 2.0; N = normalize(N + b); specK *= clamp(1.0 - 3.0 * (sm.b - 0.5), 0.4, 2.2);\n"
+    "    if (mat == 8) sm = triMap(wallMap, bodyPos / 0.90, N, b); else sm = triMap(cabinMap, bodyPos / (mat == 3 ? 0.35 : 0.60), N, b);\n"
+    "    float k = (mat == 1 || mat == 3) ? 0.5 : 1.0;\n"
+    "    alb *= mix(1.0, sm.a * 2.0, k); N = normalize(N + b * k); specK *= mix(1.0, clamp(1.0 - 3.0 * (sm.b - 0.5), 0.4, 2.2), k);\n"
     "  }\n"
     "  vec3 col = cabinLight(bodyPos, N, V, alb, specK, shin);\n"
     "  if (mat == 7) {\n"
