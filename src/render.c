@@ -29,7 +29,11 @@
 #define LOGZ_FS \
     "uniform float logFar;\n" \
     "in float fragLogZ;\n" \
-    "void writeDepth(){ gl_FragDepth = log2(fragLogZ) * logFar * 0.5; }\n"
+    "#if Q_VZ\n" \
+    "void writeDepth(){}\n" \
+    "#else\n" \
+    "void writeDepth(){ gl_FragDepth = log2(fragLogZ) * logFar * 0.5; }\n" \
+    "#endif\n"
 
 #define NOISE_GLSL \
     "float hash12(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }\n" \
@@ -41,7 +45,7 @@
     "  float n000=hash13(i), n100=hash13(i+vec3(1,0,0)), n010=hash13(i+vec3(0,1,0)), n110=hash13(i+vec3(1,1,0));\n" \
     "  float n001=hash13(i+vec3(0,0,1)), n101=hash13(i+vec3(1,0,1)), n011=hash13(i+vec3(0,1,1)), n111=hash13(i+vec3(1,1,1));\n" \
     "  return mix(mix(mix(n000,n100,f.x),mix(n010,n110,f.x),f.y), mix(mix(n001,n101,f.x),mix(n011,n111,f.x),f.y), f.z); }\n" \
-    "float fbm(vec2 p){ float s=0.0, a=0.5; for(int i=0;i<5;i++){ s+=a*vnoise(p); p*=2.03; a*=0.5;} return s; }\n" \
+    "float fbm(vec2 p){ float s=0.0, a=0.5; for(int i=0;i<Q_FBM;i++){ s+=a*vnoise(p); p*=2.03; a*=0.5;} return s + a; }\n" \
     "float fbm3(vec3 p){ float s=0.0, a=0.5; for(int i=0;i<5;i++){ s+=a*vnoise3(p); p*=2.03; a*=0.5;} return s; }\n"
 
 // ---------------------------------------------------------------------------
@@ -90,7 +94,7 @@ static const char *terrain_fs = GLSL_HEADER LOGZ_FS NOISE_GLSL
     "void craters(float fw, vec2 su, float ss, out vec2 slope, out float shadow, out float fresh){\n"
     "  slope = vec2(0.0); shadow = 1.0; fresh = 0.0;\n"
     "  if (dbg == 6) return;\n"
-    "  for (int i = 0; i < 6; i++) {\n"
+    "  for (int i = Q_OCT0; i < Q_OCT1; i++) {\n"
     "    float cell = OCT_CELL[i], lim = cell * OCT_GK[i];\n"
     "    float inGeo = mix(step(1.5 * chunk.x, lim), step(3.0 * chunk.x, lim), morphK);\n"
     "    float pix = smoothstep(2.5, 7.0, cell / fw);\n"
@@ -142,8 +146,13 @@ static const char *terrain_fs = GLSL_HEADER LOGZ_FS NOISE_GLSL
     "  vec3 c = sp.xyz / sp.w * 0.5 + 0.5;\n"
     "  if (c.x < 0.0 || c.x > 1.0 || c.y < 0.0 || c.y > 1.0 || c.z > 1.0) return 1.0;\n"
     "  float s = 0.0; vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0));\n"
+    "#if Q_PCF == 9\n"
     "  for (int x=-1;x<=1;x++) for(int y=-1;y<=1;y++){ float d = texture(shadowMap, c.xy + vec2(x,y)*texel*1.5).r; s += (c.z - 0.002 > d) ? 0.0 : 1.0; }\n"
     "  return s / 9.0;\n"
+    "#else\n"
+    "  for (int k=0;k<4;k++){ vec2 o = vec2(k & 1, k >> 1) * 2.0 - 1.0; float d = texture(shadowMap, c.xy + o*texel*1.1).r; s += (c.z - 0.002 > d) ? 0.0 : 1.0; }\n"
+    "  return s / 4.0;\n"
+    "#endif\n"
     "}\n"
     "void main(){\n"
     "  if (dbg != 5) writeDepth();\n"
@@ -158,7 +167,11 @@ static const char *terrain_fs = GLSL_HEADER LOGZ_FS NOISE_GLSL
     "  float mid = 1.0 - smoothstep(250.0, 3000.0, dist);\n"
     "  mat2 r2 = mat2(0.80, 0.60, -0.60, 0.80), r3 = mat2(0.28, -0.96, 0.96, 0.28);\n"
     "  vec4 s1 = texture(soilMap, dp / 3.2);\n"
+    "#if Q_SOIL >= 3\n"
     "  vec4 s2 = texture(soilMap, r2 * dp / 29.0);\n"
+    "#else\n"
+    "  vec4 s2 = vec4(0.5);\n"
+    "#endif\n"
     "  vec4 s3 = texture(soilMap, r3 * dp / 310.0);\n"
     "  vec2 sg = (s1.rg * 2.0 - 1.0) * 0.30 * near + ((s2.rg * 2.0 - 1.0) * r2) * 0.26 * mid + ((s3.rg * 2.0 - 1.0) * r3) * 0.16;\n"
     "  vec3 Ng = N;\n"
@@ -224,6 +237,15 @@ static const char *lm_vs = GLSL_HEADER LOGZ_VS
 // the normal, so the meshes need no texture coordinates. Explicit gradients
 // keep the lookups valid inside branches.
 #define TRIMAP_GLSL \
+    "#if Q_TRI1\n" \
+    "vec4 triMap(sampler2D t, vec3 p, vec3 n, out vec3 bump){\n" \
+    "  vec3 a = abs(n); vec4 c;\n" \
+    "  if (a.x >= a.y && a.x >= a.z) { c = texture(t, p.yz); bump = vec3(0.0, c.rg * 2.0 - 1.0); }\n" \
+    "  else if (a.y >= a.z) { c = texture(t, p.xz); bump = vec3(c.r * 2.0 - 1.0, 0.0, c.g * 2.0 - 1.0); }\n" \
+    "  else { c = texture(t, p.xy); bump = vec3(c.rg * 2.0 - 1.0, 0.0); }\n" \
+    "  return c;\n" \
+    "}\n" \
+    "#else\n" \
     "vec4 triMap(sampler2D t, vec3 p, vec3 n, out vec3 bump){\n" \
     "  vec3 w = abs(n); w = w * w; w = w * w * w; w /= (w.x + w.y + w.z);\n" \
     "  vec3 dx = dFdx(p), dy = dFdy(p); vec4 s = vec4(0.0); bump = vec3(0.0);\n" \
@@ -231,7 +253,8 @@ static const char *lm_vs = GLSL_HEADER LOGZ_VS
     "  if (w.y > 0.004) { vec4 c = textureGrad(t, p.xz, dx.xz, dy.xz); s += c * w.y; bump += vec3(c.r * 2.0 - 1.0, 0.0, c.g * 2.0 - 1.0) * w.y; }\n" \
     "  if (w.z > 0.004) { vec4 c = textureGrad(t, p.xy, dx.xy, dy.xy); s += c * w.z; bump += vec3(c.rg * 2.0 - 1.0, 0.0) * w.z; }\n" \
     "  return s;\n" \
-    "}\n"
+    "}\n" \
+    "#endif\n"
 
 static const char *lm_fs = GLSL_HEADER LOGZ_FS
     "in vec3 fragPos; in vec3 fragNormal; in vec4 fragColor; in vec3 objPos; in vec3 objNormal;\n"
@@ -249,8 +272,13 @@ static const char *lm_fs = GLSL_HEADER LOGZ_FS
     "  vec3 c = sp.xyz / sp.w * 0.5 + 0.5;\n"
     "  if (c.x < 0.0 || c.x > 1.0 || c.y < 0.0 || c.y > 1.0) return 1.0;\n"
     "  float s = 0.0; vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0));\n"
+    "#if Q_PCF == 9\n"
     "  for (int x=-1;x<=1;x++) for(int y=-1;y<=1;y++){ float d = texture(shadowMap, c.xy + vec2(x,y)*texel).r; s += (c.z - 0.0015 > d) ? 0.0 : 1.0; }\n"
     "  return s / 9.0;\n"
+    "#else\n"
+    "  for (int k=0;k<4;k++){ vec2 o = vec2(k & 1, k >> 1) * 2.0 - 1.0; float d = texture(shadowMap, c.xy + o*texel*0.75).r; s += (c.z - 0.0015 > d) ? 0.0 : 1.0; }\n"
+    "  return s / 4.0;\n"
+    "#endif\n"
     "}\n"
     "vec3 envLight(vec3 dir, float rough){\n"
     "  // Black sky above, sunlit grey regolith below, bright toward the sun-lit ground.\n"
@@ -376,15 +404,20 @@ static const char *sky_fs = GLSL_HEADER NOISE_GLSL
     "  if (a.x > a.y && a.x > a.z) { st = dir.yz / a.x; face = dir.x > 0.0 ? 0.0 : 1.0; }\n"
     "  else if (a.y > a.z) { st = dir.xz / a.y; face = dir.y > 0.0 ? 2.0 : 3.0; }\n"
     "  else { st = dir.xy / a.z; face = dir.z > 0.0 ? 4.0 : 5.0; }\n"
-    "  vec2 g = st * 420.0; vec2 cell = floor(g); vec2 f = fract(g);\n"
+    "  // Each star is drawn at least about a pixel wide (its light spread, not\n"
+    "  // added): a point smaller than a pixel would blink on and off as the view\n"
+    "  // moves - badly so in a headset, where the head never keeps still.\n"
+    "  vec2 g = st * Q_STARGRID; vec2 cell = floor(g); vec2 f = fract(g);\n"
     "  float h = hash12(cell + face * 1000.0);\n"
     "  if (h > 0.985) {\n"
-    "    vec2 c = vec2(hash12(cell + 7.0 + face), hash12(cell + 13.0 + face)) * 0.6 + 0.2;\n"
+    "    vec2 c = vec2(hash12(cell + 7.0 + face), hash12(cell + 13.0 + face)) * 0.44 + 0.28;\n"
     "    float d = length(f - c);\n"
     "    float mag = pow(hash12(cell * 1.7 + face), 18.0) * 6.0 + 0.05;\n"
     "    float tint = hash12(cell + 99.0);\n"
     "    vec3 sc = mix(vec3(1.0,0.82,0.65), vec3(0.7,0.82,1.0), tint);\n"
-    "    col += sc * mag * exp(-d * d * 90.0) * starGain;\n"
+    "    float px = min(max(fwidth(g.x), fwidth(g.y)), 0.25);\n"          // cells per pixel
+    "    float sig0 = 0.0745 * Q_STARGRID / 420.0, sig = max(sig0, 0.6 * px);\n"
+    "    col += sc * mag * sqrt(sig0 / sig) * Q_STARBOOST * exp(-d * d / (2.0 * sig * sig)) * starGain;\n"
     "  }\n"
     "  // Sun: disc + corona glare.\n"
     "  float cs = dot(dir, sunDir);\n"
@@ -561,7 +594,7 @@ static void bind_output(void)
 static float bloom_gain = 0.035f;
 
 // Shadow map.
-#define SHADOW_SIZE 2048
+#define SHADOW_SIZE (render_quality()->shadow)
 static unsigned int shadow_fbo, shadow_tex;
 static Matrix shadow_vp;
 static V3 shadow_center;
@@ -579,8 +612,78 @@ int render_direct(void) { return direct_out; }
 void render_set_direct_target(unsigned int fbo, int x, int y) { direct_fbo = fbo; direct_x = x; direct_y = y; }
 void render_set_shadow_center(V3 c);
 
+// Quality tier. "high" is the PC look; "low" is cut down for the Quest (fewer
+// crater octaves, two soil lookups, one surface-map lookup per pixel, 4-tap
+// shadows, shorter noise, depth from the vertex shader so the tiler can throw
+// hidden pixels away early, less terrain detail, a smaller shadow map).
+// AGC_QUALITY=low|high picks a tier; AGC_Q_* override single settings (tests).
+static RenderQuality quality;
+static int quality_ready;
+
+static int env_int(const char *name, int def)
+{
+    const char *e = getenv(name);
+    return e && *e ? atoi(e) : def;
+}
+
+static float env_float(const char *name, float def)
+{
+    const char *e = getenv(name);
+    return e && *e ? (float)atof(e) : def;
+}
+
+const RenderQuality *render_quality(void)
+{
+    if (quality_ready) return &quality;
+#ifdef AGC_VR
+    int low = 1;
+#else
+    int low = 0;
+#endif
+    const char *e = getenv("AGC_QUALITY");
+    if (e && *e) low = e[0] == 'l' || e[0] == 'L';
+    RenderQuality q = { 0 };
+    q.low = low;
+    q.oct0 = 0;
+    q.oct1 = 6;
+    q.soil = low ? 2 : 3;
+    q.tri1 = low;
+    q.pcf = low ? 4 : 9;
+    q.fbm = low ? 2 : 5;
+    q.vz = 0;
+    q.lod = low ? 0.75f : 1.0f;
+    q.shadow = low ? 1024 : 2048;
+    q.star_grid = low ? 160.0f : 420.0f;
+    q.star_boost = low ? 2.2f : 1.0f;
+    q.oct0 = env_int("AGC_Q_OCT0", q.oct0);
+    q.oct1 = env_int("AGC_Q_OCT1", q.oct1);
+    q.soil = env_int("AGC_Q_SOIL", q.soil);
+    q.tri1 = env_int("AGC_Q_TRI1", q.tri1);
+    q.pcf = env_int("AGC_Q_PCF", q.pcf);
+    q.fbm = env_int("AGC_Q_FBM", q.fbm);
+    q.vz = env_int("AGC_Q_VZ", q.vz);
+    q.lod = env_float("AGC_Q_LOD", q.lod);
+    q.shadow = env_int("AGC_Q_SHADOW", q.shadow);
+    q.star_grid = env_float("AGC_Q_STARGRID", q.star_grid);
+    q.star_boost = env_float("AGC_Q_STARBOOST", q.star_boost);
+    if (q.oct0 < 0) q.oct0 = 0;
+    if (q.oct1 > 6) q.oct1 = 6;
+    if (q.pcf != 9) q.pcf = 4;
+    quality = q;
+    quality_ready = 1;
+    TraceLog(LOG_INFO, "render: quality %s (craters %d-%d, soil %d, trimap %s, pcf %d, fbm %d, vertex depth %d, lod %.2f, shadow %d)",
+             low ? "low" : "high", q.oct0, q.oct1, q.soil, q.tri1 ? "1" : "3", q.pcf, q.fbm, q.vz, q.lod, q.shadow);
+    return &quality;
+}
+
 Shader render_load_shader(const char *vs, const char *fs)
 {
+    const RenderQuality *q = render_quality();
+    char defs[512];
+    snprintf(defs, sizeof defs,
+             "#define Q_LOW %d\n#define Q_OCT0 %d\n#define Q_OCT1 %d\n#define Q_SOIL %d\n#define Q_TRI1 %d\n#define Q_PCF %d\n"
+             "#define Q_FBM %d\n#define Q_VZ %d\n#define Q_STARGRID %.1f\n#define Q_STARBOOST %.3f\n",
+             q->low, q->oct0, q->oct1, q->soil, q->tri1, q->pcf, q->fbm, q->vz, q->star_grid, q->star_boost);
 #ifdef AGC_GLES
     static const char *ver = "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n";
 #else
@@ -597,10 +700,29 @@ Shader render_load_shader(const char *vs, const char *fs)
         "  return vec4(c, a);\n"
         "#endif\n"
         "}\n";
-    size_t nv = strlen(vs) + 512, nf = strlen(fs) + strlen(out_fn) + 512;
+    // Depth from the vertex shader (Q_VZ): the log-depth value the fragment
+    // shaders would write, set on gl_Position instead.
+    const char *logz = "fragLogZ = 1.0 + gl_Position.w;";
+    const char *logz_vz = "fragLogZ = 1.0 + gl_Position.w; gl_Position.z = (log2(max(1e-6, fragLogZ)) * logFar - 1.0) * gl_Position.w;";
+    char *vs2 = NULL;
+    if (q->vz && strstr(vs, logz)) {
+        size_t n = strlen(vs) + 4 * (strlen(logz_vz) - strlen(logz)) + 1;
+        vs2 = malloc(n);
+        vs2[0] = 0;
+        const char *p = vs, *m;
+        while ((m = strstr(p, logz))) {
+            strncat(vs2, p, (size_t)(m - p));
+            strcat(vs2, logz_vz);
+            p = m + strlen(logz);
+        }
+        strcat(vs2, p);
+        vs = vs2;
+    }
+    size_t nv = strlen(vs) + 1024, nf = strlen(fs) + strlen(out_fn) + 1024;
     char *v = malloc(nv), *f = malloc(nf);
-    snprintf(v, nv, "%s#define DIRECT_OUT %d\n%s", ver, direct_out, vs);
-    snprintf(f, nf, "%s#define DIRECT_OUT %d\n%s%s", ver, direct_out, out_fn, fs);
+    snprintf(v, nv, "%s#define DIRECT_OUT %d\n%s%s", ver, direct_out, defs, vs);
+    snprintf(f, nf, "%s#define DIRECT_OUT %d\n%s%s%s", ver, direct_out, defs, out_fn, fs);
+    free(vs2);
     Shader sh = LoadShaderFromMemory(v, f);
     const char *dump = getenv("AGC_SHADER_DUMP");   // debugging: write every shader out for an offline validator
     if (dump) {

@@ -46,7 +46,29 @@ static XrSystemId system_id;
 static XrSession session;
 static XrSpace local_space, view_space, aim_space[2];
 static int session_running, session_focused, want_quit;
-static int have_foveation, have_perf, have_thread;
+static int have_foveation, have_perf, have_thread, have_layer_settings;
+
+// The floating 2D display as its own compositor layer: the runtime samples it
+// straight onto the lenses, so text stays sharp whatever the eye resolution.
+typedef struct {
+    XrSwapchain sc;
+    int w, h, n;
+    GLuint fbo[MAX_IMAGES];
+    uint32_t index;
+    int acquired, submit;
+    XrPosef pose;
+    XrExtent2Df size;
+} UiLayer;
+static UiLayer ui;
+
+// GPU time per frame (GL_EXT_disjoint_timer_query), for the log.
+#define NQUERY 6
+static GLuint gpu_q[NQUERY];
+static int gpu_q_used[NQUERY], gpu_q_next, have_timer;
+static double gpu_ms_sum;
+static int gpu_ms_n;
+static float gpu_ms;
+static int fix_head;   // AGC_VR_FIXHEAD: look straight ahead whatever the headset does (benchmarks)
 
 static EGLDisplay egl_display;
 static EGLContext egl_context;
@@ -275,6 +297,24 @@ static int init_actions(void)
     sb.countSuggestedBindings = sizeof b / sizeof b[0];
     if (!ok(xrSuggestInteractionProfileBindings(instance, &sb), "xrSuggestInteractionProfileBindings")) return 0;
 
+    // Bare hands (no controllers): the runtime offers them as a simple
+    // controller - a pinch is "select", the pointing ray is "aim", and the
+    // left hand's palm-up pinch is the menu gesture.
+    XrActionSuggestedBinding hb[] = {
+        { act_trigger, path("/user/hand/left/input/select/click") },
+        { act_trigger, path("/user/hand/right/input/select/click") },
+        { act_aim, path("/user/hand/left/input/aim/pose") },
+        { act_aim, path("/user/hand/right/input/aim/pose") },
+        { act_menu, path("/user/hand/left/input/menu/click") },
+        { act_haptic, path("/user/hand/left/output/haptic") },
+        { act_haptic, path("/user/hand/right/output/haptic") },
+    };
+    XrInteractionProfileSuggestedBinding hsb = { XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING };
+    hsb.interactionProfile = path("/interaction_profiles/khr/simple_controller");
+    hsb.suggestedBindings = hb;
+    hsb.countSuggestedBindings = sizeof hb / sizeof hb[0];
+    if (XR_FAILED(xrSuggestInteractionProfileBindings(instance, &hsb))) LOGI("VR: no simple-controller (hands) bindings");
+
     XrSessionActionSetsAttachInfo ai = { XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO };
     ai.countActionSets = 1;
     ai.actionSets = &action_set;
@@ -378,6 +418,8 @@ int vr_init(void)
     if (have_perf) want[nwant++] = XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME;
     have_thread = has_ext(exts, next, XR_KHR_ANDROID_THREAD_SETTINGS_EXTENSION_NAME);
     if (have_thread) want[nwant++] = XR_KHR_ANDROID_THREAD_SETTINGS_EXTENSION_NAME;
+    have_layer_settings = has_ext(exts, next, XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME);
+    if (have_layer_settings) want[nwant++] = XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME;
     free(exts);
 
     XrInstanceCreateInfoAndroidKHR ai = { XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR };
@@ -469,6 +511,11 @@ int vr_init(void)
     if (res_scale > 1.2f) res_scale = 1.2f;
     if (!create_eyes()) return -1;
     if (!init_actions()) return -1;
+    fix_head = getenv("AGC_VR_FIXHEAD") != NULL;
+    if (has_gl_ext("GL_EXT_disjoint_timer_query")) {
+        glGenQueries(NQUERY, gpu_q);
+        have_timer = 1;
+    }
     for (int i = 0; i < 2; i++) { views[i].type = XR_TYPE_VIEW; views[i].pose.orientation.w = 1; }
     LOGI("VR: OpenXR ready (%s colour, GL %s)", srgb ? "sRGB" : "linear 8-bit", (const char *)glGetString(GL_VERSION));
     return 0;
@@ -571,8 +618,8 @@ static void frame_stats(double period)
     stat_load = (float)((1.0 / period) / (stat_fps > 1 ? stat_fps : 1));
     static int log_n;
     if ((log_n++ % 3) == 0)
-        LOGI("VR: %.1f fps (display %.0f Hz), %.0f%% of frames late, eyes %dx%d (%.0f%%)", stat_fps, 1.0 / period, missed * 100, eye[0].w, eye[0].h,
-             res_scale * 100);
+        LOGI("VR: %.1f fps (display %.0f Hz), %.0f%% of frames late, eyes %dx%d (%.0f%%), GPU %.1f ms", stat_fps, 1.0 / period, missed * 100,
+             eye[0].w, eye[0].h, res_scale * 100, gpu_ms);
     if (!getenv("AGC_VR_SCALE") && now > hold_until) {
         if (missed > 0.10f && res_scale > 0.55f) {
             // Too slow: one step down, and do not try this size again for a while.
@@ -592,6 +639,26 @@ static void frame_stats(double period)
     }
     stat_t0 = now;
     stat_frames = stat_missed = 0;
+    if (gpu_ms_n) { gpu_ms = (float)(gpu_ms_sum / gpu_ms_n); gpu_ms_sum = 0; gpu_ms_n = 0; }
+}
+
+#define GL_TIME_ELAPSED_EXT_ 0x88BF
+#define GL_GPU_DISJOINT_EXT_ 0x8FBB
+static void gpu_timer_collect(void)
+{
+    if (!have_timer) return;
+    for (int i = 0; i < NQUERY; i++) {
+        if (!gpu_q_used[i]) continue;
+        GLuint avail = 0;
+        glGetQueryObjectuiv(gpu_q[i], GL_QUERY_RESULT_AVAILABLE, &avail);
+        if (!avail) continue;
+        GLuint ns = 0;
+        glGetQueryObjectuiv(gpu_q[i], GL_QUERY_RESULT, &ns);
+        GLint disjoint = 0;
+        glGetIntegerv(GL_GPU_DISJOINT_EXT_, &disjoint);
+        if (!disjoint) { gpu_ms_sum += ns * 1e-6; gpu_ms_n++; }
+        gpu_q_used[i] = 0;
+    }
 }
 
 void vr_stats(float *load, float *scale, float *fps) { *load = stat_load; *scale = res_scale; *fps = stat_fps; }
@@ -633,6 +700,14 @@ int vr_begin_frame(float *dt, int *quit)
     int tracked = XR_SUCCEEDED(xrLocateViews(session, &vli, &vs, 2, &nv, located)) && nv == 2 &&
                   (vs.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) && (vs.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT);
     if (tracked) { views[0] = located[0]; views[1] = located[1]; }
+    if (fix_head) {
+        for (int i = 0; i < 2; i++) {
+            views[i].pose.orientation = (XrQuaternionf){ 0, 0, 0, 1 };
+            views[i].pose.position = (XrVector3f){ i ? 0.032f : -0.032f, 0, 0 };
+            if (views[i].fov.angleRight - views[i].fov.angleLeft < 0.1f)
+                views[i].fov = (XrFovf){ -0.9f, 0.9f, 0.9f, -0.9f };
+        }
+    }
 
     if (!frame_state.shouldRender || !can_draw) {
         // Nothing to show this frame (headset off the face, or no GL context).
@@ -679,7 +754,7 @@ int vr_begin_frame(float *dt, int *quit)
     XrSpaceLocation head = { XR_TYPE_SPACE_LOCATION };
     input.head_fwd = v3(0, 0, -1);
     input.head_up = v3(0, 1, 0);
-    if (XR_SUCCEEDED(xrLocateSpace(view_space, local_space, frame_state.predictedDisplayTime, &head)) &&
+    if (!fix_head && XR_SUCCEEDED(xrLocateSpace(view_space, local_space, frame_state.predictedDisplayTime, &head)) &&
         (head.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
         input.head_pos = v3(head.pose.position.x, head.pose.position.y, head.pose.position.z);
         input.head_fwd = qrot(head.pose.orientation, v3(0, 0, -1));
@@ -712,12 +787,24 @@ void vr_eye_begin(int i, VrEye *e)
     e->w = t->w;
     e->h = t->h;
     e->fbo = t->fbo[t->index];
+    if (i == 0 && have_timer) {
+        gpu_timer_collect();
+        if (!gpu_q_used[gpu_q_next]) {
+            glBeginQuery(GL_TIME_ELAPSED_EXT_, gpu_q[gpu_q_next]);
+            gpu_q_used[gpu_q_next] = 2;   // running
+        }
+    }
 }
 
 void vr_eye_end(int i)
 {
     EyeTarget *t = &eye[i];
     rlDrawRenderBatchActive();
+    if (i == 1 && have_timer && gpu_q_used[gpu_q_next] == 2) {
+        glEndQuery(GL_TIME_ELAPSED_EXT_);
+        gpu_q_used[gpu_q_next] = 1;
+        gpu_q_next = (gpu_q_next + 1) % NQUERY;
+    }
     // The depth buffer is not needed once the eye is drawn: tell the tiler not to store it.
     glBindFramebuffer(GL_FRAMEBUFFER, t->fbo[t->index]);
     const GLenum drop[] = { GL_DEPTH_ATTACHMENT };
@@ -728,6 +815,65 @@ void vr_eye_end(int i)
         xrReleaseSwapchainImage(t->sc, &ri);
         t->acquired = 0;
     }
+}
+
+static int create_ui(int w, int h)
+{
+    XrSwapchainCreateInfo ci = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
+    ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    ci.format = color_format;
+    ci.sampleCount = 1;
+    ci.width = (uint32_t)w;
+    ci.height = (uint32_t)h;
+    ci.faceCount = 1;
+    ci.arraySize = 1;
+    ci.mipCount = 1;
+    if (!ok(xrCreateSwapchain(session, &ci, &ui.sc), "xrCreateSwapchain (display)")) return 0;
+    uint32_t n = 0;
+    xrEnumerateSwapchainImages(ui.sc, 0, &n, NULL);
+    if (n > MAX_IMAGES) n = MAX_IMAGES;
+    XrSwapchainImageOpenGLESKHR img[MAX_IMAGES];
+    for (uint32_t i = 0; i < n; i++) { img[i].type = XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR; img[i].next = NULL; }
+    if (!ok(xrEnumerateSwapchainImages(ui.sc, n, &n, (XrSwapchainImageBaseHeader *)img), "display images")) return 0;
+    ui.n = (int)n;
+    for (uint32_t i = 0; i < n; i++) {
+        glGenFramebuffers(1, &ui.fbo[i]);
+        glBindFramebuffer(GL_FRAMEBUFFER, ui.fbo[i]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, img[i].image, 0);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) { glBindFramebuffer(GL_FRAMEBUFFER, 0); return 0; }
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    ui.w = w;
+    ui.h = h;
+    LOGI("VR: display layer %dx%d%s", w, h, have_layer_settings ? ", super-sampled" : "");
+    return 1;
+}
+
+unsigned int vr_ui_begin(int w, int h)
+{
+    static int failed;
+    if (failed || !frame_begun) return 0;
+    if (!ui.sc && !create_ui(w, h)) { failed = 1; LOGE("VR: no display layer, drawing it in the scene"); return 0; }
+    XrSwapchainImageAcquireInfo ai = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
+    XrSwapchainImageWaitInfo wi = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
+    wi.timeout = XR_INFINITE_DURATION;
+    ui.index = 0;
+    ui.acquired = XR_SUCCEEDED(xrAcquireSwapchainImage(ui.sc, &ai, &ui.index)) && XR_SUCCEEDED(xrWaitSwapchainImage(ui.sc, &wi));
+    if (!ui.acquired || ui.index >= (uint32_t)ui.n) return 0;
+    return ui.fbo[ui.index];
+}
+
+void vr_ui_end(V3 centre, double width, double height)
+{
+    if (!ui.acquired) return;
+    rlDrawRenderBatchActive();
+    XrSwapchainImageReleaseInfo ri = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+    xrReleaseSwapchainImage(ui.sc, &ri);
+    ui.acquired = 0;
+    ui.submit = 1;
+    ui.pose.orientation = (XrQuaternionf){ 0, 0, 0, 1 };
+    ui.pose.position = (XrVector3f){ (float)centre.x, (float)centre.y, (float)centre.z };
+    ui.size = (XrExtent2Df){ (float)width, (float)height };
 }
 
 void vr_end_frame(void)
@@ -748,16 +894,43 @@ void vr_end_frame(void)
     layer.space = local_space;
     layer.viewCount = 2;
     layer.views = pv;
-    const XrCompositionLayerBaseHeader *layers[] = { (const XrCompositionLayerBaseHeader *)&layer };
+    XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+    XrCompositionLayerSettingsFB qs = { XR_TYPE_COMPOSITION_LAYER_SETTINGS_FB };
+    const XrCompositionLayerBaseHeader *layers[2] = { (const XrCompositionLayerBaseHeader *)&layer, NULL };
+    uint32_t nlayers = 1;
+    if (ui.submit) {
+        ui.submit = 0;
+        quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+        quad.space = local_space;
+        quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+        quad.subImage.swapchain = ui.sc;
+        quad.subImage.imageRect.extent.width = ui.w;
+        quad.subImage.imageRect.extent.height = ui.h;
+        quad.pose = ui.pose;
+        quad.size = ui.size;
+        if (have_layer_settings) {
+            // Text: let the compositor super-sample and sharpen the panel.
+            qs.layerFlags = XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SUPER_SAMPLING_BIT_FB | XR_COMPOSITION_LAYER_SETTINGS_NORMAL_SHARPENING_BIT_FB;
+            quad.next = &qs;
+        }
+        layers[nlayers++] = (const XrCompositionLayerBaseHeader *)&quad;
+    }
     XrFrameEndInfo ei = { XR_TYPE_FRAME_END_INFO };
     ei.displayTime = frame_state.predictedDisplayTime;
     ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-    ei.layerCount = 1;
+    ei.layerCount = nlayers;
     ei.layers = layers;
     if (XR_FAILED(xrEndFrame(session, &ei))) LOGE("VR: xrEndFrame failed");
 }
 
 void vr_sim_save(const char *path) { (void)path; }
+
+// The app's own folder on the shared storage (reachable with adb push).
+const char *agc_android_external_dir(void)
+{
+    struct android_app *app = GetAndroidApp();
+    return app && app->activity ? app->activity->externalDataPath : NULL;
+}
 
 // Where settings can be written on the headset.
 const char *agc_android_data_dir(void)

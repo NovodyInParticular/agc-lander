@@ -157,4 +157,8 @@ void vr_sim_save(const char *path)
     UnloadImage(out);
 }
 
+// No compositor on the PC: the display is drawn into the scene.
+unsigned int vr_ui_begin(int w, int h) { (void)w; (void)h; return 0; }
+void vr_ui_end(V3 centre, double width, double height) { (void)centre; (void)width; (void)height; }
+
 #endif

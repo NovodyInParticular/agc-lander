@@ -15,6 +15,21 @@ typedef struct {
     double tan_l, tan_r, tan_d, tan_u;
 } ViewCam;
 
+// Quality tier (see render.c): high on the PC, low on the headset.
+typedef struct {
+    int low;
+    int oct0, oct1;        // per-pixel crater octaves drawn (0..6)
+    int soil;              // soil map lookups (2 or 3)
+    int tri1;              // surface maps: dominant axis only (1) or blended (0)
+    int pcf;               // shadow taps (4 or 9)
+    int fbm;               // noise octaves for albedo mottling
+    int vz;                // depth from the vertex shader (no gl_FragDepth)
+    float lod;             // terrain detail scale
+    int shadow;            // shadow map size
+    float star_grid, star_boost;
+} RenderQuality;
+const RenderQuality *render_quality(void);
+
 void render_init(void);
 void render_shutdown(void);
 

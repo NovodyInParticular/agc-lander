@@ -53,6 +53,14 @@ void vr_haptic(int hand, float strength, float seconds);
 // too slow) and the resolution scale in use; for the on-screen statistics.
 void vr_stats(float *load, float *scale, float *fps);
 
+// The floating 2D display as a compositor layer (sharp text). vr_ui_begin:
+// between vr_begin_frame and vr_end_frame; returns the framebuffer (w x h,
+// same colour encoding as the eyes) to draw it into, or 0 when there is no
+// such layer (draw it into the scene instead). vr_ui_end: its centre and size
+// in tracking space (metres), facing the user.
+unsigned int vr_ui_begin(int w, int h);
+void vr_ui_end(V3 centre, double width, double height);
+
 // PC stand-in only: save both eyes side by side as a picture.
 void vr_sim_save(const char *path);
 

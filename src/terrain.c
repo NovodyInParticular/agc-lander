@@ -17,6 +17,7 @@
 
 #include "moon.h"
 #include "terrain.h"
+#include "render.h"
 
 // ---------------------------------------------------------------------------
 // Frames.
@@ -733,7 +734,7 @@ void terrain_update(V3 camera_site, double fov_y, int screen_h)
     cam_h = v3_len(p) - R0;
     // Split when the chunk is closer than k * size; k from screen resolution.
     double pix_per_rad = screen_h / fov_y;
-    lod_k = 2.2 * pix_per_rad / 900.0 + 0.8;
+    lod_k = (2.2 * pix_per_rad / 900.0 + 0.8) * render_quality()->lod;
     {
         double moved = v3_len(v3_sub(camera_site, last_cam));
         last_cam = camera_site;

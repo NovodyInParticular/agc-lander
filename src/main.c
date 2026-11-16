@@ -914,6 +914,39 @@ static ViewCam vr_eye_cam(const ViewCam *b, const VrEye *e)
 }
 
 // Controller buttons as the keys the game already understands.
+// Pointing at the floating display (a hand or a controller): where the ray
+// meets it, in display pixels (top-left origin); -1 when it misses.
+static float ui_ptr_x = -1, ui_ptr_y = -1;
+static void vr_ui_pointer(void)
+{
+    const VrInput *in = vr_input();
+    ui_ptr_x = ui_ptr_y = -1;
+    for (int h = 1; h >= 0; h--) {
+        if (!in->aim_ok[h] || in->aim_dir[h].z > -0.05) continue;
+        V3 o = in->aim_pos[h], d = in->aim_dir[h];
+        double t = (-UI_DIST - o.z) / d.z;
+        if (t <= 0) continue;
+        V3 p = v3_add(o, v3_scale(d, t));
+        double hw = UI_WIDTH / 2, hh = UI_WIDTH * UI_H / UI_W / 2;
+        double u = (p.x + hw) / (2 * hw), v = (-UI_DROP + hh - p.y) / (2 * hh);
+        if (u < 0 || u > 1 || v < 0 || v > 1) continue;
+        ui_ptr_x = (float)(u * UI_W);
+        ui_ptr_y = (float)(v * UI_H);
+        return;
+    }
+}
+
+// The menu line under the pointer (same layout as the menu drawing), or -1.
+static int vr_menu_row(void)
+{
+    if (ui_ptr_y < 0 || ui_ptr_x < 60 || ui_ptr_x > 1300) return -1;
+    for (int r = 0; r < N_ROWS; r++) {
+        float y = 250 + r * 56 + (r >= ROW_HOST ? (r == ROW_HINTS ? 32 : 16) : 0);
+        if (ui_ptr_y >= y - 10 && ui_ptr_y < y + 40) return r;
+    }
+    return -1;
+}
+
 static void vr_map_keys(int menu, int results_showing)
 {
     const VrInput *in = vr_input();
@@ -924,7 +957,7 @@ static void vr_map_keys(int menu, int results_showing)
         in_set_key(KEY_DOWN, in->ly < -0.6f || in->ry < -0.6f);
         in_set_key(KEY_LEFT, in->lx < -0.6f || in->rx < -0.6f);
         in_set_key(KEY_RIGHT, in->lx > 0.6f || in->rx > 0.6f);
-        in_set_key(KEY_ENTER, in->a || in->rtrig > 0.6f);
+        in_set_key(KEY_ENTER, in->a || in->rtrig > 0.6f || in->ltrig > 0.6f);   // a pinch, with bare hands
         hold_a = hold_b = 1;
         return;
     }
@@ -948,7 +981,8 @@ static void vr_map_keys(int menu, int results_showing)
         if (turn && turn != turn_was) eva_turn(turn * 30 * DEG);   // snap turns: easier on the stomach than a smooth one
         turn_was = turn;
     } else if (results_showing) {
-        in_set_key(KEY_ENTER, in->b && !hold_b);
+        // B, or a pinch while pointing at the panel (bare hands have no B).
+        in_set_key(KEY_ENTER, (in->b && !hold_b) || (ui_ptr_x >= 0 && (in->rtrig > 0.6f || in->ltrig > 0.6f)));
     } else {
         in_set_key(VKEY_PRO, in->b && !hold_b);
     }
@@ -1023,8 +1057,45 @@ static void vr_draw_overlays(const ViewCam *base, const ViewCam *eye, int w, int
 }
 #endif
 
+#ifdef __ANDROID__
+// The headset has no command line. A text file in the app's own storage,
+// /sdcard/Android/data/org.agclander.quest/files/agc-args.txt (pushed with
+// adb), supplies one: "--start 3" style options and NAME=VALUE settings, one
+// or more per line (benchmarks and tests without the controllers).
+const char *agc_android_external_dir(void);
+static char *android_argv[64];
+static int android_args(char **argv0)
+{
+    int n = 0;
+    android_argv[n++] = argv0[0];
+    const char *dir = agc_android_external_dir();
+    if (!dir) return n;
+    char path[600];
+    snprintf(path, sizeof path, "%s/agc-args.txt", dir);
+    FILE *f = fopen(path, "r");
+    if (!f) return n;
+    char tok[256];
+    while (n < 63 && fscanf(f, "%255s", tok) == 1) {
+        char *eq = strchr(tok, '=');
+        if (eq && tok[0] != '-') {
+            *eq = 0;
+            setenv(tok, eq + 1, 1);
+        } else {
+            android_argv[n++] = strdup(tok);
+        }
+    }
+    fclose(f);
+    TraceLog(LOG_INFO, "options from %s: %d arguments", path, n - 1);
+    return n;
+}
+#endif
+
 int main(int argc, char **argv)
 {
+#ifdef __ANDROID__
+    argc = android_args(argv);
+    argv = android_argv;
+#endif
     Options opt;
     parse_args(argc, argv, &opt);
     if (opt.audit && opt.start < 0) opt.start = 3;
@@ -1170,6 +1241,7 @@ int main(int argc, char **argv)
         if (dt > 0.1f) dt = 0.1f;
         wall += dt;
         int w = UI_W, h = UI_H;
+        vr_ui_pointer();
         vr_map_keys(gs == GS_MENU, (gs == GS_FLY && lm.land_result != LAND_NONE && !lm.dps_on && !results_hidden &&
                                     eva_phase() == EVA_INSIDE && !ascent_active()) || ascent_results_due());
 #else
@@ -1199,6 +1271,12 @@ int main(int argc, char **argv)
             float wh = GetMouseWheelMove();
             if (wh != 0) orbit_dist = fmax(8, fmin(4000, orbit_dist * pow(0.88, wh)));
         } else if (gs == GS_MENU) {
+#ifdef AGC_VR
+            {   // Pointing at a line chooses it (controller or bare hand).
+                int r = vr_menu_row();
+                if (r >= 0) menu_sel = r;
+            }
+#endif
             if (IsKeyPressed(KEY_DOWN)) menu_sel = (menu_sel + 1) % N_ROWS;
             if (IsKeyPressed(KEY_UP)) menu_sel = (menu_sel + N_ROWS - 1) % N_ROWS;
             int enter = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || retry_req;
@@ -1693,13 +1771,17 @@ int main(int argc, char **argv)
                              : menu_sel == ROW_HINTS ? "Enter toggles. A box at the top of the screen tells you what to do next in plain words: which key, which way to lean, when to cut the engine. H toggles it in flight."
                              : menu_sel == ROW_HOST ? "Enter toggles. With HOST on, start any scenario above: a second player can join you as LM Pilot (UDP port 47012). You fly; they run the DSKY and the panels."
                                                     : "Type the Commander's IP address (or name) and press Enter. You get the LMP station: DSKY, panels, switches. Same version of the game on both sides.";
-            hud_text(font_ui, desc, 100, 250 + N_ROWS * 56 + 40, 21, (Color){ 160, 168, 178, 255 });
 #ifdef AGC_VR
-            hud_text(font_ui, "Thumbstick up/down to choose, A or the right trigger to start.", 100, h - 132, 22, (Color){ 130, 136, 146, 255 });
-            hud_text(font_ui, "In flight:  right stick = hand controller   left stick = yaw, and up/down = ROD switch   A = ENGINE STOP   B = PRO",
-                     100, h - 100, 19, (Color){ 130, 136, 146, 255 });
-            hud_text(font_ui, "point the right hand at a switch and pull the trigger   X = hatch   Y = camera   left stick click = hide this display   Menu button = back here",
-                     100, h - 72, 19, (Color){ 130, 136, 146, 255 });
+            hud_text(font_ui, desc, 100, 250 + N_ROWS * 56 + 34, 25, (Color){ 175, 182, 192, 255 });   // a headset needs bigger type
+#else
+            hud_text(font_ui, desc, 100, 250 + N_ROWS * 56 + 40, 21, (Color){ 160, 168, 178, 255 });
+#endif
+#ifdef AGC_VR
+            hud_text(font_ui, "Point at a line (or thumbstick up/down) and pull the trigger - or pinch, with bare hands - to start.", 100, h - 150, 25, (Color){ 165, 172, 182, 255 });
+            hud_text(font_ui, "In flight:  right stick = hand controller   left stick = yaw, up/down = ROD switch   A = ENGINE STOP   B = PRO",
+                     100, h - 112, 23, (Color){ 150, 156, 166, 255 });
+            hud_text(font_ui, "Point at a switch and pull the trigger (or pinch)   X = hatch   Y = camera   Menu button = back here",
+                     100, h - 80, 23, (Color){ 150, 156, 166, 255 });
 #else
             hud_text(font_ui, "Up/Down to choose, Enter to start.  In flight: F1 for help.", 100, h - 70, 22,
                      (Color){ 130, 136, 146, 255 });
@@ -1783,12 +1865,59 @@ int main(int argc, char **argv)
             snprintf(b, sizeof b, "%.0f fps   load %.0f%%   resolution %.0f%%", fps, load * 100, scale * 100);
             hud_text(font_mono, b, 18, h - 26, 14, (Color){ 120, 128, 138, 200 });
         }
+        if (ui_ptr_x >= 0) {   // where the hand / controller points on the display
+            DrawCircleV((Vector2){ ui_ptr_x, ui_ptr_y }, 9, (Color){ 120, 255, 170, 230 });
+            DrawCircleLinesV((Vector2){ ui_ptr_x, ui_ptr_y }, 13, (Color){ 20, 40, 30, 200 });
+        }
         rlDrawRenderBatchActive();
         rlSetBlendMode(RL_BLEND_ALPHA);
         EndTextureMode();
         {
             int wcam = gs == GS_MENU ? CAM_CHASE : vcam;
             int show_ui = gs != GS_FLY || show_hud || show_help;
+            if (show_ui) {
+                // The display as its own compositor layer, when the headset offers one:
+                // sharp text, independent of the eye resolution.
+                unsigned int fb = vr_ui_begin(UI_W, UI_H);
+                if (fb) {
+                    rlDrawRenderBatchActive();
+                    rlEnableFramebuffer(fb);
+                    rlViewport(0, 0, UI_W, UI_H);
+                    rlClearColor(0, 0, 0, 0);
+                    rlClearScreenBuffers();
+                    rlMatrixMode(RL_PROJECTION);
+                    rlPushMatrix();
+                    rlLoadIdentity();
+                    rlOrtho(0, 1, 0, 1, -1, 1);
+                    rlMatrixMode(RL_MODELVIEW);
+                    rlPushMatrix();
+                    rlLoadIdentity();
+                    rlDisableColorBlend();
+                    rlDisableDepthTest();
+                    rlDisableBackfaceCulling();
+                    BeginShaderMode(ui_sh);
+                    rlSetTexture(ui_rt.texture.id);
+                    rlBegin(RL_QUADS);
+                    rlColor4ub(255, 255, 255, 255);
+                    rlTexCoord2f(0, 0); rlVertex2f(0, 0);
+                    rlTexCoord2f(1, 0); rlVertex2f(1, 0);
+                    rlTexCoord2f(1, 1); rlVertex2f(1, 1);
+                    rlTexCoord2f(0, 1); rlVertex2f(0, 1);
+                    rlEnd();
+                    rlDrawRenderBatchActive();
+                    rlSetTexture(0);
+                    EndShaderMode();
+                    rlEnableColorBlend();
+                    rlEnableBackfaceCulling();
+                    rlMatrixMode(RL_PROJECTION);
+                    rlPopMatrix();
+                    rlMatrixMode(RL_MODELVIEW);
+                    rlPopMatrix();
+                    rlDisableFramebuffer();
+                    vr_ui_end(v3(0, -UI_DROP, -UI_DIST), UI_WIDTH, UI_WIDTH * UI_H / UI_W);
+                    show_ui = 0;   // not drawn into the eyes as well
+                }
+            }
             VrEye eyes[2];
             ViewCam ecam[2];
             for (int i = 0; i < 2; i++) { vr_eye_begin(i, &eyes[i]); ecam[i] = vr_eye_cam(&cam, &eyes[i]); }

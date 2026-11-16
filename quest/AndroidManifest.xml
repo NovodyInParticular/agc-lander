@@ -10,6 +10,9 @@
 
     <uses-feature android:glEsVersion="0x00030001" android:required="true" />
     <uses-feature android:name="android.hardware.vr.headtracking" android:version="1" android:required="true" />
+    <!-- Bare hands work too (pinch to select), when the controllers are put away. -->
+    <uses-feature android:name="oculus.software.handtracking" android:required="false" />
+    <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
 
     <!-- OpenXR loader: find and talk to the headset's runtime. -->
     <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
