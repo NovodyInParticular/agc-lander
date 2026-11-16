@@ -9,6 +9,7 @@
 #include "agc_host.h"
 #include "lm.h"
 #include "coop.h"
+#include "csm.h"
 #include "moon.h"
 
 agc_t *agc_host_state(void);
@@ -37,6 +38,11 @@ Lm lm;
 #define RCS_THRUST 445.0
 #define RCS_ISP 290.0
 
+// Ascent engine: fixed, pressure fed, 3500 lbf.
+#define APS_THRUST 15570.0
+#define APS_ISP 311.0
+#define APS_LAG 0.25
+
 // Geometry (body NB axes, metres, relative to the centre of mass).
 #define QUAD_R 1.19        // quad offset along each of Y and Z
 #define QUAD_X 1.60        // quads above the CG
@@ -44,6 +50,11 @@ Lm lm;
 #define PAD_X (-2.75)      // footpad plane below the CG
 #define PAD_R 4.40         // footpad distance from the X axis
 #define PROBE_LEN 1.73     // 67.2 inch contact probes
+#define STAGE_X 0.40       // ascent / descent interface plane (lmmodel.c xb)
+// Ascent stage centre of mass in model axes: just below the RCS quads, a
+// little forward of the thrust line (the crew cabin), so the RCS works through
+// the burn.
+static const V3 ASC_CG = { 1.35, 0.0, 0.04 };
 
 // LR beam geometry (Luminary CONTROLLED_CONSTANTS, LUM69 padload).
 #define LR_ALPHA (6.0 * PI_D / 180.0)
@@ -89,10 +100,19 @@ static int att_mode_cur = 2;   // PGNS mode control switch: 0 off, 1 att hold, 2
 // ---------------------------------------------------------------------------
 // Helpers.
 
-double lm_mass(void) { return lm.m_ascent + lm.m_desc_dry + lm.m_dps + lm.m_rcs; }
+double lm_mass(void)
+{
+    double m = lm.m_ascent + lm.m_aps + lm.m_rcs;
+    return lm.staged ? m : m + lm.m_desc_dry + lm.m_dps;
+}
 
 static V3 inertia(void)
 {
+    if (lm.staged) {
+        // Ascent stage alone, scaled from its lift-off mass.
+        double s = lm_mass() / 4950.0;
+        return v3(6400.0 * s, 4400.0 * s, 5000.0 * s);
+    }
     // Principal moments scaled from LM data-book values at PDI mass.
     double s = lm_mass() / 15100.0;
     return v3(25000.0 * s, 34000.0 * s, 33000.0 * s);
@@ -196,9 +216,11 @@ static void on_output(int ch, int value)
     case 005: lm.ch5 = (unsigned)value & 0377; break;
     case 006: lm.ch6 = (unsigned)value & 0377; break;
     case 011:
-        if (value & 020000) lm.dps_on = 0;                          // ENGINE OFF
-        else if ((value & 010000) && lm.engine_armed && !engine_stop_latched)
-            lm.dps_on = 1;                                           // ENGINE ON
+        if (value & 020000) { lm.dps_on = 0; lm.aps_on = 0; }       // ENGINE OFF
+        else if ((value & 010000) && !engine_stop_latched) {        // ENGINE ON: the armed engine
+            if (lm.engine_armed == ARM_DES && !lm.staged) lm.dps_on = 1;
+            else if (lm.engine_armed == ARM_ASC) lm.aps_on = 1;
+        }
         break;
     case 0174: case 0175: case 0176: {
         int n = value & 037777;
@@ -284,7 +306,8 @@ void lm_reset(void)
     rod_pending = 0;
     rod_hold = 0;
     // Apollo 11 LM near PDI (kg).
-    lm.m_ascent = 4850.0;
+    lm.m_ascent = 2300.0;
+    lm.m_aps = 2376.0;
     lm.m_desc_dry = 2180.0;
     lm.m_dps = 8073.0;
     lm.m_rcs = 287.0;
@@ -343,7 +366,60 @@ void lm_set_engine_arm(int armed)
 
     lm.engine_armed = armed;
     agc_host_set_input_bits(030, 04, armed ? 0 : 04);  // bit 3, active low
-    if (!armed) lm.dps_on = 0;
+    if (armed != ARM_DES) lm.dps_on = 0;
+    if (armed != ARM_ASC) lm.aps_on = 0;
+}
+
+// The separation pyros: explosive nuts and bolts, the umbilical guillotine.
+// On the ground the ascent stage then just sits on the descent stage until the
+// ascent engine lifts it; in flight the stages drift apart.
+void lm_abort_stage(void)
+{
+    if (coop_role == COOP_CLIENT) { coop_forward(CMD_STAGE, 0, 0); return; }
+    if (lm.abort_stage) return;
+    lm.abort_stage = 1;
+    agc_host_set_input_bits(030, 010, 0);   // bit 4 ABORT STAGE, active low (latching button)
+    if (lm.staged || lm.land_result == LAND_CRASH) return;
+
+    // The descent stage keeps the model pose it has now.
+    lm.ds_r = lm.r;
+    lm.ds_v = lm.v;
+    lm.ds_q = lm.q;
+    lm.ds_landed = lm.touchdown;
+    if (lm.ds_landed) {
+        double t = lm.t + lm.tephem;
+        lm.ds_fixed = moon_inertial_to_fixed(lm.r, t);
+        lm.ds_fixed_rot = m3_mul(moon_matrix(t), q4_to_m3(lm.q));
+    }
+    lm.dps_on = 0;
+    lm.staged = 1;
+    lm.cg = ASC_CG;
+}
+
+void lm_descent_stage_pose(V3 *fixed, M3 *fixed_from_body)
+{
+    double t = lm.t + lm.tephem;
+    if (lm.ds_landed) {
+        *fixed = lm.ds_fixed;
+        *fixed_from_body = lm.ds_fixed_rot;
+    } else {
+        *fixed = moon_inertial_to_fixed(lm.ds_r, t);
+        *fixed_from_body = m3_mul(moon_matrix(t), q4_to_m3(lm.ds_q));
+    }
+}
+
+void lm_engine_stop_reset(void)
+{
+    if (coop_role == COOP_CLIENT) { coop_forward(CMD_STOP, 1, 0); return; }
+    engine_stop_latched = 0;
+}
+
+void lm_set_landed(void)
+{
+    lm.touchdown = 1;
+    lm.land_result = LAND_GOOD;
+    lm.touchdown_t = lm.t;
+    pad_hit = 0xf;
 }
 
 double lm_tilt(void)
@@ -358,6 +434,7 @@ void lm_engine_stop(void)
 
     engine_stop_latched = 1;
     lm.dps_on = 0;
+    lm.aps_on = 0;
 }
 
 void lm_rod_click(int direction)
@@ -495,22 +572,52 @@ static void update_radar(double dt)
     lm.lr_vel_good = range > 0 && lm.altitude < LR_VEL_MAX_ALT && lm.lr_move <= 0;
 }
 
+// Descent stage left behind after an abort in flight: it falls and stays where it lands.
+static void descent_stage_step(double dt)
+{
+    if (!lm.staged || lm.ds_landed) return;
+    double rr = v3_len(lm.ds_r);
+    lm.ds_v = v3_add(lm.ds_v, v3_scale(lm.ds_r, -MOON_MU / (rr * rr * rr) * dt));
+    lm.ds_r = v3_add(lm.ds_r, v3_scale(lm.ds_v, dt));
+    if (rr - surface_radius_at(lm.ds_r) < -PAD_X) {
+        double t = lm.t + lm.tephem;
+        V3 up = v3_norm(lm.ds_r);
+        lm.ds_r = v3_scale(up, surface_radius_at(lm.ds_r) - PAD_X);
+        lm.ds_landed = 1;
+        lm.ds_fixed = moon_inertial_to_fixed(lm.ds_r, t);
+        lm.ds_fixed_rot = m3_mul(moon_matrix(t), q4_to_m3(lm.ds_q));
+    }
+}
+
 static void rigid_body(double dt)
 {
     double m = lm_mass();
     V3 F_b = v3(0, 0, 0), T_b = v3(0, 0, 0);
+    const V3 cg = lm.cg;   // torques act about the centre of mass
 
-    // DPS.
+    // Main engine: the DPS (throttled, gimballed) or the APS (fixed, full thrust).
     agc_t *s = agc_host_state();
-    if (!lm.dps_on || lm.m_dps <= 0) {
-        lm.thrust += (0 - lm.thrust) * fmin(1.0, dt / 0.08);
-        if (!lm.dps_on) lm.flame_time = 0;
-    } else {
+    int aps = lm.aps_on && lm.m_aps > 0;
+    int dps = lm.dps_on && lm.m_dps > 0 && !lm.staged;
+    if (aps) {
+        lm.thrust_aps = 1;
+        lm.thrust += (APS_THRUST - lm.thrust) * fmin(1.0, dt / APS_LAG);
+        lm.flame_time += dt;
+    } else if (dps) {
+        lm.thrust_aps = 0;
         double cmd = fmin(DPS_FMAX, fmax(DPS_MIN_THRUST, lm.thr_bits * DPS_N_PER_BIT));
         lm.thrust += (cmd - lm.thrust) * fmin(1.0, dt / DPS_LAG);
         lm.flame_time += dt;
+    } else {
+        lm.thrust += (0 - lm.thrust) * fmin(1.0, dt / 0.08);
+        if (!lm.dps_on && !lm.aps_on) lm.flame_time = 0;
     }
-    if (lm.thrust > 1.0) {
+    if (lm.thrust > 1.0 && lm.thrust_aps) {
+        V3 f = v3(lm.thrust, 0, 0);
+        F_b = v3_add(F_b, f);
+        T_b = v3_add(T_b, v3_cross(v3_sub(v3(STAGE_X, 0, 0), cg), f));
+        lm.m_aps = fmax(0, lm.m_aps - lm.thrust / (APS_ISP * G0) * dt);
+    } else if (lm.thrust > 1.0) {
         // Trim gimbal driven by ch12 bits 9-12 (pitch +/-, roll +/-).
         int c12 = s->InputChannel[012];
         double pitch_rate = (c12 & 0400) ? GIMBAL_RATE : (c12 & 01000) ? -GIMBAL_RATE : 0;
@@ -523,8 +630,8 @@ static void rigid_body(double dt)
         V3 dir = v3_norm(v3(1, -lm.gimbal[1], lm.gimbal[0]));
         V3 f = v3_scale(dir, lm.thrust);
         F_b = v3_add(F_b, f);
-        T_b = v3_add(T_b, v3_cross(v3(ENGINE_X, 0, 0), f));
-        lm.m_dps = fmax(0, lm.m_dps - lm.thrust / (DPS_ISP * G0) * dt);
+        T_b = v3_add(T_b, v3_cross(v3_sub(v3(ENGINE_X, 0, 0), cg), f));
+        if (!lm.staged) lm.m_dps = fmax(0, lm.m_dps - lm.thrust / (DPS_ISP * G0) * dt);
     }
 
     // RCS.
@@ -536,7 +643,7 @@ static void rigid_body(double dt)
         if (!on) continue;
         V3 f = v3_scale(jets[j].dir, RCS_THRUST);
         F_b = v3_add(F_b, f);
-        T_b = v3_add(T_b, v3_cross(quad_pos[jets[j].quad], f));
+        T_b = v3_add(T_b, v3_cross(v3_sub(quad_pos[jets[j].quad], cg), f));
         lm.m_rcs = fmax(0, lm.m_rcs - RCS_THRUST / (RCS_ISP * G0) * dt);
     }
 
@@ -545,7 +652,7 @@ static void rigid_body(double dt)
     V3 w_moon = moon_omega(lm.t + lm.tephem);
     lm.probe_contact = 0;
     int pads_down = 0;
-    for (int k = 0; k < 4; k++) {
+    for (int k = 0; k < 4 && !lm.staged; k++) {
         double ang = k * PI_D / 2;
         V3 pad_b = v3(PAD_X + lm.collapse[k], PAD_R * sin(ang), PAD_R * cos(ang));
         V3 pad_i = v3_add(lm.r, lm_body_to_inertial(pad_b));
@@ -569,9 +676,36 @@ static void rigid_body(double dt)
         V3 vt = v3_sub(vpad, v3_scale(up, vn));
         V3 f = v3_add(v3_scale(up, fn), v3_scale(vt, -fmin(fn * 0.8, 8.0e4) / fmax(0.05, v3_len(vt)) * fmin(1.0, v3_len(vt) / 0.05)));
         F_i_contact = v3_add(F_i_contact, f);
-        T_b = v3_add(T_b, v3_cross(pad_b, lm_inertial_to_body(f)));
+        T_b = v3_add(T_b, v3_cross(v3_sub(pad_b, cg), lm_inertial_to_body(f)));
     }
-    if (pads_down && !lm.touchdown) {
+    if (lm.staged && lm.ds_landed && !lm.liftoff) {
+        // The ascent stage sits on the descent stage's top deck until it lifts off.
+        double t = lm.t + lm.tephem;
+        M3 i_from_ds = m3_mul(m3_transpose(moon_matrix(t)), lm.ds_fixed_rot);
+        V3 ds_pos = moon_fixed_to_inertial(lm.ds_fixed, t);
+        V3 deck_n = m3_apply(i_from_ds, v3(1, 0, 0));
+        int touching = 0;
+        for (int k = 0; k < 4; k++) {
+            V3 pt_b = v3(STAGE_X, (k & 1) ? 1.1 : -1.1, (k & 2) ? 0.9 : -1.2);
+            V3 pt_i = v3_add(lm.r, lm_body_to_inertial(pt_b));
+            V3 deck_pt = v3_add(ds_pos, m3_apply(i_from_ds, v3(STAGE_X, 0, 0)));
+            double h = v3_dot(v3_sub(pt_i, deck_pt), deck_n);
+            if (h >= 0) continue;
+            touching = 1;
+            V3 vpt = v3_add(lm.v, lm_body_to_inertial(v3_cross(lm.w, pt_b)));
+            vpt = v3_sub(vpt, v3_cross(w_moon, pt_i));
+            double vn = v3_dot(vpt, deck_n);
+            double fn = fmax(0, -h * 2.0e6 - vn * 1.2e5);
+            V3 vt = v3_sub(vpt, v3_scale(deck_n, vn));
+            V3 f = v3_add(v3_scale(deck_n, fn), v3_scale(vt, -fmin(fn, 4.0e4) / fmax(0.02, v3_len(vt)) * fmin(1.0, v3_len(vt) / 0.02)));
+            F_i_contact = v3_add(F_i_contact, f);
+            T_b = v3_add(T_b, v3_cross(v3_sub(pt_b, cg), lm_inertial_to_body(f)));
+        }
+        if (touching) pads_down = 4;   // held: damp the rates as the legs do
+        V3 rel = v3_sub(v3_add(lm.r, lm_body_to_inertial(v3(STAGE_X, 0, 0))), v3_add(ds_pos, m3_apply(i_from_ds, v3(STAGE_X, 0, 0))));
+        if (v3_dot(rel, deck_n) > 1.0) { lm.liftoff = 1; lm.liftoff_t = lm.t; }
+    }
+    if (pads_down && !lm.touchdown && !lm.staged) {
         lm.touchdown = 1;
         lm.touchdown_speed = lm.hdot;
         lm.touchdown_hspeed = lm.hspeed;
@@ -594,7 +728,7 @@ static void rigid_body(double dt)
         }
     }
     // Tipping over after touchdown wrecks it too.
-    if (lm.touchdown && lm.land_result != LAND_CRASH && lm_tilt() > LAND_TOPPLE_TILT) {
+    if (lm.touchdown && !lm.staged && lm.land_result != LAND_CRASH && lm_tilt() > LAND_TOPPLE_TILT) {
         lm.land_result = LAND_CRASH;
         lm.crash_cause = CRASH_TOPPLED;
         lm.crash_t = lm.t;
@@ -604,13 +738,18 @@ static void rigid_body(double dt)
         lm_set_attitude_mode(0);
     }
 
-    // Translational: gravity + forces, semi-implicit Euler.
-    V3 F_i = v3_add(lm_body_to_inertial(F_b), F_i_contact);
+    // Translational: gravity + forces, semi-implicit Euler, on the centre of
+    // mass (lm.r / lm.v are the model origin's: the same point until staging).
+    M3 i_from_b = q4_to_m3(lm.q);
+    V3 cg_i = m3_apply(i_from_b, cg);
+    V3 r_cg = v3_add(lm.r, cg_i);
+    V3 v_cg = v3_add(lm.v, m3_apply(i_from_b, v3_cross(lm.w, cg)));
+    V3 F_i = v3_add(m3_apply(i_from_b, F_b), F_i_contact);
     lm.accel_ng = v3_scale(F_i, 1.0 / m);
-    double rr = v3_len(lm.r);
-    V3 g = v3_scale(lm.r, -MOON_MU / (rr * rr * rr));
-    lm.v = v3_add(lm.v, v3_scale(v3_add(g, lm.accel_ng), dt));
-    lm.r = v3_add(lm.r, v3_scale(lm.v, dt));
+    double rr = v3_len(r_cg);
+    V3 g = v3_scale(r_cg, -MOON_MU / (rr * rr * rr));
+    v_cg = v3_add(v_cg, v3_scale(v3_add(g, lm.accel_ng), dt));
+    r_cg = v3_add(r_cg, v3_scale(v_cg, dt));
 
     // Rotational: Euler's equations, principal axes.
     V3 I = inertia();
@@ -620,11 +759,17 @@ static void rigid_body(double dt)
     if (pads_down >= 3) wd = v3_sub(wd, v3_scale(lm.w, 8.0));  // landing-gear damping
     lm.w = v3_add(lm.w, v3_scale(wd, dt));
     lm.q = q4_normalize(q4_mul(lm.q, q4_from_rotvec(v3_scale(lm.w, dt))));
+
+    i_from_b = q4_to_m3(lm.q);
+    lm.r = v3_sub(r_cg, m3_apply(i_from_b, cg));
+    lm.v = v3_sub(v_cg, m3_apply(i_from_b, v3_cross(lm.w, cg)));
+    descent_stage_step(dt);
 }
 
 void lm_step(double dt)
 {
     rigid_body(dt);
+    csm_step(dt, lm.r);
     lm.t += dt;
 
     V3 up = v3_norm(lm.r);

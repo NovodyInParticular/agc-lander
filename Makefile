@@ -16,8 +16,8 @@ FONTS_C := build/font_jbm.c build/font_rc.c build/font_rcb.c
 TEX_NAMES := lm_panel lm_foil lm_blanket rock cabin cabin_wall regolith
 
 AGC_CORE := $(VAGC)/yaAGC/agc_engine.c $(VAGC)/yaAGC/agc_engine_init.c $(VAGC)/yaAGC/agc_utilities.c
-HOST     := src/agc_host.c src/agc_mem.c src/moon.c src/lm.c src/coop.c src/net.c $(ROPE_C) $(SYMS_C)
-GAME     := src/main.c src/dsky.c src/scenario.c src/crew.c src/hints.c src/terrain.c src/render.c src/lmmodel.c src/hud.c src/cockpit.c src/cockpit_panels.c src/pcanvas.c src/sky_extras.c src/controls.c src/rocks.c src/assets.c src/sound.c src/eva.c data/a11_pdi_lgc.c $(FONTS_C)
+HOST     := src/agc_host.c src/agc_mem.c src/moon.c src/lm.c src/csm.c src/coop.c src/net.c $(ROPE_C) $(SYMS_C)
+GAME     := src/main.c src/dsky.c src/scenario.c src/crew.c src/hints.c src/terrain.c src/render.c src/lmmodel.c src/hud.c src/cockpit.c src/cockpit_panels.c src/pcanvas.c src/sky_extras.c src/controls.c src/rocks.c src/assets.c src/sound.c src/eva.c src/ascent.c src/ascent_ui.c src/csmmodel.c data/a11_pdi_lgc.c data/a11_liftoff_lgc.c $(FONTS_C)
 
 # Vendor core: build quietly, it predates modern warning sets.
 CORE_FLAGS := -O2 -w -I$(VAGC)/yaAGC
@@ -100,8 +100,8 @@ build/linux/core.a: $(AGC_CORE)
 
 linux: build/linux/agc-lander build/linux/agc-selftest build/linux/agc-lab
 
-build/linux/agc-lab: src/lab.c src/scenario.c src/crew.c data/a11_pdi_lgc.c $(HOST) src/*.h build/linux/core.a
-	$(LINUX_CC) $(APP_FLAGS) -o $@ src/lab.c src/scenario.c src/crew.c data/a11_pdi_lgc.c $(HOST) build/linux/core.a -lm
+build/linux/agc-lab: src/lab.c src/scenario.c src/crew.c src/ascent.c data/a11_pdi_lgc.c data/a11_liftoff_lgc.c $(HOST) src/*.h build/linux/core.a
+	$(LINUX_CC) $(APP_FLAGS) -o $@ src/lab.c src/scenario.c src/crew.c src/ascent.c data/a11_pdi_lgc.c data/a11_liftoff_lgc.c $(HOST) build/linux/core.a -lm
 
 build/linux/agc-lander: $(GAME) $(HOST) src/*.h build/linux/core.a build/raylib-linux/libraylib.a $(LINUX_TEX)
 	$(LINUX_CC) $(APP_FLAGS) -o $@ $(GAME) $(HOST) $(LINUX_TEX) build/linux/core.a build/raylib-linux/libraylib.a -lm -lpthread -ldl
@@ -112,6 +112,8 @@ build/linux/agc-selftest: src/selftest.c $(HOST) src/agc_host.h build/linux/core
 test: build/linux/agc-selftest build/linux/agc-lab
 	./build/linux/agc-selftest
 	./tools/test_landing.sh build/linux/agc-lab
+	./tools/test_ascent.sh build/linux/agc-lab
+	./tools/test_docking.sh build/linux/agc-lab
 
 # ---- Windows (single static .exe).
 build/win/core.a: $(AGC_CORE)

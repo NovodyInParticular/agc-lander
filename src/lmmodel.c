@@ -40,6 +40,16 @@ static const Mat MT_DPSIN = { 40, 34, 30, M_METAL };
 typedef struct { float *v, *n; unsigned char *c; int count, cap; } Builder;
 static Builder B;
 
+// The two stages are separate meshes: the descent stage stays on the Moon.
+static Builder stage_b[2];
+static int cur_stage = -1;
+static void use_stage(int st)
+{
+    if (cur_stage >= 0) stage_b[cur_stage] = B;
+    B = stage_b[st];
+    cur_stage = st;
+}
+
 static void push_vert(Vector3 p, Vector3 n, Mat m)
 {
     if (B.count == B.cap) {
@@ -401,6 +411,7 @@ static void build_details(void)
                         { s - c, s }, { -s + c, s }, { -s, s - c }, { -s, -s + c } };
     Vector3 X = V(1, 0, 0);
 
+    use_stage(0);
     // Foil blanket seams (tape lines) on every descent-stage face.
     for (int i = 0; i < 8; i++) {
         int j = (i + 1) % 8;
@@ -480,6 +491,7 @@ static void build_details(void)
     }
 
     // Ascent stage: EVA handrails beside the hatch and on the top deck.
+    use_stage(1);
     const float xb = H0 + 3.15f;
     for (int side = -1; side <= 1; side += 2) {
         Vector3 a = V(xb + 0.98f, side * 0.62f, 1.11f), b = V(xb + 1.62f, side * 0.62f, 1.11f);
@@ -553,25 +565,37 @@ static void build_flag(void)
 
 // --- Public ---------------------------------------------------------------------
 
-static Mesh lm_mesh, flag_mesh;
+static Mesh lm_mesh, desc_mesh, asc_mesh, flag_mesh;
 static Material lm_mat, depth_mat, fx_mat;
+
+static Mesh upload(const Builder *b)
+{
+    Mesh m = { 0 };
+    m.vertexCount = b->count;
+    m.triangleCount = b->count / 3;
+    m.vertices = b->v;
+    m.normals = b->n;
+    m.colors = b->c;
+    UploadMesh(&m, false);
+    return m;
+}
 
 void lmmodel_init(void)
 {
-    B.count = 0;
+    use_stage(0);
     build_descent_stage();
+    use_stage(1);
     build_ascent_stage();
     build_details();
+    use_stage(0);   // store the ascent builder back
+    desc_mesh = upload(&stage_b[0]);
+    asc_mesh = upload(&stage_b[1]);
     Mesh m = { 0 };
-    m.vertexCount = B.count;
-    m.triangleCount = B.count / 3;
-    m.vertices = B.v;
-    m.normals = B.n;
-    m.colors = B.c;
-    UploadMesh(&m, false);
+    m.triangleCount = desc_mesh.triangleCount + asc_mesh.triangleCount;
     lm_mesh = m;
-    // The flag: its own small mesh (the LM mesh keeps the arrays built so far).
+    // The flag: its own small mesh (the stage meshes keep their arrays).
     memset(&B, 0, sizeof B);
+    cur_stage = -1;
     build_flag();
     Mesh f = { 0 };
     f.vertexCount = B.count;
@@ -605,7 +629,19 @@ static Matrix to_matrix(M3 r, V3 t)
 
 void lmmodel_draw(M3 site_from_body, V3 pos_cam_rel)
 {
-    DrawMesh(lm_mesh, lm_mat, to_matrix(site_from_body, pos_cam_rel));
+    Matrix m = to_matrix(site_from_body, pos_cam_rel);
+    DrawMesh(desc_mesh, lm_mat, m);
+    DrawMesh(asc_mesh, lm_mat, m);
+}
+
+void lmmodel_draw_stage(int ascent, M3 site_from_body, V3 pos_cam_rel)
+{
+    DrawMesh(ascent ? asc_mesh : desc_mesh, lm_mat, to_matrix(site_from_body, pos_cam_rel));
+}
+
+void lmmodel_draw_stage_depth(int ascent, M3 site_from_body, V3 pos_cam_rel)
+{
+    DrawMesh(ascent ? asc_mesh : desc_mesh, depth_mat, to_matrix(site_from_body, pos_cam_rel));
 }
 
 void lmmodel_draw_flag(M3 site_from_flag, V3 base_cam_rel)
@@ -615,7 +651,9 @@ void lmmodel_draw_flag(M3 site_from_flag, V3 base_cam_rel)
 
 void lmmodel_draw_depth(M3 site_from_body, V3 pos_cam_rel)
 {
-    DrawMesh(lm_mesh, depth_mat, to_matrix(site_from_body, pos_cam_rel));
+    Matrix m = to_matrix(site_from_body, pos_cam_rel);
+    DrawMesh(desc_mesh, depth_mat, m);
+    DrawMesh(asc_mesh, depth_mat, m);
 }
 
 // --- Effects -------------------------------------------------------------------------
@@ -796,8 +834,24 @@ void lmmodel_draw_effects(M3 R, V3 T, const LmFx *fx)
     rlDisableDepthMask();
     rlDisableBackfaceCulling();
 
+    // APS plume: a small engine and nearly invisible exhaust in vacuum - a
+    // pale throat glow under the ascent stage and a faint, narrow cone.
+    if (fx->thrust > 100 && fx->aps) {
+        float k = fx->thrust / 15570.0f;
+        set_kind(0);
+        rlBegin(RL_QUADS);
+        puff(W(R, T, v3(0.55, 0, 0)), 0.55f, (Color){ 255, 200, 150, (unsigned char)(60 * k) });
+        puff(W(R, T, v3(0.32, 0, 0)), 0.75f, (Color){ 255, 170, 110, (unsigned char)(45 * k) });
+        rlEnd();
+        rlDrawRenderBatchActive();
+        set_kind(1);
+        rlBegin(RL_QUADS);
+        beam(W(R, T, v3(0.36, 0, 0)), W(R, T, v3(0.36 - 9.0, 0, 0)), 0.40f, 2.4f, (Color){ 255, 190, 140, (unsigned char)(16 * k) });
+        rlEnd();
+        rlDrawRenderBatchActive();
+    }
     // DPS plume: hot throat glow plus a faint, flickering exhaust cone.
-    if (fx->thrust > 100) {
+    if (fx->thrust > 100 && !fx->aps) {
         float k = fx->thrust / 43455.0f;
         set_kind(0);
         rlBegin(RL_QUADS);
@@ -871,6 +925,42 @@ void lmmodel_draw_effects(M3 R, V3 T, const LmFx *fx)
         }
         rlEnd();
         rlDrawRenderBatchActive();
+    }
+
+    // Lift-off: the ascent engine's blast tears the gold foil off the descent
+    // stage's top deck; flakes glitter outward and fall slowly.
+    if (fx->burst_age >= 0 && fx->burst_age < 14) {
+        EndBlendMode();
+        BeginBlendMode(BLEND_ALPHA);
+        set_kind(4);
+        rlBegin(RL_QUADS);
+        Vector3 c = { (float)fx->burst_point.x, (float)fx->burst_point.y, (float)fx->burst_point.z };
+        Vector3 n = Vector3Normalize((Vector3){ (float)fx->burst_up.x, (float)fx->burst_up.y, (float)fx->burst_up.z });
+        Vector3 t1 = Vector3Normalize(Vector3CrossProduct(n, fabsf(n.z) < 0.9f ? V(0, 0, 1) : V(1, 0, 0)));
+        Vector3 t2 = Vector3CrossProduct(n, t1);
+        float age = fx->burst_age;
+        for (int i = 0; i < 220; i++) {
+            // Each flake: fixed random launch (hash of i), lunar gravity, no air.
+            unsigned hsh = (unsigned)i * 2654435761u;
+            float r1 = (hsh & 1023) / 1023.0f, r2 = ((hsh >> 10) & 1023) / 1023.0f, r3 = ((hsh >> 20) & 1023) / 1023.0f;
+            float th = r1 * 2 * PI, sp = 3.0f + 22.0f * r2 * r2, el = 0.15f + 1.1f * r3;
+            float start = r3 * 1.2f;   // flakes keep tearing off for the first second
+            float t = age - start;
+            if (t < 0) continue;
+            float vu = sinf(el) * sp, vh = cosf(el) * sp;
+            float up = vu * t - 0.81f * t * t;
+            if (up < -2.6f) continue;   // fell back below the deck to the ground
+            Vector3 p = Vector3Add(c, Vector3Add(Vector3Scale(Vector3Add(Vector3Scale(t1, cosf(th)), Vector3Scale(t2, sinf(th))), vh * t),
+                                                 Vector3Scale(n, up)));
+            float f = 0.5f + 0.5f * sinf(age * (7.0f + i % 9) + i);   // tumbling glints
+            unsigned char g = (unsigned char)(120 + 120 * f);
+            puff(p, 0.04f + 0.10f * r1 * r2, (Color){ (unsigned char)(200 * (0.6f + 0.4f * f)), (unsigned char)(g * 0.68f), 50,
+                                                     (unsigned char)(255 * fminf(1.0f, (14 - age) / 3)) });
+        }
+        rlEnd();
+        rlDrawRenderBatchActive();
+        EndBlendMode();
+        BeginBlendMode(BLEND_ADD_COLORS);
     }
 
     // Crash: fireball (additive) then debris (alpha).

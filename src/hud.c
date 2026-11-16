@@ -7,6 +7,7 @@
 #include "rlgl.h"
 
 #include "agc_host.h"
+#include "ascent.h"
 #include "crew.h"
 #include "hud.h"
 #include "lm.h"
@@ -244,6 +245,7 @@ static const char *phase_name(void)
     if (p0 == '6' && p1 == '6') return "P66  RATE OF DESCENT";
     if (p0 == '6' && p1 == '8') return "P68  LANDING CONFIRMATION";
     if (p0 == '0' && p1 == '0') return "P00  LGC IDLE";
+    if (p0 == '1' && p1 == '2') return lm.aps_on ? "P12  POWERED ASCENT" : lm.liftoff ? "P12  ASCENT (engine off)" : "P12  LIFT-OFF COUNTDOWN";
     return "";
 }
 
@@ -280,18 +282,20 @@ void hud_draw(int w, int h, int dsky_w, float warp, const char *camera_name, int
 
     // Engine / propellant panel.
     Rectangle ep = { x, y0, 190 * scale, ph };
-    panel(ep, "DPS / RCS");
+    int asc = lm.staged || lm.engine_armed == ARM_ASC || ascent_active();
+    panel(ep, asc ? "APS / RCS" : "DPS / RCS");
     float bw = 30 * scale, bh = ph - 90 * scale, by = y0 + 50 * scale;
     char v[32];
-    snprintf(v, sizeof v, "%3.0f%%", lm.thrust / 46978.0 * 100);
-    bar(ep.x + 18 * scale, by, bw, bh, (float)(lm.thrust / 46978.0), AMB, "THR", v);
-    double prop = lm.m_dps / 8248.0;
+    double fmax_n = lm.thrust_aps ? 15570.0 : 46978.0;
+    snprintf(v, sizeof v, "%3.0f%%", lm.thrust / fmax_n * 100);
+    bar(ep.x + 18 * scale, by, bw, bh, (float)(lm.thrust / fmax_n), AMB, "THR", v);
+    double prop = asc ? lm.m_aps / 2376.0 : lm.m_dps / 8248.0;
     snprintf(v, sizeof v, "%3.0f%%", prop * 100);
     bar(ep.x + 18 * scale + bw + 22 * scale, by, bw, bh, (float)prop, prop < 0.06 ? RED_ : ACC, "PROP", v);
     double rcs = lm.m_rcs / 287.0;
     snprintf(v, sizeof v, "%3.0f%%", rcs * 100);
     bar(ep.x + 18 * scale + 2 * (bw + 22 * scale), by, bw, bh, (float)rcs, (Color){ 120, 180, 255, 255 }, "RCS", v);
-    if (prop < 0.06 && lm.dps_on && ((int)(GetTime() * 2) & 1))
+    if (prop < 0.06 && (lm.dps_on || lm.aps_on) && ((int)(GetTime() * 2) & 1))
         hud_text_centered(font_bold, "LOW LEVEL", ep.x + ep.width / 2, y0 + 24 * scale, 16 * scale, RED_);
 
 status:
@@ -310,7 +314,7 @@ status:
     hud_text(font_mono, line, tx, ty + 62 * scale, 15 * scale, DIM);
     snprintf(line, sizeof line, "LR %s%s  ANT POS %d %s   CREW %s%s", lm.lr_range_good ? "ALT " : "--- ",
              lm.lr_vel_good ? "VEL" : "---", lm.lr_pos, lm.lr_move > 0 ? "(MOVING)" : "",
-             crew.auto_crew ? "AUTO" : "MANUAL", lm.engine_armed ? "   DES ENG ARMED" : "");
+             crew.auto_crew ? "AUTO" : "MANUAL", lm.engine_armed == ARM_DES ? "   DES ENG ARMED" : lm.engine_armed == ARM_ASC ? "   ASC ENG ARMED" : "");
     hud_text(font_mono, line, tx, ty + 82 * scale, 15 * scale, DIM);
     if (lm.probe_contact)
         hud_text(font_bold, "LUNAR CONTACT", tx, ty + 104 * scale, 26 * scale, (Color){ 120, 190, 255, 255 });

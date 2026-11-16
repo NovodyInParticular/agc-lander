@@ -10,11 +10,13 @@ typedef struct {
     char callout[160];        // most recent callout
     double callout_time;      // sim time of the callout
     int landed;
+    int in_orbit;             // the ascent engine has cut off in orbit
     int hint;                 // HINT_*: plain-English version of the prompt
 } Crew;
 
 enum { HINT_NONE, HINT_FINE_ALIGN, HINT_MANEUVER, HINT_MANEUVER_DONE, HINT_ENABLE_IGN,
-       HINT_ARM, HINT_V57, HINT_ALARM };
+       HINT_ARM, HINT_V57, HINT_ALARM,
+       HINT_ASC_COUNTDOWN, HINT_ASC_STAGE, HINT_ASC_ARM, HINT_ASC_PRO };
 
 extern Crew crew;
 
@@ -23,7 +25,7 @@ void crew_reset(void);
 // Call every ~0.1 s of simulated time (after lm_run).
 void crew_step(void);
 
-// Type keys into the DSKY: V N E R C K + - P(press) p(release) 0-9.
+// Type keys into the DSKY: V N E R C K + - P(press) p(release) 0-9, space = wait 1 s.
 void crew_type(const char *keys);
 
 void crew_say(const char *text);

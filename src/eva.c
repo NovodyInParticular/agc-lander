@@ -9,6 +9,7 @@
 #include "raylib.h"
 
 #include "input.h"
+#include "ascent.h"
 #include "crew.h"
 #include "eva.h"
 #include "hud.h"
@@ -60,7 +61,8 @@ int eva_phase(void) { return phase; }
 
 int eva_available(void)
 {
-    return lm.touchdown && !lm.dps_on && lm.land_result != LAND_CRASH && lm.land_result != LAND_NONE;
+    return lm.touchdown && !lm.dps_on && lm.land_result != LAND_CRASH && lm.land_result != LAND_NONE && !lm.staged &&
+           !ascent_active();
 }
 
 int eva_outside(void) { return phase == EVA_EGRESS || phase == EVA_SURFACE || phase == EVA_INGRESS; }

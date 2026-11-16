@@ -5,6 +5,8 @@
 #include "agc_host.h"
 #include "crew.h"
 #include "lm.h"
+#include "moon.h"
+#include "scenario.h"
 
 Crew crew;
 
@@ -16,6 +18,7 @@ static int pro_held;
 static double last_step_t;
 static int v50n18_count, v57_done, stopped, armed_said, ign_said, lr_said, p64_said, p65_said, p66_said,
            flat_said, thr_said, low_said, prev_dps, prog_alarm_said, contact_said;
+static int asc_count_said, asc_lift_said, asc_pitch_said, asc_quiet_said, asc_cut_said, prev_aps;
 
 void crew_reset(void)
 {
@@ -29,6 +32,21 @@ void crew_reset(void)
     last_step_t = 0;
     v50n18_count = v57_done = stopped = armed_said = ign_said = lr_said = p64_said = p65_said = p66_said = 0;
     flat_said = thr_said = low_said = prev_dps = prog_alarm_said = contact_said = 0;
+    asc_count_said = asc_lift_said = asc_pitch_said = asc_quiet_said = asc_cut_said = prev_aps = 0;
+}
+
+// Orbit from the vehicle state: perilune and apolune heights above the
+// landing site's radius, nautical miles (as the crew called them).
+static void orbit_nmi(double *peri, double *apo)
+{
+    double rr = v3_len(lm.r), vv = v3_len(lm.v);
+    double en = vv * vv / 2 - MOON_MU / rr;
+    double a = -MOON_MU / (2 * en);
+    V3 h = v3_cross(lm.r, lm.v);
+    double e = sqrt(fmax(0, 1 + 2 * en * v3_dot(h, h) / (MOON_MU * MOON_MU)));
+    double r0 = scenario_info.site_radius > 1.7e6 ? scenario_info.site_radius : 1738000.0;
+    *peri = (a * (1 - e) - r0) / 1852.0;
+    *apo = (a * (1 + e) - r0) / 1852.0;
 }
 
 void crew_say(const char *text)
@@ -41,6 +59,11 @@ void crew_type(const char *keys)
 {
     size_t n = strlen(keys);
     if (keylen - keypos + (int)n >= (int)sizeof keybuf) return;
+    if (keypos > 0 && keypos < keylen) {   // make room: drop what has been typed
+        memmove(keybuf, keybuf + keypos, keylen - keypos);
+        keylen -= keypos;
+        keypos = 0;
+    }
     if (keypos == keylen) keypos = keylen = 0;
     memcpy(keybuf + keylen, keys, n);
     keylen += (int)n;
@@ -63,6 +86,7 @@ static void key_pump(double dt)
     case '-': agc_host_key(KEY_AGC_MINUS); break;
     case 'P': agc_host_pro(1); pro_held = 1; key_wait = 0.4; break;
     case 'p': agc_host_pro(0); pro_held = 0; break;
+    case ' ': key_wait = 1.0; break;   // give the display time to come up
     case '0': agc_host_key(KEY_AGC_0); break;
     default: if (c >= '1' && c <= '9') agc_host_key(c - '0');
     }
@@ -107,6 +131,14 @@ void crew_step(void)
         crew.hint = HINT_ARM, snprintf(crew.prompt, sizeof crew.prompt, "Arm the descent engine (F7) before TIG");
     else if (prog(63) && lm.lr_range_good && !v57_done && lm.dps_on)
         crew.hint = HINT_V57, snprintf(crew.prompt, sizeof crew.prompt, "Landing radar has lock: key V57E to permit LR updates");
+    else if (flashing && prog(12) && vn(99, 74) && !lm.abort_stage)
+        crew.hint = HINT_ASC_STAGE, snprintf(crew.prompt, sizeof crew.prompt, "V99 N74: lift-off. ABORT STAGE first (separates the stages)");
+    else if (flashing && prog(12) && vn(99, 74) && lm.engine_armed != ARM_ASC)
+        crew.hint = HINT_ASC_ARM, snprintf(crew.prompt, sizeof crew.prompt, "V99 N74: ENG ARM to ASC (the ascent engine)");
+    else if (flashing && prog(12) && vn(99, 74))
+        crew.hint = HINT_ASC_PRO, snprintf(crew.prompt, sizeof crew.prompt, "V99 N74: ENGINE ON ENABLE. Press PRO to light the ascent engine");
+    else if (prog(12) && vn(6, 74) && !lm.aps_on)
+        crew.hint = HINT_ASC_COUNTDOWN, snprintf(crew.prompt, sizeof crew.prompt, "P12 V06 N74: lift-off countdown (R1 min:sec to go). At V99: ABORT STAGE, ENG ARM ASC, PRO");
     else if (d->prog_lamp)
         crew.hint = HINT_ALARM, snprintf(crew.prompt, sizeof crew.prompt, "PROGRAM ALARM: key V05N09E to see codes, RSET to clear");
 
@@ -127,6 +159,25 @@ void crew_step(void)
         contact_said = 1;
     }
 
+    // ---- Ascent callouts ----------------------------------------------------------------
+    if (prog(12) && vn(99, 74) && !asc_count_said) { crew_say("\"...5, 4, 3, 2, 1. Abort Stage, Engine Arm Ascent, Proceed.\""); asc_count_said = 1; }
+    if (lm.liftoff && !asc_lift_said && lm.t - lm.liftoff_t > 1.5) { crew_say("\"Beautiful. 26, 36 feet per second up.\""); asc_lift_said = 1; }
+    if (asc_lift_said && !asc_pitch_said && lm_tilt() > 0.35) { crew_say("\"Be advised of the pitchover.\""); asc_pitch_said = 1; }
+    if (asc_pitch_said && !asc_quiet_said && lm.t - lm.liftoff_t > 60) {
+        crew_say("\"Very smooth... very quiet ride. Just a little slow wallowing back and forth.\"");
+        asc_quiet_said = 1;
+    }
+    if (prev_aps && !lm.aps_on && lm.liftoff && !asc_cut_said && lm.altitude > 5000) {
+        double pe, ap;
+        orbit_nmi(&pe, &ap);
+        char m[160];
+        snprintf(m, sizeof m, "\"Shutdown.\"  Orbit %.1f by %.1f nautical miles (Eagle had 9.4 by 46.7)", pe, ap);
+        crew_say(m);
+        asc_cut_said = 1;
+        crew.in_orbit = 1;
+    }
+    prev_aps = lm.aps_on;
+
     if (lm.land_result == LAND_CRASH && !crew.landed) {
         crew.landed = 1;
         static const char *why[] = { "", "came down too fast, the legs folded",
@@ -137,7 +188,7 @@ void crew_step(void)
         return;
     }
     if (!crew.auto_crew) {
-        if (lm.touchdown && !crew.landed && !lm.dps_on) {
+        if (lm.touchdown && !crew.landed && !lm.dps_on && !lm.staged) {
             crew.landed = 1;
             crew_say("\"Houston, Tranquility Base here. The Eagle has landed.\"");
         }
@@ -161,6 +212,12 @@ void crew_step(void)
         }
     } else if (flashing && vn(99, 62)) {
         crew_type("Pp");
+    } else if (flashing && prog(12) && vn(99, 74)) {
+        // Aldrin's call: "Abort Stage, Engine Arm Ascent, Proceed."
+        lm_abort_stage();
+        lm_set_engine_arm(ARM_ASC);
+        lm_set_attitude_mode(2);
+        crew_type("Pp");
     } else {
         acted = 0;
     }
@@ -180,7 +237,8 @@ void crew_step(void)
         stopped = 1;
         crew_say("\"Contact light.\"  \"OK, engine stop.\"");
     }
-    if (lm.touchdown && !crew.landed && !lm.dps_on && lm.t - crew.callout_time > 3) {
+    if (prog(12) && vn(6, 74) && lm_get_attitude_mode() != 2) lm_set_attitude_mode(2);   // PGNS mode control AUTO for the ascent
+    if (lm.touchdown && !crew.landed && !lm.dps_on && !lm.staged && lm.t - crew.callout_time > 3) {
         crew.landed = 1;
         lm_set_attitude_mode(0);   // PGNS mode control OFF: stop the DAP fighting the ground
         crew_say("\"Houston, Tranquility Base here. The Eagle has landed.\"");

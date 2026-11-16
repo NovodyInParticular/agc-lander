@@ -10,6 +10,14 @@
 //   arm:0|1        DPS engine arm
 //   watch:SECS,EVERY  run and print a compact line every EVERY seconds
 //   pdi            set up the Apollo 11 pre-PDI scenario (scenario.c)
+//   liftoff        Apollo 11 on the surface, P12 one minute before lift-off
+//   stage          push ABORT STAGE
+//   orbit          print the orbit (perilune / apolune) and the CSM's range
+//   ascent:SECS    run, printing ascent lines every 10 s
+//   rndz           the rendezvous shortcut: Eagle 40 m from Columbia
+//   dock:METRES    lined-up start at that range (no offsets)
+//   dockpilot:SECS fly the docking with the hand controllers (THC pulses, RHC)
+//   rhc:p,y,r      hold the attitude controller (as before); thc:x,y,z hold the translation controller
 
 #include <math.h>
 #include <stdio.h>
@@ -22,6 +30,8 @@
 #include "moon.h"
 #include "scenario.h"
 #include "crew.h"
+#include "csm.h"
+#include "ascent.h"
 
 #define DEG (PI_D / 180.0)
 
@@ -82,15 +92,105 @@ static void show(void)
 
 // The game's automatic crew (crew.c); callouts are echoed to stdout.
 static int crew_on;
+static double dp_sign = -1, dr_sign = 1;   // docking pilot: pitch / roll response signs (dpsign:, drsign:)
 static double last_callout;
 
 static void crew_tick(void)
 {
+    ascent_step(0.1);
     if (!crew_on) return;
     crew_step();
     if (crew.callout_time != last_callout) {
         last_callout = crew.callout_time;
         printf("   [crew] %s (alt %.1f m)\n", crew.callout, lm.altitude);
+    }
+}
+
+static void orbit_report(void)
+{
+    V3 r = lm.r, v = lm.v;
+    double rr = v3_len(r), vv = v3_len(v);
+    double en = vv * vv / 2 - MOON_MU / rr;
+    double a = -MOON_MU / (2 * en);
+    V3 h = v3_cross(r, v);
+    double e = sqrt(fmax(0, 1 + 2 * en * v3_dot(h, h) / (MOON_MU * MOON_MU)));
+    double R0 = 1738000.0;
+    printf("ORBIT LM perilune %.1f km apolune %.1f km (above 1738 km)  |v| %.1f m/s  staged %d liftoff %d  APS left %.0f kg  RCS %.0f kg\n",
+           (a * (1 - e) - R0) / 1000, (a * (1 + e) - R0) / 1000, vv, lm.staged, lm.liftoff, lm.m_aps, lm.m_rcs);
+    if (csm.valid) {
+        double rc = v3_len(csm.r);
+        double phase = atan2(v3_dot(v3_cross(r, csm.r), v3_norm(h)), v3_dot(r, csm.r)) / DEG;
+        V3 n_c = v3_norm(v3_cross(csm.r, csm.v));
+        printf("ORBIT CSM alt %.1f km  range %.1f km  phase (CSM ahead) %.2f deg  LM out of CSM plane %.2f km  wedge %.3f deg\n",
+               (rc - R0) / 1000, v3_len(v3_sub(csm.r, r)) / 1000, phase, v3_dot(r, n_c) / 1000,
+               acos(fmin(1, v3_dot(n_c, v3_norm(h)))) / DEG);
+    }
+}
+
+static void dock_report(void)
+{
+    DockGeo g;
+    if (!ascent_dock_geo(&g)) { printf("DOCK no CSM\n"); return; }
+    const AscentStats *st = ascent_stats();
+    printf("DOCK t=%.1f phase %d state %d axial %.2f lat %+.3f %+.3f rate %+.3f drift %+.3f %+.3f angle %.2f roll %+.2f rcs %.0f\n",
+           lm.t, ascent_phase(), st->dock_state, g.axial, g.lat_y, g.lat_z, g.rate, g.vy, g.vz, g.angle / DEG, g.roll / DEG, lm.m_rcs);
+    if (st->dock_state >= 1)
+        printf("DOCKED capture speed %.3f m/s radial %.3f m angle %.2f deg roll %+.2f deg bounces %d result %s\n", st->c_speed, st->c_radial,
+               st->c_angle / DEG, st->c_roll / DEG, st->bounces, st->dock_state == 2 ? "hard" : st->dock_state == 3 ? "FAILED" : "capture");
+    if (st->dock_state == 3) printf("DOCKFAIL %s\n", st->fail);
+}
+
+// A simple docking pilot using only what a player has: translation pulses
+// (THC) and the attitude controller in ATT HOLD.
+static void dock_pilot(double secs)
+{
+    int tick = 0;
+    for (double t = 0; t < secs; t += 0.1, tick++) {
+        lm_run(0.1);
+        crew_tick();
+        DockGeo g;
+        if (!ascent_dock_geo(&g) || ascent_stats()->dock_state) { lm_set_thc(0, 0); lm_set_thc(1, 0); lm_set_thc(2, 0); agc_host_set_rhc(0, 0, 0); continue; }
+        // Attitude: roll about the docking axis with yaw (Q = +yaw lowers the roll error);
+        // the tilt with pitch / roll, from where Columbia's axis points in LM axes.
+        V3 d = m3_apply(m3_transpose(q4_to_m3(lm.q)), m3_apply(q4_to_m3(csm.q), v3(-1, 0, 0)));
+        double yaw = fmax(-0.5, fmin(0.5, g.roll / DEG * 0.08));
+        double pitch = fmax(-0.5, fmin(0.5, dp_sign * d.z / DEG * 0.08));
+        double roll = fmax(-0.5, fmin(0.5, dr_sign * d.y / DEG * 0.08));
+        if (fabs(g.roll) < 0.4 * DEG) yaw = 0;
+        if (fabs(d.z) < 0.4 * DEG) pitch = 0;
+        if (fabs(d.y) < 0.4 * DEG) roll = 0;
+        agc_host_set_rhc(pitch, yaw, roll);
+        // Translation: pulse on alternate ticks toward the wanted velocities.
+        int on = tick & 1;
+        double vy_des = fmax(-0.08, fmin(0.08, -0.15 * g.lat_y)), vz_des = fmax(-0.08, fmin(0.08, -0.15 * g.lat_z));
+        int ty = !on ? 0 : g.vy > vy_des + 0.012 ? 1 : g.vy < vy_des - 0.012 ? -1 : 0;
+        int tz = !on ? 0 : g.vz > vz_des + 0.012 ? 1 : g.vz < vz_des - 0.012 ? -1 : 0;
+        double lat = sqrt(g.lat_y * g.lat_y + g.lat_z * g.lat_z);
+        double r_des = lat < 0.15 && g.angle < 2.5 * DEG && fabs(g.roll) < 4 * DEG ? (g.axial > 8 ? -0.25 : -0.12) : (g.axial > 6 ? -0.05 : 0.0);
+        int tx = !on ? 0 : g.rate > r_des + 0.02 ? 1 : g.rate < r_des - 0.03 ? -1 : 0;
+        lm_set_thc(0, tx); lm_set_thc(1, ty); lm_set_thc(2, tz);
+        if (tick % 50 == 0) dock_report();
+    }
+    lm_set_thc(0, 0); lm_set_thc(1, 0); lm_set_thc(2, 0);
+    agc_host_set_rhc(0, 0, 0);
+    dock_report();
+}
+
+static void ascent_watch(double secs)
+{
+    for (double t = 0; t < secs; t += 10) {
+        for (double k = 0; k < 10 - 1e-9; k += 0.1) {
+            lm_run(0.1);
+            crew_tick();
+        }
+        char d[200];
+        dsky_str(d, sizeof d);
+        V3 up = v3_norm(lm.r);
+        double vh = v3_len(v3_sub(lm.v, v3_scale(up, v3_dot(lm.v, up))));
+        printf("t=%8.1f alt %8.0f m hdot %7.1f vh %7.1f F %6.0f aps %d m %5.0f tilt %5.1f | %s\n",
+               lm.t, v3_len(lm.r) - 1738000.0 + 0 * vh, v3_dot(lm.v, up), vh, lm.thrust, lm.aps_on, lm_mass(),
+               lm_tilt() / DEG, d);
+        fflush(stdout);
     }
 }
 
@@ -202,6 +302,34 @@ int main(int argc, char **argv)
             printf("   FAILREG %05o %05o %05o\n", agc_get_word("FAILREG", 0), agc_get_word("FAILREG", 1), agc_get_word("FAILREG", 2));
         }
         else if (!strcmp(a, "align")) lm_align_imu(m3_identity());
+        else if (!strcmp(a, "liftoff")) {
+            scenario_pre_pdi();       // the landing site, as in the game
+            scenario_liftoff(0);
+            crew.landed = 1;
+            double lat, lon, rad;
+            moon_fixed_to_latlon(moon_inertial_to_fixed(lm.r, lm.t + lm.tephem), &lat, &lon, &rad);
+            printf("LIFTOFF scenario: t=%.2f s (GET %02d:%02d:%05.2f)  LM lat %.4f lon %.4f r %.1f  mass %.1f kg (AGC MASS %.1f)\n",
+                   lm.t, (int)(lm.t / 3600), (int)(lm.t / 60) % 60, lm.t - 60 * (int)(lm.t / 60), lat / DEG, lon / DEG, rad,
+                   lm_mass(), agc_get_dp("MASS", 0, 16));
+            printf("  TIG %.2f s (in %.1f s)  FLGWRD10 %05o  DAPBOOLS %05o  ch30 %05o\n", agc_get_dp("TIG", 0, 28) / 100.0,
+                   agc_get_dp("TIG", 0, 28) / 100.0 - lm.t, agc_get_word("FLGWRD10", 0), agc_get_word("DAPBOOLS", 0),
+                   agc_host_read_channel(030));
+            orbit_report();
+        }
+        else if (!strcmp(a, "stage")) lm_abort_stage();
+        else if (!strcmp(a, "rndz")) { if (!ascent_active()) ascent_begin(); ascent_rendezvous(); dock_report(); }
+        else if (!strncmp(a, "dock:", 5)) { ascent_debug_dock(atof(a + 5)); dock_report(); }
+        else if (!strncmp(a, "dockpilot:", 10)) dock_pilot(atof(a + 10));
+        else if (!strcmp(a, "dockreport")) dock_report();
+        else if (!strncmp(a, "dpsign:", 7)) dp_sign = atof(a + 7);
+        else if (!strncmp(a, "drsign:", 7)) dr_sign = atof(a + 7);
+        else if (!strncmp(a, "thc:", 4)) {
+            int x, y, z;
+            sscanf(a + 4, "%d,%d,%d", &x, &y, &z);
+            lm_set_thc(0, x); lm_set_thc(1, y); lm_set_thc(2, z);
+        }
+        else if (!strcmp(a, "orbit")) orbit_report();
+        else if (!strncmp(a, "ascent:", 7)) ascent_watch(atof(a + 7));
         else fprintf(stderr, "unknown command: %s\n", a);
     }
     return 0;

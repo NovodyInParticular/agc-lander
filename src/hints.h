@@ -14,11 +14,14 @@ void hints_draw(int w, int h, int dsky_w);
 // The one control the player should operate next, so that the cockpit and
 // the DSKY can mark it. `arg` for HT_DSKY_KEY is the key: 'V' VERB, 'N' NOUN,
 // 'E' ENTR, 'R' RSET, 'P' PRO, or a digit. `text` says what to do with it.
-enum { HT_NONE, HT_DSKY_KEY, HT_ENG_ARM, HT_PGNS_AUTO, HT_ENGINE_STOP, HT_MASTER_ALARM, HT_ROD_UP, HT_ROD_DOWN };
+enum { HT_NONE, HT_DSKY_KEY, HT_ENG_ARM, HT_PGNS_AUTO, HT_ENGINE_STOP, HT_MASTER_ALARM, HT_ROD_UP, HT_ROD_DOWN,
+       HT_ENG_ARM_ASC, HT_ABORT_STAGE };
 typedef struct { int kind, arg; const char *text; } HintTarget;
 // Returns 0 (kind HT_NONE) when hints are off or nothing needs doing.
 int hints_target(HintTarget *t);
 // Whether the view is the cockpit (the hint box then mentions the marker).
 void hints_set_cockpit(int in_cockpit);
+// Set by the game: 1 while the docking-window view is up.
+extern int hud_camera_is_docking;
 
 #endif

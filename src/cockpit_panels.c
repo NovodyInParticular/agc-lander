@@ -361,6 +361,7 @@ static int toggle(float x, float y, const char *id, const char *title, const cha
     add_lever(LEV_TOGGLE, x, y, (float)s, 16, guard, (Color){ 196, 198, 202, 255 });
     add_hot(HOT_TOGGLE, (Rectangle){ x - 7, y - 11, 14, 22 }, id, mid ? 3 : 2);
     if (id == ID_ENGARM && hint_tgt.kind == HT_ENG_ARM) hint_at(x, y, 13.0f, 0, -1);
+    else if (id == ID_ENGARM && hint_tgt.kind == HT_ENG_ARM_ASC) hint_at(x, y, 13.0f, 0, +1);
     else if (id == ID_PGNS && hint_tgt.kind == HT_PGNS_AUTO) hint_at(x, y, 13.0f, 0, +1);
     else if (id == ID_ROD && hint_tgt.kind == HT_ROD_UP) hint_at(x, y, 13.0f, 0, +1);
     else if (id == ID_ROD && hint_tgt.kind == HT_ROD_DOWN) hint_at(x, y, 13.0f, 0, -1);
@@ -452,7 +453,8 @@ static void pushbtn(float x, float y, float w, float h, const char *id, const ch
     pc_lift(0);
     add_hot(HOT_BUTTON, (Rectangle){ x, y, w, h }, id, 0);
     if (((id == ID_STOP5 || id == ID_STOP6) && hint_tgt.kind == HT_ENGINE_STOP) ||
-        ((id == ID_MA1 || id == ID_MA2) && hint_tgt.kind == HT_MASTER_ALARM))
+        ((id == ID_MA1 || id == ID_MA2) && hint_tgt.kind == HT_MASTER_ALARM) ||
+        (id == ID_ABSTAGE && hint_tgt.kind == HT_ABORT_STAGE))
         hint_at(x + w / 2, y + h / 2, fmaxf(w, h) * 0.5f + 5.0f, up, 0);
 }
 
@@ -821,7 +823,7 @@ static void panel1(void)
 
     hazard_frame(274, 570, 180, 60, 3.2f);
     pushbtn(282, 578, 70, 44, ID_ABORT, "ABORT", RED_L, 0, 0);
-    pushbtn(372, 578, 74, 44, ID_ABSTAGE, "ABORT\nSTAGE", RED_L, 0, 1);
+    pushbtn(372, 578, 74, 44, ID_ABSTAGE, "ABORT\nSTAGE", RED_L, lm.abort_stage, 1);
     toggle(38, 604, "SBD AUD", "AUDIO", "T/R", "RCV", "OFF", 1, 0);
     toggle(96, 604, "ICS", "ICS", "PTT", NULL, "VOX", 1, 0);
     toggle(154, 604, "ALT RT/OFF", "ALT RT", "ON", NULL, "OFF", 1, 0);
@@ -1276,7 +1278,7 @@ void cp_panels_update(float dt)
 {
     // Keep the functional switches in step with the simulation (keyboard
     // shortcuts and the automatic crew change the same things).
-    ST(ID_ENGARM, 0) = lm.engine_armed ? -1 : 0;
+    ST(ID_ENGARM, 0) = lm.engine_armed == ARM_DES ? -1 : lm.engine_armed == ARM_ASC ? 1 : 0;
     int m = lm_get_attitude_mode();
     ST(ID_PGNS, 1) = m == 2 ? 1 : m == 1 ? 0 : -1;
 
@@ -1395,8 +1397,8 @@ void cp_click(const Hot *h, float u, float v)
         if (n < -1) n = -1;
         *s = n;
         if (h->id == ID_ENGARM) {
-            lm_set_engine_arm(n == -1);
-            crew_say(n == -1 ? "ENG ARM: DES" : n == 1 ? "ENG ARM: ASC (ascent engine not simulated)" : "ENG ARM: OFF");
+            lm_set_engine_arm(n == -1 ? ARM_DES : n == 1 ? ARM_ASC : ARM_OFF);
+            crew_say(n == -1 ? "ENG ARM: DES (descent engine)" : n == 1 ? "ENG ARM: ASC (ascent engine)" : "ENG ARM: OFF");
         } else if (h->id == ID_PGNS) {
             lm_set_attitude_mode(n == 1 ? 2 : n == 0 ? 1 : 0);
             crew_say(n == 1 ? "PGNS mode control: AUTO" : n == 0 ? "PGNS mode control: ATT HOLD" : "PGNS mode control: OFF");
@@ -1429,16 +1431,28 @@ void cp_click(const Hot *h, float u, float v)
     case HOT_BUTTON:
         press_id = h->id; press_idx = 0; press_t = 0.16f;
         if (h->id == ID_STOP5 || h->id == ID_STOP6) {
-            lm_engine_stop();
-            crew_say("ENGINE STOP");
+            // A latching button: pushed in it holds the engines off; push again to reset.
+            if (lm_engine_stop_is_latched() && !lm.dps_on && !lm.aps_on) {
+                lm_engine_stop_reset();
+                crew_say("ENGINE STOP reset (button out)");
+            } else {
+                lm_engine_stop();
+                crew_say("ENGINE STOP");
+            }
         } else if (h->id == ID_MA1 || h->id == ID_MA2) {
             master_alarm = 0;
         } else if (h->id == ID_PLUSX5 || h->id == ID_PLUSX6) {
             lm_set_thc(0, +1);
             plusx_timer = 2.0f;
             crew_say("+X translation: 4 jets for ullage");
-        } else if (h->id == ID_ABORT || h->id == ID_ABSTAGE) {
-            crew_say("Abort is not simulated (it would hand the LGC to P70/P71)");
+        } else if (h->id == ID_ABSTAGE) {
+            int flying = !lm.touchdown;
+            lm_abort_stage();
+            if (flying && !lm.aps_on) lm_set_engine_arm(ARM_ASC);   // the abort-stage relays arm the ascent engine
+            crew_say(flying ? "ABORT STAGE: stages separated, ascent engine armed (P71)"
+                            : "ABORT STAGE: the stage separation bolts have fired");
+        } else if (h->id == ID_ABORT) {
+            crew_say("ABORT (with the descent stage, P70) is not simulated: ABORT STAGE is");
         } else if (h->id == ID_START5) {
             crew_say("Manual DPS start is not modelled: the LGC commands ignition");
         }
@@ -1462,7 +1476,7 @@ const char *cp_tooltip(const Hot *h, float u, float v)
         ID_ENGARM, ID_PGNS, ID_ROD, ID_STOP5, ID_STOP6, ID_MA1, ID_MA2, ID_FLOOD, ID_INTEG, ID_NUM, ID_LTGTEST, ID_XSCALE,
         ID_RATESCALE, ID_MODESEL, ID_ET, ID_PLUSX5, ID_PLUSX6, ID_FLOODSEL, ID_SIDEPNL, ID_ANUNBRT, ID_DSKYLTG, ID_MT, ID_MTH,
         ID_MTM, ID_MTS, ID_ETM, ID_ETS, ID_ETCOUNT, ID_ETRESET, ID_PRPMON, ID_TEMPMON, ID_HTRMON, ID_PWRMON, ID_SIGMON,
-        ID_SUITFAN, ID_CABFAN,
+        ID_SUITFAN, ID_CABFAN, ID_ABSTAGE,
     };
     int functional = 0;
     for (size_t i = 0; i < sizeof works / sizeof works[0]; i++) functional |= h->id == works[i];

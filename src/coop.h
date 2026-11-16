@@ -7,7 +7,7 @@
 enum { COOP_OFF, COOP_HOST, COOP_CLIENT };
 extern int coop_role;
 
-enum { CMD_KEY = 1, CMD_PRO, CMD_ENGARM, CMD_ATTMODE, CMD_ROD, CMD_STOP, CMD_THC };
+enum { CMD_KEY = 1, CMD_PRO, CMD_ENGARM, CMD_ATTMODE, CMD_ROD, CMD_STOP, CMD_THC, CMD_STAGE };
 
 int coop_start_host(void);                 // 0 on success
 int coop_start_client(const char *host);   // 0 on success

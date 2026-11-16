@@ -30,12 +30,15 @@ static double perf_mark(void) { if (perf_on) { rlDrawRenderBatchActive(); if (!p
 #endif
 
 #include "agc_host.h"
+#include "ascent.h"
 #include "assets.h"
 #include "cockpit.h"
 #include "sky_extras.h"
 #include "controls.h"
 #include "coop.h"
 #include "crew.h"
+#include "csm.h"
+#include "csmmodel.h"
 #include "eva.h"
 #include "dsky.h"
 #include "hints.h"
@@ -174,6 +177,7 @@ static void sim_advance(double seconds)
         double s = seconds > 0.1 ? 0.1 : seconds;
         lm_run(s);
         crew_step();
+        ascent_step(s);
         seconds -= s;
     }
 }
@@ -186,6 +190,7 @@ static void start_world(void)
     lm_attach_agc();
     crew_reset();
     eva_reset();
+    ascent_reset();
     scenario_pre_pdi();
     if (!terrain_ready) {
         terrain_set_sun(sun_site);
@@ -196,12 +201,45 @@ static void start_world(void)
     lm.surface = surface_cb;
 }
 
+// The ascent from where the LM stands now (after a landing) or from the
+// LGC's landing site (the LUNAR LIFT-OFF scenario): P12 one minute to go.
+static void start_ascent(int keep_pose)
+{
+    scenario_liftoff(keep_pose);
+    int ac = crew.auto_crew;
+    crew_reset();
+    crew.auto_crew = ac;
+    crew.landed = 1;
+    ascent_begin();
+}
+
+// Where the CSM and the descent stage left behind are, in the site frame.
+static V3 csm_site_pos(void)
+{
+    return terrain_fixed_to_site(moon_inertial_to_fixed(csm.r, lm.t + lm.tephem));
+}
+
+static M3 csm_site_rot(void)
+{
+    return m3_mul(terrain_site_from_fixed(), m3_mul(moon_matrix(lm.t + lm.tephem), q4_to_m3(csm.q)));
+}
+
+static void ds_site_pose(V3 *pos, M3 *rot)
+{
+    V3 f;
+    M3 r;
+    lm_descent_stage_pose(&f, &r);
+    *pos = terrain_fixed_to_site(f);
+    *rot = m3_mul(terrain_site_from_fixed(), r);
+}
+
 // ---------------------------------------------------------------------------
 // Cameras.
 
-enum { CAM_CHASE, CAM_CDR, CAM_DAC, CAM_TOWER, CAM_CINEMA, CAM_GLOBE, CAM_COUNT };
+enum { CAM_CHASE, CAM_CDR, CAM_DAC, CAM_TOWER, CAM_CINEMA, CAM_GLOBE, CAM_DOCK, CAM_COUNT };
 enum { CAM_EVA = CAM_COUNT };   // the astronaut's own eyes on the surface: not in the camera cycle
-static const char *cam_names[CAM_COUNT] = { "CHASE", "COCKPIT", "16MM DAC (LMP WINDOW)", "TOWER", "CINEMATIC", "LUNAR ORBIT" };
+static const char *cam_names[CAM_COUNT] = { "CHASE", "COCKPIT", "16MM DAC (LMP WINDOW)", "TOWER", "CINEMATIC", "LUNAR ORBIT",
+                                            "DOCKING WINDOW (COAS)" };
 static double orbit_yaw = -0.9, orbit_pitch = 0.16, orbit_dist = 24;
 
 static ViewCam make_camera(int mode, V3 lm_pos, M3 R, double t_wall)
@@ -219,6 +257,14 @@ static ViewCam make_camera(int mode, V3 lm_pos, M3 R, double t_wall)
         return eva_camera();
     case CAM_GLOBE:
         return globe_camera(lm_pos);
+    case CAM_DOCK:
+        // The Commander's overhead docking window, looking out along +X through
+        // the COAS; the top of the screen is the LM's front (+Z).
+        c.pos = v3_add(lm_pos, m3_apply(R, v3(3.30, -0.66, -0.20)));
+        c.fwd = v3_norm(m3_apply(R, v3(1, 0, 0)));
+        c.upv = v3_norm(m3_apply(R, v3(0, 0, 1)));
+        c.fov_y = 46 * DEG;
+        break;
     case CAM_DAC: {
         int dac = mode == CAM_DAC;
         V3 eye_b = dac ? v3(1.75, 0.55, 1.05) : v3(1.80, -0.55, 1.10);
@@ -271,6 +317,7 @@ static V3 earth_site_g;
 // Once per frame, before any eye is drawn: terrain level of detail for the
 // viewpoint, the LM's sun shadow map, the dust simulation.
 static float world_dust;
+static V3 shadow_centre;   // site frame: where the shadow map is centred this frame
 static void world_prepare(const ViewCam *cam, int h, int camera)
 {
     if (camera == CAM_GLOBE) return;
@@ -278,14 +325,34 @@ static void world_prepare(const ViewCam *cam, int h, int camera)
     M3 R = lm_site_rot();
     terrain_update(cam->pos, cam->fov_y, h);
 
-    // LM shadow map (LM at the origin of the light space).
-    render_shadow_begin(v3_sub(lm_pos, cam->pos), sun_site, 8.0f);
-    lmmodel_draw_depth(R, v3(0, 0, 0));
-    render_shadow_end();
+    // LM shadow map (LM at the origin of the light space). After staging it
+    // stays on the descent stage while the ascent stage is close above it.
+    if (lm.staged) {
+        V3 dp;
+        M3 dr;
+        ds_site_pose(&dp, &dr);
+        V3 centre = v3_len(v3_sub(lm_pos, dp)) < 14 ? dp : lm_pos;
+        render_shadow_begin(v3_sub(centre, cam->pos), sun_site, 8.0f);
+        lmmodel_draw_stage_depth(0, dr, v3_sub(dp, centre));
+        lmmodel_draw_stage_depth(1, R, v3_sub(lm_pos, centre));
+        render_shadow_end();
+        render_set_shadow_center(v3_sub(centre, cam->pos));
+    } else {
+        render_shadow_begin(v3_sub(lm_pos, cam->pos), sun_site, 8.0f);
+        lmmodel_draw_depth(R, v3(0, 0, 0));
+        render_shadow_end();
+    }
+    shadow_centre = lm_pos;
+    if (lm.staged) {
+        V3 dp;
+        M3 dr;
+        ds_site_pose(&dp, &dr);
+        if (v3_len(v3_sub(lm_pos, dp)) < 14) shadow_centre = dp;
+    }
 
     // Dust kicked up by the descent engine.
     float dust = 0;
-    if (!pose_override && lm.thrust > 500 && lm.altitude < 70)
+    if (!pose_override && !lm.thrust_aps && lm.thrust > 500 && lm.altitude < 70)
         dust = (float)fmin(1.0, pow(1.0 - lm.altitude / 70.0, 1.3) * lm.thrust / 11000.0);
     float crash_age = lm.land_result == LAND_CRASH ? (float)(lm.t - lm.crash_t) : -1.0f;
     if (crash_age >= 0 && crash_age < 8) {
@@ -316,7 +383,7 @@ static void world_draw(const ViewCam *cam, int w, int h, float film, int camera)
         render_end_scene();
         return;
     }
-    render_set_shadow_center(rel);   // the shadow map was made once; this view sees it from its own eye point
+    render_set_shadow_center(v3_sub(shadow_centre, cam->pos));   // the shadow map was made once; this view sees it from its own eye point
 
     render_set_film(film);
     render_begin_scene(cam, w, h);
@@ -337,13 +404,38 @@ static void world_draw(const ViewCam *cam, int w, int h, float film, int camera)
     terrain_draw(cam->pos, render_terrain_shader());
     rlEnableDepthTest();
     rocks_draw(cam->pos);
-    if (camera == CAM_CDR) render_set_lm_extras(COCKPIT_NEAR_CUT, 1.0f, NULL, NULL, 0);
-    lmmodel_draw(R, rel);
+    if (camera == CAM_CDR || camera == CAM_DOCK) render_set_lm_extras(COCKPIT_NEAR_CUT, 1.0f, NULL, NULL, 0);
+    if (lm.staged) {
+        lmmodel_draw_stage(1, R, rel);
+        render_set_lm_extras(0.0f, 1.0f, NULL, NULL, 0);
+        V3 dp;
+        M3 dr;
+        ds_site_pose(&dp, &dr);
+        lmmodel_draw_stage(0, dr, v3_sub(dp, cam->pos));
+    } else {
+        lmmodel_draw(R, rel);
+    }
     render_set_lm_extras(0.0f, 1.0f, NULL, NULL, 0);
+    if (csm.valid) {
+        V3 cp = v3_sub(csm_site_pos(), cam->pos);
+        if (v3_len(cp) < 400000) csmmodel_draw(csm_site_rot(), cp);
+    }
     eva_draw(cam);
 
     LmFx fx = { 0 };
     fx.thrust = pose_override ? 0 : (float)lm.thrust;
+    fx.aps = lm.thrust_aps;
+    if (lm.staged && lm.ds_landed && lm.liftoff) {
+        // Fire in the hole: the ascent engine blasts the descent stage's top deck.
+        V3 dp;
+        M3 dr;
+        ds_site_pose(&dp, &dr);
+        fx.burst_age = (float)(lm.t - lm.liftoff_t);
+        fx.burst_point = v3_sub(v3_add(dp, m3_apply(dr, v3(0.40, 0, 0))), cam->pos);
+        fx.burst_up = m3_apply(dr, v3(1, 0, 0));
+    } else {
+        fx.burst_age = -1;
+    }
     for (int j = 0; j < LM_NJETS; j++) {
         fx.jet[j] = pose_override ? 0 : lm.jet_level[j];
         fx.jet_pos[j] = lm_jet_position(j);
@@ -361,6 +453,39 @@ static void world_draw(const ViewCam *cam, int w, int h, float film, int camera)
     render_scene_3d_end();
     if (camera == CAM_CDR) cockpit_draw(R, rel, w, h);
     render_end_scene();
+}
+
+// The docking window: its frame, and the COAS reticle projected at infinity
+// along +X (screen centre).
+static void draw_coas(int w, int h)
+{
+    float cx = w / 2.0f, cy = h / 2.0f, s = h / 1080.0f;
+    // Window frame: dark cabin all round a rounded opening.
+    float ww = h * 0.86f, wh = h * 0.78f;
+    Rectangle win = { cx - ww / 2, cy - wh / 2, ww, wh };
+    Color cab = { 12, 13, 15, 255 };
+    DrawRectangle(0, 0, w, (int)win.y, cab);
+    DrawRectangle(0, (int)(win.y + win.height), w, h - (int)(win.y + win.height), cab);
+    DrawRectangle(0, (int)win.y, (int)win.x, (int)win.height + 1, cab);
+    DrawRectangle((int)(win.x + win.width), (int)win.y, w - (int)(win.x + win.width), (int)win.height + 1, cab);
+    DrawRectangleRoundedLinesEx(win, 0.08f, 8, 10 * s, (Color){ 40, 42, 46, 255 });
+    DrawRectangleRoundedLinesEx(win, 0.08f, 8, 2 * s, (Color){ 90, 92, 98, 255 });
+    // COAS: a collimated cross with range marks, in the sight's own amber.
+    Color rc = { 255, 170, 60, 200 };
+    float L = h * 0.30f;
+    DrawLineEx((Vector2){ cx - L, cy }, (Vector2){ cx - 14 * s, cy }, 2.0f * s, rc);
+    DrawLineEx((Vector2){ cx + 14 * s, cy }, (Vector2){ cx + L, cy }, 2.0f * s, rc);
+    DrawLineEx((Vector2){ cx, cy - L }, (Vector2){ cx, cy - 14 * s }, 2.0f * s, rc);
+    DrawLineEx((Vector2){ cx, cy + 14 * s }, (Vector2){ cx, cy + L }, 2.0f * s, rc);
+    for (int k = 1; k <= 5; k++) {
+        float d = L * k / 5.5f, t = (k == 5 ? 12 : 6) * s;
+        DrawLineEx((Vector2){ cx + d, cy - t }, (Vector2){ cx + d, cy + t }, 1.5f * s, rc);
+        DrawLineEx((Vector2){ cx - d, cy - t }, (Vector2){ cx - d, cy + t }, 1.5f * s, rc);
+        DrawLineEx((Vector2){ cx - t, cy + d }, (Vector2){ cx + t, cy + d }, 1.5f * s, rc);
+        DrawLineEx((Vector2){ cx - t, cy - d }, (Vector2){ cx + t, cy - d }, 1.5f * s, rc);
+    }
+    DrawCircleLinesV((Vector2){ cx, cy }, 9 * s, rc);
+    hud_text(font_bold, "COAS", win.x + 18 * s, win.y + win.height - 34 * s, 18 * s, (Color){ 255, 170, 60, 160 });
 }
 
 #ifndef AGC_VR
@@ -412,13 +537,17 @@ static const char *scen_names[] = {
     "POWERED DESCENT  -  start just before ignition",
     "HIGH GATE  -  P64 approach phase",
     "FINAL 500 FT  -  you fly P66",
+    "LUNAR LIFT-OFF  -  P12 ascent, then dock with Columbia",
 };
 static const char *scen_desc[] = {
     "Luminary099 is in P63 waiting for the crew. The real procedure: fine-align option, auto maneuver, arm the descent engine, enable ignition at V99, then permit landing radar updates with V57.",
     "Fast-forwards the real AGC and crew through the pre-burn checklist and stops 30 seconds before ignition.",
     "Fast-forwards through the braking phase. Pitch-over is just ahead and Tranquility Base comes into view.",
     "The computer brings you to 150 m. Then it's yours: ROD switch (Up/Down arrows) in P66, ENGINE STOP at contact.",
+    "Tranquility Base, one minute to lift-off. At V99: ABORT STAGE (F9), ENG ARM ASC (F7), PRO. P12 flies you to orbit, then you dock.",
 };
+#define N_SCEN 5
+enum { ROW_HOST = N_SCEN, ROW_JOIN, ROW_HINTS, N_ROWS };
 
 // ---------------------------------------------------------------------------
 // Outside view on a second monitor: a second instance of the game, fed the
@@ -444,6 +573,12 @@ typedef struct {
     int att_mode, stop_latched;
     int hint, land_result, crash_cause;
     double crash_t, crash_speed, touchdown_t, touchdown_speed, touchdown_hspeed, touchdown_tilt, touchdown_fuel, collapse[4];
+    // Ascent and docking.
+    int aps_on, thrust_aps, abort_stage, staged, ds_landed, liftoff, csm_valid, asc_active, asc_phase;
+    double m_aps, liftoff_t;
+    V3 cg, ds_fixed, ds_r, csm_r, csm_v;
+    M3 ds_fixed_rot;
+    Q4 ds_q, csm_q;
 } StatePkt;
 
 static void pack_state(StatePkt *p, int bye)
@@ -475,6 +610,11 @@ static void pack_state(StatePkt *p, int bye)
     p->touchdown_speed = lm.touchdown_speed; p->touchdown_hspeed = lm.touchdown_hspeed;
     p->touchdown_tilt = lm.touchdown_tilt; p->touchdown_fuel = lm.touchdown_fuel;
     memcpy(p->collapse, lm.collapse, sizeof p->collapse);
+    p->aps_on = lm.aps_on; p->thrust_aps = lm.thrust_aps; p->abort_stage = lm.abort_stage; p->staged = lm.staged;
+    p->ds_landed = lm.ds_landed; p->liftoff = lm.liftoff; p->m_aps = lm.m_aps; p->liftoff_t = lm.liftoff_t;
+    p->cg = lm.cg; p->ds_fixed = lm.ds_fixed; p->ds_r = lm.ds_r; p->ds_fixed_rot = lm.ds_fixed_rot; p->ds_q = lm.ds_q;
+    p->csm_valid = csm.valid; p->csm_r = csm.r; p->csm_v = csm.v; p->csm_q = csm.q;
+    p->asc_active = ascent_active(); p->asc_phase = ascent_phase();
 }
 
 static void apply_state(const StatePkt *p)
@@ -499,6 +639,11 @@ static void apply_state(const StatePkt *p)
     lm.touchdown_speed = p->touchdown_speed; lm.touchdown_hspeed = p->touchdown_hspeed;
     lm.touchdown_tilt = p->touchdown_tilt; lm.touchdown_fuel = p->touchdown_fuel;
     memcpy(lm.collapse, p->collapse, sizeof lm.collapse);
+    lm.aps_on = p->aps_on; lm.thrust_aps = p->thrust_aps; lm.abort_stage = p->abort_stage; lm.staged = p->staged;
+    lm.ds_landed = p->ds_landed; lm.liftoff = p->liftoff; lm.m_aps = p->m_aps; lm.liftoff_t = p->liftoff_t;
+    lm.cg = p->cg; lm.ds_fixed = p->ds_fixed; lm.ds_r = p->ds_r; lm.ds_fixed_rot = p->ds_fixed_rot; lm.ds_q = p->ds_q;
+    csm.valid = p->csm_valid; csm.r = p->csm_r; csm.v = p->csm_v; csm.q = p->csm_q;
+    ascent_mirror(p->asc_active, p->asc_phase);
 }
 
 // Landing results panel: how it went, with numbers.
@@ -559,7 +704,8 @@ static void draw_results(int w, int h, int client)
     hud_text_centered(font_ui, "B  fly it again      A  hide this      X  open the hatch      Menu button  menu",
 #else
     hud_text_centered(font_ui, client ? "Waiting for the Commander.   Space hides this   Esc  menu"
-                                      : "Enter  fly it again      Space  hide this      Esc  menu",
+                      : crash ? "Enter  fly it again      Space  hide this      Esc  menu"
+                              : "Enter  fly it again    L  lift off (21 hours later)    Space  hide this    Esc  menu",
 #endif
                       w / 2.0f, y + bh - 50 * sc, 22 * sc, (Color){ 150, 158, 170, 255 });
 }
@@ -857,6 +1003,7 @@ int main(int argc, char **argv)
     hud_init();
     hints_load();
     lmmodel_init();
+    csmmodel_init();
     cockpit_init();
     extras_init();
 #ifdef AGC_VR
@@ -884,7 +1031,13 @@ int main(int argc, char **argv)
         crew.auto_crew = 1;
         ff_target_alt = opt.fast_to_alt > 0 ? opt.fast_to_alt : scen == 2 ? 2600 : scen == 3 ? 150 : 0;
         if (scen == 0) gs = GS_FLY;
+        if (scen == 4) { start_ascent(0); crew.auto_crew = getenv("AGC_AUTOCREW") != NULL; gs = GS_FLY; show_dsky = camera != CAM_CDR; }
     }
+    // Fades to black between parts of the mission ("21 hours later").
+    enum { FADE_NONE, FADE_LIFTOFF, FADE_RNDZ };
+    int fade_kind = FADE_NONE, fade_done = 0;
+    double fade_t = 0;
+    const char *fade_text = "";
     if (opt.spectator) { gs = GS_FLY; crew.auto_crew = 0; }
     static char join_ip[64];
     int coop_host_on = opt.host;
@@ -935,8 +1088,8 @@ int main(int argc, char **argv)
         if (dt > 0.1f) dt = 0.1f;
         wall += dt;
         int w = UI_W, h = UI_H;
-        vr_map_keys(gs == GS_MENU, gs == GS_FLY && lm.land_result != LAND_NONE && !lm.dps_on && !results_hidden &&
-                                   eva_phase() == EVA_INSIDE);
+        vr_map_keys(gs == GS_MENU, (gs == GS_FLY && lm.land_result != LAND_NONE && !lm.dps_on && !results_hidden &&
+                                    eva_phase() == EVA_INSIDE && !ascent_active()) || ascent_results_due());
 #else
         float dt = GetFrameTime();
         if (dt > 0.1f) dt = 0.1f;
@@ -964,20 +1117,20 @@ int main(int argc, char **argv)
             float wh = GetMouseWheelMove();
             if (wh != 0) orbit_dist = fmax(8, fmin(4000, orbit_dist * pow(0.88, wh)));
         } else if (gs == GS_MENU) {
-            if (IsKeyPressed(KEY_DOWN)) menu_sel = (menu_sel + 1) % 7;
-            if (IsKeyPressed(KEY_UP)) menu_sel = (menu_sel + 6) % 7;
+            if (IsKeyPressed(KEY_DOWN)) menu_sel = (menu_sel + 1) % N_ROWS;
+            if (IsKeyPressed(KEY_UP)) menu_sel = (menu_sel + N_ROWS - 1) % N_ROWS;
             int enter = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || retry_req;
             retry_req = 0;
-            if (menu_sel == 6 && (enter || IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_RIGHT))) {
+            if (menu_sel == ROW_HINTS && (enter || IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_RIGHT))) {
                 hints_on = !hints_on;
                 hints_save();
                 enter = 0;
             }
-            if (menu_sel == 4 && (enter || IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_RIGHT))) {
+            if (menu_sel == ROW_HOST && (enter || IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_RIGHT))) {
                 coop_host_on = !coop_host_on;
                 enter = 0;
             }
-            if (menu_sel == 5) {
+            if (menu_sel == ROW_JOIN) {
                 for (int ch = GetCharPressed(); ch; ch = GetCharPressed())
                     if (((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '.' || ch == '-') &&
                         strlen(join_ip) < sizeof join_ip - 1) {
@@ -1010,17 +1163,19 @@ int main(int argc, char **argv)
                 crew.auto_crew = 1;
                 manual_takeover = 0;
                 results_hidden = 0;
-                show_dsky = scen == 0 && camera != CAM_CDR;   // F4 shows it any time
+                show_dsky = (scen == 0 || scen == 4) && camera != CAM_CDR;   // F4 shows it any time
                 ff_target_alt = scen == 2 ? 2600 : scen == 3 ? 150 : 0;
-                gs = scen == 0 ? GS_FLY : GS_FASTFWD;
+                gs = scen == 0 || scen == 4 ? GS_FLY : GS_FASTFWD;
                 if (scen == 0) crew.auto_crew = 0;
+                if (scen == 4) { start_ascent(0); crew.auto_crew = 0; }
+                fade_kind = FADE_NONE;
             }
         } else {
             if (IsKeyPressed(KEY_TAB)) camera = (camera + 1) % CAM_COUNT;
             if (camera != prev_camera) {
                 // The cockpit has its own DSKY: hide the side one there.
                 if (camera == CAM_CDR) show_dsky = 0;
-                else if (prev_camera == CAM_CDR) show_dsky = scen == 0;   // only the full mission needs it
+                else if (prev_camera == CAM_CDR) show_dsky = scen == 0 || ascent_active();   // only the full mission and the ascent need it
                 prev_camera = camera;
             }
             if (IsKeyPressed(KEY_F1)) show_help = !show_help;
@@ -1031,7 +1186,17 @@ int main(int argc, char **argv)
             if (IsKeyPressed(KEY_F6)) show_hud = !show_hud;
             if (IsKeyPressed(KEY_PAGE_UP)) warp = warp >= 60 ? 60 : warp < 1 ? 1 : warp * (warp < 2 ? 2 : warp < 5 ? 2.5 : 2);
             if (IsKeyPressed(KEY_PAGE_DOWN)) warp = warp <= 1 ? 1 : warp / (warp <= 2 ? 2 : warp <= 5 ? 2.5 : 2);
-            if (IsKeyPressed(KEY_F7)) lm_set_engine_arm(!lm.engine_armed);
+            if (IsKeyPressed(KEY_F7)) {
+                int arm = lm.engine_armed ? ARM_OFF : (ascent_active() || lm.staged) ? ARM_ASC : ARM_DES;
+                lm_set_engine_arm(arm);
+                crew_say(arm == ARM_ASC ? "ENG ARM: ASC (ascent engine)" : arm == ARM_DES ? "ENG ARM: DES (descent engine)" : "ENG ARM: OFF");
+            }
+            if (IsKeyPressed(KEY_F9) && !lm.abort_stage) {
+                int flying = !lm.touchdown;
+                lm_abort_stage();
+                if (flying && !lm.aps_on) lm_set_engine_arm(ARM_ASC);
+                crew_say(flying ? "ABORT STAGE: stages separated, ascent engine armed" : "ABORT STAGE: the stage separation bolts have fired");
+            }
             if (IsKeyPressed(KEY_M)) {
                 sound_set_muted(!sound_muted());
                 crew_say(sound_muted() ? "Cabin sound off (M turns it on)" : "Cabin sound on (heard in the cockpit and window views)");
@@ -1041,12 +1206,37 @@ int main(int argc, char **argv)
                 hints_save();
                 crew_say(hints_on ? "Hints on (H hides them)" : "Hints off (H shows them)");
             }
-            if (IsKeyPressed(KEY_X) && !opt.spectator) {
+            if (IsKeyPressed(KEY_X) && !opt.spectator && !ascent_active()) {
                 if (eva_phase() == EVA_INSIDE && eva_available()) { results_hidden = 1; camera = CAM_CDR; }
                 eva_key();
             }
-            if (lm.land_result != LAND_NONE && !lm.dps_on && eva_phase() == EVA_INSIDE) {
+            if (ascent_active() && fade_kind == FADE_NONE) {
+                int ph = ascent_phase();
+                if (ph == MP_ORBIT || ph == MP_DOCKED || ph == MP_DOCK_FAILED) {
+                    if (IsKeyPressed(KEY_SPACE)) ascent_hide_results(!ascent_results_hidden());
+                    if (coop_role != COOP_CLIENT && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) && ascent_results_due()) {
+                        if (ph == MP_DOCKED) {
+                            gs = GS_MENU;
+                            menu_sel = scen;
+                        } else {
+                            fade_kind = FADE_RNDZ;
+                            fade_t = 0;
+                            fade_done = 0;
+                            fade_text = ph == MP_ORBIT ? "THREE AND A HALF HOURS LATER  -  CSI, CDH, TPI and braking flown.  Columbia is 130 feet away."
+                                                       : "BACKING OFF  -  another approach to Columbia";
+                        }
+                    }
+                }
+            }
+            if (lm.land_result != LAND_NONE && !lm.dps_on && eva_phase() == EVA_INSIDE && !ascent_active()) {
                 if (IsKeyPressed(KEY_SPACE)) results_hidden = !results_hidden;
+                if (IsKeyPressed(KEY_L) && lm.land_result != LAND_CRASH && coop_role != COOP_CLIENT && fade_kind == FADE_NONE &&
+                    lm.t - lm.touchdown_t > 3) {
+                    fade_kind = FADE_LIFTOFF;
+                    fade_t = 0;
+                    fade_done = 0;
+                    fade_text = "TWENTY-ONE HOURS LATER  -  124:21 GET.  The ascent stage is ready.  P12 counting down.";
+                }
                 if (coop_role != COOP_CLIENT && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) &&
                     lm.t - lm.touchdown_t > 3) {
                     gs = GS_MENU;
@@ -1069,6 +1259,28 @@ int main(int argc, char **argv)
                     memcpy(dev, ct.device, sizeof dev);
                     memset(&ct, 0, sizeof ct);
                     memcpy(ct.device, dev, sizeof dev);
+                }
+                if (ascent_active() && ascent_phase() >= MP_ORBIT) {
+                    // In orbit the keyboard has a translation controller: T / G along
+                    // +X (toward / away from Columbia), the arrows across (as seen
+                    // through the docking window: screen right is the LM's -Y).
+                    int kx = (IsKeyDown(KEY_T) ? 1 : 0) - (IsKeyDown(KEY_G) ? 1 : 0);
+                    int ky = (IsKeyDown(KEY_LEFT) ? 1 : 0) - (IsKeyDown(KEY_RIGHT) ? 1 : 0);
+                    int kz = (IsKeyDown(KEY_UP) ? 1 : 0) - (IsKeyDown(KEY_DOWN) ? 1 : 0);
+                    if (kx) ct.tx = kx;
+                    if (ky) ct.ty = ky;
+                    if (kz) ct.tz = kz;
+                    ct.rod = 0;
+                }
+                {   // Debugging: AGC_FAKE_RHC=pitch,yaw,roll[,tx,ty,tz] holds the hand controllers there.
+                    const char *fr = getenv("AGC_FAKE_RHC");
+                    if (fr) {
+                        double fp = 0, fyw = 0, frl = 0;
+                        int fx = 0, fy = 0, fz = 0;
+                        sscanf(fr, "%lf,%lf,%lf,%d,%d,%d", &fp, &fyw, &frl, &fx, &fy, &fz);
+                        ct.pitch = fp; ct.yaw = fyw; ct.roll = frl;
+                        if (fx || fy || fz) { ct.tx = fx; ct.ty = fy; ct.tz = fz; }
+                    }
                 }
                 if (coop_role == COOP_HOST) coop_host_rhc(&ct.pitch, &ct.yaw, &ct.roll);
                 agc_host_set_rhc(ct.pitch, ct.yaw, ct.roll);
@@ -1231,6 +1443,34 @@ int main(int argc, char **argv)
             prev_camera = camera;
         }
 
+        // Fades between parts of the mission: the change happens while the screen is black.
+        if (fade_kind != FADE_NONE) {
+            fade_t += dt;
+            if (!fade_done && fade_t >= 1.3) {
+                fade_done = 1;
+                if (fade_kind == FADE_LIFTOFF) {
+                    start_ascent(1);
+                    results_hidden = 0;
+                    show_dsky = camera != CAM_CDR;
+                } else if (fade_kind == FADE_RNDZ) {
+                    ascent_rendezvous();
+                    camera = prev_camera = CAM_DOCK;
+                    show_dsky = 0;
+                }
+            }
+            if (fade_t >= 3.8) fade_kind = FADE_NONE;
+        }
+        {   // Debugging / screenshots: AGC_DOCK=metres puts Eagle that far from Columbia, lined up.
+            static int dock_dbg;
+            const char *dd = getenv("AGC_DOCK");
+            if (dd && gs == GS_FLY && !dock_dbg) {
+                dock_dbg = 1;
+                if (!ascent_active()) start_ascent(0);
+                ascent_debug_dock(atof(dd));
+                if (getenv("AGC_DOCKCAM")) camera = prev_camera = atoi(getenv("AGC_DOCKCAM"));
+            }
+        }
+
         // ---------------- Rendering ----------------
         if (perf_on) pf1 = perf_mark();
         if (!opt.spectator && gs != GS_MENU) dsky_frame();
@@ -1285,9 +1525,10 @@ int main(int argc, char **argv)
             static float prev_jet[LM_NJETS];
             static int prev_result = LAND_NONE, prev_touch;
             SoundState ss = { 0 };
-            ss.inside = vcam == CAM_CDR || vcam == CAM_DAC || vcam == CAM_EVA;   // on the surface: the suit's own fan
+            ss.inside = vcam == CAM_CDR || vcam == CAM_DAC || vcam == CAM_EVA || vcam == CAM_DOCK;   // on the surface: the suit's own fan
             ss.running = gs == GS_FLY && !paused;
-            ss.thrust = (float)(lm.thrust / 45000.0);
+            // The ascent engine sits right behind the cabin's back wall: loud for its size.
+            ss.thrust = (float)(lm.thrust_aps ? lm.thrust / 24000.0 : lm.thrust / 45000.0);
             for (int j = 0; j < LM_NJETS; j++) {
                 ss.rcs += lm.jet_level[j];
                 if (lm.jet_level[j] > 0.3f && prev_jet[j] <= 0.3f) ss.rcs_hits++;
@@ -1346,26 +1587,26 @@ int main(int argc, char **argv)
             hud_text(font_bold, "AGC LANDER", 80, 90, 84, (Color){ 235, 235, 235, 255 });
             hud_text(font_ui, "Apollo 11 Lunar Module  -  flown by the original Luminary099 flight software on an emulated AGC",
                      84, 182, 24, (Color){ 170, 176, 186, 255 });
-            for (int i = 0; i < 4; i++) {
+            for (int i = 0; i < N_SCEN; i++) {
                 Color c = i == menu_sel ? (Color){ 255, 190, 60, 255 } : (Color){ 200, 205, 212, 255 };
                 hud_text(font_bold, scen_names[i], 100, 250 + i * 56, 30, c);
             }
             {
-                Color c4 = menu_sel == 4 ? (Color){ 255, 190, 60, 255 } : (Color){ 200, 205, 212, 255 };
-                Color c5 = menu_sel == 5 ? (Color){ 255, 190, 60, 255 } : (Color){ 200, 205, 212, 255 };
-                hud_text(font_bold, coop_host_on ? "TWO PLAYERS:  HOST  -  you are the Commander" : "TWO PLAYERS:  OFF", 100, 250 + 4 * 56 + 16, 30, c4);
+                Color c4 = menu_sel == ROW_HOST ? (Color){ 255, 190, 60, 255 } : (Color){ 200, 205, 212, 255 };
+                Color c5 = menu_sel == ROW_JOIN ? (Color){ 255, 190, 60, 255 } : (Color){ 200, 205, 212, 255 };
+                hud_text(font_bold, coop_host_on ? "TWO PLAYERS:  HOST  -  you are the Commander" : "TWO PLAYERS:  OFF", 100, 250 + ROW_HOST * 56 + 16, 30, c4);
                 char jl[128];
                 snprintf(jl, sizeof jl, "JOIN A GAME AS LM PILOT:  %s%s", join_ip[0] ? join_ip : "type the host's IP",
-                         menu_sel == 5 && ((int)(GetTime() * 2) & 1) ? "_" : "");
-                hud_text(font_bold, jl, 100, 250 + 5 * 56 + 16, 30, c5);
-                Color c6 = menu_sel == 6 ? (Color){ 255, 190, 60, 255 } : (Color){ 200, 205, 212, 255 };
-                hud_text(font_bold, hints_on ? "PLAIN-ENGLISH HINTS:  ON" : "PLAIN-ENGLISH HINTS:  OFF", 100, 250 + 6 * 56 + 32, 30, c6);
+                         menu_sel == ROW_JOIN && ((int)(GetTime() * 2) & 1) ? "_" : "");
+                hud_text(font_bold, jl, 100, 250 + ROW_JOIN * 56 + 16, 30, c5);
+                Color c6 = menu_sel == ROW_HINTS ? (Color){ 255, 190, 60, 255 } : (Color){ 200, 205, 212, 255 };
+                hud_text(font_bold, hints_on ? "PLAIN-ENGLISH HINTS:  ON" : "PLAIN-ENGLISH HINTS:  OFF", 100, 250 + ROW_HINTS * 56 + 32, 30, c6);
             }
-            const char *desc = menu_sel < 4 ? scen_desc[menu_sel]
-                             : menu_sel == 6 ? "Enter toggles. A box at the top of the screen tells you what to do next in plain words: which key, which way to lean, when to cut the engine. H toggles it in flight."
-                             : menu_sel == 4 ? "Enter toggles. With HOST on, start any scenario above: a second player can join you as LM Pilot (UDP port 47012). You fly; they run the DSKY and the panels."
-                                             : "Type the Commander's IP address (or name) and press Enter. You get the LMP station: DSKY, panels, switches. Same version of the game on both sides.";
-            hud_text(font_ui, desc, 100, 250 + 7 * 56 + 40, 21, (Color){ 160, 168, 178, 255 });
+            const char *desc = menu_sel < N_SCEN ? scen_desc[menu_sel]
+                             : menu_sel == ROW_HINTS ? "Enter toggles. A box at the top of the screen tells you what to do next in plain words: which key, which way to lean, when to cut the engine. H toggles it in flight."
+                             : menu_sel == ROW_HOST ? "Enter toggles. With HOST on, start any scenario above: a second player can join you as LM Pilot (UDP port 47012). You fly; they run the DSKY and the panels."
+                                                    : "Type the Commander's IP address (or name) and press Enter. You get the LMP station: DSKY, panels, switches. Same version of the game on both sides.";
+            hud_text(font_ui, desc, 100, 250 + N_ROWS * 56 + 40, 21, (Color){ 160, 168, 178, 255 });
 #ifdef AGC_VR
             hud_text(font_ui, "Thumbstick up/down to choose, A or the right trigger to start.", 100, h - 132, 22, (Color){ 130, 136, 146, 255 });
             hud_text(font_ui, "In flight:  right stick = hand controller   left stick = yaw, and up/down = ROD switch   A = ENGINE STOP   B = PRO",
@@ -1377,14 +1618,27 @@ int main(int argc, char **argv)
                      (Color){ 130, 136, 146, 255 });
 #endif
         } else {
-            hud_set_minimal(vcam == CAM_CDR || vcam == CAM_GLOBE || vcam == CAM_EVA);
+            hud_set_minimal(vcam == CAM_CDR || vcam == CAM_GLOBE || vcam == CAM_EVA || vcam == CAM_DOCK);
+            if (vcam == CAM_DOCK) draw_coas(scene_w, h);
             if (show_hud) hud_draw(w, h, 0, (float)warp, vcam == CAM_EVA ? "MOONWALK" : cam_names[vcam], paused);
             hints_set_cockpit(vcam == CAM_CDR);
+            hud_camera_is_docking = vcam == CAM_DOCK;
             if (show_hud && gs == GS_FLY) hints_draw(w, h, 0);
             if (gs == GS_FLY && !opt.audit) eva_overlay(scene_w, h);
             if (gs == GS_FLY && lm.land_result != LAND_NONE && !lm.dps_on && !results_hidden && eva_phase() == EVA_INSIDE &&
-                lm.t - (lm.land_result == LAND_CRASH ? lm.crash_t : lm.touchdown_t) > 3)
+                !ascent_active() && fade_kind == FADE_NONE && lm.t - (lm.land_result == LAND_CRASH ? lm.crash_t : lm.touchdown_t) > 3)
                 draw_results(scene_w, h, coop_role == COOP_CLIENT);
+            if (gs == GS_FLY && ascent_active()) {
+                ascent_overlay(scene_w, h);
+                if (fade_kind == FADE_NONE) ascent_draw_results(scene_w, h, coop_role == COOP_CLIENT);
+            }
+            if (fade_kind != FADE_NONE) {
+                float a = fade_t < 1.2 ? (float)(fade_t / 1.2) : fade_t < 2.6 ? 1.0f : (float)fmax(0, (3.8 - fade_t) / 1.2);
+                DrawRectangle(0, 0, w, h, (Color){ 0, 0, 0, (unsigned char)(255 * a) });
+                float sc = h / 1080.0f;
+                Color tc = { 230, 230, 225, (unsigned char)(255 * a) };
+                hud_text_centered(font_bold, fade_text, w / 2.0f, h / 2.0f - 20 * sc, 30 * sc, tc);
+            }
             if (vcam == CAM_CDR && gs == GS_FLY && !opt.audit) cockpit_overlay(scene_w, h);
             if (coop_role != COOP_OFF) {
                 float sc = h / 1080.0f;
@@ -1410,12 +1664,13 @@ int main(int argc, char **argv)
                     "Tab  camera (chase, cockpit, 16mm, tower, cinematic, lunar orbit)   Right-drag look/orbit",
                     "PgUp/PgDn  time warp   F5  pause   Esc  menu   F10  outside view on 2nd monitor   F11  fullscreen",
                     "F2  auto crew on/off  F3  16mm film  F4  DSKY  F6  HUD  H  plain-English hints  M  cabin sound",
-                    "F7  descent engine arm    F8  PGNS mode AUTO/ATT HOLD    Space  ENGINE STOP",
+                    "F7  engine arm (DES, or ASC after landing)  F8  PGNS mode AUTO/ATT HOLD  F9  ABORT STAGE  Space  ENGINE STOP",
                     "W/S A/D Q/E or stick/gamepad: hand controller   Up/Down, d-pad or hat: ROD switch (P66)",
                     "",
                     "The crew procedure: R51 V50N25 -> ENTER,  V50N18 -> PRO (maneuver) then ENTER,",
                     "arm the engine, V99N62 -> PRO at TIG-5 s, after radar lock key V57E,",
-                    "engine stop at the contact light.",
+                    "engine stop at the contact light.  After landing: L lifts off (P12: at V99 F9, F7, PRO).",
+                    "Docking (in orbit): T/G translate toward/away, arrows sideways, Q/E W/S A/D attitude, Tab to the COAS view",
                     "",
                     "TWO PLAYERS (co-op, UDP port 47012 on the host, both on the same version)",
                     "Host:  menu TWO PLAYERS: HOST, then start a scenario   (or agc-lander --host)",
@@ -1424,7 +1679,7 @@ int main(int argc, char **argv)
                     "LM Pilot (join): DSKY keys, panels, F7 engine arm, F8 PGNS mode, Space ENGINE STOP",
                     "The LM Pilot's stick/keys add to the Commander's.  Esc on the LM Pilot's side leaves.",
                 };
-                const int n = (int)(sizeof lines / sizeof lines[0]), coop_first = 11;
+                const int n = (int)(sizeof lines / sizeof lines[0]), coop_first = 12;
                 float hy = 140;
                 DrawRectangleRounded((Rectangle){ 60, hy - 20, 1000, n * 30 + 40 }, 0.05f, 8, (Color){ 0, 0, 0, 210 });
                 for (int i = 0; i < n; i++)
@@ -1491,6 +1746,13 @@ int main(int argc, char **argv)
         }
 #endif
 
+        if (getenv("AGC_DBGDOCK") && ((int)(wall * 2) != (int)((wall - dt) * 2))) {
+            DockGeo g;
+            if (ascent_dock_geo(&g))
+                printf("DOCK wall %.1f axial %.2f lat %+.2f %+.2f rate %+.3f drift %+.3f %+.3f angle %.2f roll %+.2f phase %d\n", wall,
+                       g.axial, g.lat_y, g.lat_z, g.rate, g.vy, g.vz, g.angle * 57.29578, g.roll * 57.29578, ascent_phase());
+            fflush(stdout);
+        }
         if (getenv("AGC_DBG") && ((int)(wall * 2) != (int)((wall - dt) * 2))) {
             int dn, ld, pd;
             terrain_stats(&dn, &ld, &pd);

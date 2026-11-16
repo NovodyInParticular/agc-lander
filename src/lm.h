@@ -26,16 +26,19 @@ typedef struct {
     V3 w;              // body rates, rad/s (NB axes: X up, Y right, Z fwd)
 
     // --- Mass -----------------------------------------------------------
-    double m_ascent;   // ascent stage incl. its propellant and RCS
+    double m_ascent;   // ascent stage dry, with the crew
+    double m_aps;      // APS (ascent engine) propellant remaining
     double m_desc_dry;
     double m_dps;      // DPS propellant remaining
     double m_rcs;      // RCS propellant remaining
 
-    // --- DPS -------------------------------------------------------------
-    int engine_armed;       // crew switch
-    int dps_on;             // engine running
+    // --- Engines -----------------------------------------------------------
+    int engine_armed;       // ENG ARM switch: 0 off, ARM_DES, ARM_ASC
+    int dps_on;             // descent engine running
+    int aps_on;             // ascent engine running
     double thr_bits;        // throttle command integrator (12.53 N/bit)
-    double thrust;          // actual thrust, N (lagged)
+    double thrust;          // actual thrust of the running engine, N (lagged)
+    int thrust_aps;         // 1: lm.thrust is the ascent engine's
     double gimbal[2];       // trim gimbal pitch (about Y), roll (about Z), rad
     double flame_time;      // time since ignition, s (for visuals)
 
@@ -75,6 +78,18 @@ typedef struct {
     double crash_speed;     // impact speed, m/s
     double collapse[4];     // footpad strut crush, m (crash damage)
 
+    // --- Staging -----------------------------------------------------------
+    int abort_stage;        // ABORT STAGE pushed: separation pyros fired
+    int staged;             // the ascent stage flies alone
+    V3 cg;                  // centre of mass in model axes (0 until staging)
+    int ds_landed;          // the descent stage left behind rests on the ground
+    V3 ds_fixed;            // ... its model origin, moon-fixed
+    M3 ds_fixed_rot;        // ... moon-fixed from its body axes
+    V3 ds_r, ds_v;          // ... falling (abort in flight): inertial state
+    Q4 ds_q;
+    int liftoff;            // the ascent stage has left the descent stage
+    double liftoff_t;
+
     // --- Derived, for displays ---------------------------------------------
     V3 accel_ng;            // non-gravitational acceleration, inertial, m/s^2
     double altitude;        // above local terrain, m
@@ -84,6 +99,7 @@ typedef struct {
 
 extern Lm lm;
 
+enum { ARM_OFF, ARM_DES, ARM_ASC };
 enum { LAND_NONE, LAND_GOOD, LAND_HARD, LAND_CRASH };
 enum { CRASH_NONE, CRASH_VERTICAL, CRASH_SIDEWAYS, CRASH_TILT, CRASH_TOPPLED };
 
@@ -131,7 +147,13 @@ double lm_surface_radius_below(void);
 
 // Crew controls.
 void lm_set_attitude_mode(int mode);   // 0 = off, 1 = attitude hold, 2 = auto
-void lm_set_engine_arm(int armed);
+void lm_set_engine_arm(int armed);     // ARM_OFF / ARM_DES / ARM_ASC
+void lm_abort_stage(void);             // ABORT STAGE: fire the stage separation pyros
+void lm_engine_stop_reset(void);       // pull the ENGINE STOP button back out
+// The LM stands on the surface (scenario start): no touchdown grading.
+void lm_set_landed(void);
+// Descent stage left behind: model origin and rotation in the moon-fixed frame.
+void lm_descent_stage_pose(V3 *fixed, M3 *fixed_from_body);
 void lm_engine_stop(void);             // DPS stop button (latched)
 void lm_rod_click(int direction);      // P66 rate-of-descent switch: +1 up / -1 down
 void lm_set_thc(int axis, int dir);    // translation: axis 0..2 (X,Y,Z), dir -1/0/+1

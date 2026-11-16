@@ -10,6 +10,7 @@
 #include "raylib.h"
 
 #include "agc_host.h"
+#include "ascent.h"
 #include "cockpit.h"
 #include "crew.h"
 #include "eva.h"
@@ -146,9 +147,98 @@ static void flying_hints(Hint *h)
     if (down > LAND_CRASH_V * 0.8 && alt < 20) h->urgent = 1;
 }
 
+int hud_camera_is_docking;
+
+// Docking: one thing at a time, the most urgent first. Keys as seen through
+// the docking window (Tab): arrows slide, T/G close/open, Q/E turn about the
+// docking axis, W/S and A/D tilt.
+static void docking_hints(Hint *h)
+{
+    DockGeo g;
+    if (!ascent_dock_geo(&g)) return;
+    double drift_r = -g.vy, drift_u = g.vz;           // screen right / up
+    double off_r = -g.lat_y, off_u = g.lat_z;
+    double closing = -g.rate;
+    if (fabs(drift_r) > 0.05 || fabs(drift_u) > 0.05) {
+        if (fabs(drift_r) >= fabs(drift_u))
+            add(h, "Columbia is drifting %s (%.2f m/s): tap the %s arrow to stop it", drift_r > 0 ? "right" : "left",
+                fabs(drift_r), drift_r > 0 ? "Right" : "Left");
+        else
+            add(h, "Columbia is drifting %s (%.2f m/s): tap the %s arrow to stop it", drift_u > 0 ? "up" : "down",
+                fabs(drift_u), drift_u > 0 ? "Up" : "Down");
+        return;
+    }
+    if (fabs(g.roll) > 4 * DEG2RAD) {
+        add(h, "Roll %.0f deg off: hold %s to turn until the target's cross is square in the sight", fabs(g.roll) * RAD2DEG,
+            g.roll > 0 ? "Q" : "E");
+        return;
+    }
+    if (g.angle > 3 * DEG2RAD) {
+        add(h, "Axes %.1f deg apart: tilt with W/S and A/D until the standoff cross sits in the middle of its disc",
+            g.angle * RAD2DEG);
+        return;
+    }
+    if (fabs(off_r) > 0.12 || fabs(off_u) > 0.12) {
+        if (fabs(off_r) >= fabs(off_u))
+            add(h, "The probe is %.1f m %s of the drogue: tap the %s arrow, then stop the drift", fabs(off_r),
+                off_r > 0 ? "right" : "left", off_r > 0 ? "Right" : "Left");
+        else
+            add(h, "The probe is %.1f m %s of the drogue: tap the %s arrow, then stop the drift", fabs(off_u),
+                off_u > 0 ? "above" : "below", off_u > 0 ? "Up" : "Down");
+        return;
+    }
+    if (g.axial > 2 && closing > 0.35) { add(h, "Closing at %.2f m/s: too fast. Tap G to slow to 0.1-0.3", closing); h->urgent = g.axial < 8; return; }
+    if (g.axial > 1 && closing < 0.04) { add(h, "Lined up. Tap T to close in at about 0.1-0.3 m/s (RATE about -0.2)"); return; }
+    add(h, "On the way in at %.2f m/s, %.0f m to go: keep the target centred", closing, fmax(0, g.axial));
+}
+
+static void ascent_hints(Hint *h)
+{
+    int ph = ascent_phase();
+    if (ph == MP_COUNTDOWN) {
+        if (crew.auto_crew) { add(h, "The auto crew will light the ascent engine at V99 (F2 to do it yourself)"); return; }
+        switch (crew.hint) {
+        case HINT_ASC_STAGE:
+            add(h, "Lift-off! First press F9 (ABORT STAGE): it fires the bolts holding");
+            add(h, "the ascent stage to the descent stage, which stays on the Moon");
+            h->urgent = 1;
+            return;
+        case HINT_ASC_ARM:
+            add(h, "Now press F7 to arm the ascent engine (ENG ARM: ASC)");
+            h->urgent = 1;
+            return;
+        case HINT_ASC_PRO:
+            add(h, "Press P (PRO): the computer lights the ascent engine");
+            h->urgent = 1;
+            return;
+        default:
+            add(h, "Countdown to lift-off: the DSKY's top number is minutes and seconds to go.");
+            add(h, "When it flashes V99: F9 (ABORT STAGE), F7 (arm), then P (PRO)");
+            return;
+        }
+    }
+    if (ph == MP_ASCENT) {
+        if (lm.aps_on && !lm.staged) {
+            add(h, "The ascent engine is firing into the descent stage - you're still bolted to it!");
+            add(h, "Press F9 (ABORT STAGE) now");
+            h->urgent = 1;
+            return;
+        }
+        add(h, "P12 is flying you to orbit: straight up, then the pitch-over. Nothing to do.");
+        add(h, "It shuts the engine off at 5,500 ft/s. PgUp speeds up time");
+        return;
+    }
+    if (ph == MP_ORBIT) { add(h, "In orbit, trailing Columbia. Press Enter to skip the 3 1/2-hour rendezvous"); return; }
+    if (ph == MP_PROX) {
+        docking_hints(h);
+        if (h->n && hud_camera_is_docking == 0) add(h, "Tab to the DOCKING WINDOW view: the target sits in the COAS sight");
+    }
+}
+
 static void compute(Hint *h)
 {
     memset(h, 0, sizeof *h);
+    if (ascent_active()) { ascent_hints(h); return; }
     if (lm.land_result == LAND_CRASH) return;   // the results panel takes over
     if (lm.touchdown) {
         if (lm.dps_on) { add(h, "You're on the ground: press SPACE to shut the engine off"); h->urgent = 1; }
@@ -264,7 +354,18 @@ int hints_target(HintTarget *t)
         if (!strcmp(force, "roddown")) return target(t, HT_ROD_DOWN, "CLICK DOWN: FASTER");
         return key_target(t, force[0], "PRESS THIS KEY");
     }
-    if (!hints_on || lm.land_result == LAND_CRASH) return 0;
+    if (!hints_on) return 0;
+    if (ascent_active()) {
+        if (crew.auto_crew) return 0;
+        if (lm.aps_on && !lm.staged) return target(t, HT_ABORT_STAGE, "PUSH NOW: ABORT STAGE");
+        switch (crew.hint) {
+        case HINT_ASC_STAGE: return target(t, HT_ABORT_STAGE, "PUSH: ABORT STAGE");
+        case HINT_ASC_ARM: return target(t, HT_ENG_ARM_ASC, "FLIP UP: ASC");
+        case HINT_ASC_PRO: return key_target(t, 'P', "PRESS PRO");
+        }
+        return 0;
+    }
+    if (lm.land_result == LAND_CRASH) return 0;
     if (lm.touchdown) return lm.dps_on ? target(t, HT_ENGINE_STOP, "PUSH: ENGINE STOP") : 0;
     if (lm.probe_contact && lm.dps_on) return target(t, HT_ENGINE_STOP, "PUSH NOW: ENGINE STOP");
 

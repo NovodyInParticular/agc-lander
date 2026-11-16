@@ -43,7 +43,7 @@ static float my_rhc[3];
 static unsigned applied;
 static float peer_rhc[3];
 
-#define PROTO_VERSION 2   // 2: landing result + hints in StatePkt
+#define PROTO_VERSION 3   // 2: landing result + hints in StatePkt; 3: ascent and docking
 
 int coop_start_host(void)
 {
@@ -147,7 +147,8 @@ static void apply(const Cmd *c)
     case CMD_ENGARM: lm_set_engine_arm(c->a); break;
     case CMD_ATTMODE: lm_set_attitude_mode(c->a); break;
     case CMD_ROD: lm_rod_click(c->a); break;
-    case CMD_STOP: lm_engine_stop(); break;
+    case CMD_STOP: if (c->a) lm_engine_stop_reset(); else lm_engine_stop(); break;
+    case CMD_STAGE: lm_abort_stage(); break;
     case CMD_THC: lm_set_thc(c->a, c->b); break;
     }
 }

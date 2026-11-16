@@ -18,4 +18,10 @@ extern ScenarioInfo scenario_info;
 // vector, REFSMMAT, landing site, IMU aligned, P00 running.
 void scenario_pre_pdi(void);
 
+// Apollo 11 on the surface one minute before lift-off: P12 counting down to
+// ignition, the CSM state vector in the LGC (which also places our CSM).
+// keep_pose: leave the LM where it stands (after the player's own landing);
+// otherwise it is put down at the LGC's landing site. lm.surface must be set.
+void scenario_liftoff(int keep_pose);
+
 #endif
