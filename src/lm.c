@@ -848,3 +848,36 @@ double lab_lr_debug(V3 *hb_nb)
     V3 hi = lm_body_to_inertial(*hb_nb);
     return acos(-v3_dot(hi, v3_norm(lm.r))) * 180.0 / PI_D;
 }
+
+// --- Save states ---------------------------------------------------------------------
+
+#include "snapshot.h"
+
+void lm_snap(Snap *s)
+{
+    // Everything in Lm except the surface callback (attached by the program).
+    snap_f64(s, &lm.t); snap_f64(s, &lm.tephem);
+    snap_v3(s, &lm.r); snap_v3(s, &lm.v); snap_q4(s, &lm.q); snap_v3(s, &lm.w);
+    snap_f64(s, &lm.m_ascent); snap_f64(s, &lm.m_aps); snap_f64(s, &lm.m_desc_dry); snap_f64(s, &lm.m_dps); snap_f64(s, &lm.m_rcs);
+    snap_int(s, &lm.engine_armed); snap_int(s, &lm.dps_on); snap_int(s, &lm.aps_on);
+    snap_f64(s, &lm.thr_bits); snap_f64(s, &lm.thrust); snap_int(s, &lm.thrust_aps);
+    snap_f64v(s, lm.gimbal, 2); snap_f64(s, &lm.flame_time);
+    snap_uint(s, &lm.ch5); snap_uint(s, &lm.ch6); snap_f32v(s, lm.jet_level, LM_NJETS);
+    snap_q4(s, &lm.q_sm); snap_intv(s, lm.cdu_sent, 3); snap_v3(s, &lm.pipa_residual);
+    snap_f64v(s, lm.needle, 3); snap_f64(s, &lm.thrust_dinc_acc);
+    snap_int(s, &lm.lr_pos); snap_f64(s, &lm.lr_move); snap_f64(s, &lm.lr_range); snap_f64(s, &lm.lr_alt);
+    snap_v3(s, &lm.lr_vel_ant); snap_int(s, &lm.lr_range_good); snap_int(s, &lm.lr_vel_good); snap_int(s, &lm.lr_low_scale);
+    snap_int(s, &lm.probe_contact); snap_int(s, &lm.touchdown);
+    snap_f64(s, &lm.touchdown_speed); snap_f64(s, &lm.touchdown_hspeed); snap_f64(s, &lm.touchdown_tilt);
+    snap_f64(s, &lm.touchdown_fuel); snap_f64(s, &lm.touchdown_t);
+    snap_int(s, &lm.land_result); snap_int(s, &lm.crash_cause); snap_f64(s, &lm.crash_t); snap_f64(s, &lm.crash_speed);
+    snap_f64v(s, lm.collapse, 4);
+    snap_int(s, &lm.abort_stage); snap_int(s, &lm.staged); snap_v3(s, &lm.cg);
+    snap_int(s, &lm.ds_landed); snap_v3(s, &lm.ds_fixed); snap_m3(s, &lm.ds_fixed_rot);
+    snap_v3(s, &lm.ds_r); snap_v3(s, &lm.ds_v); snap_q4(s, &lm.ds_q);
+    snap_int(s, &lm.liftoff); snap_f64(s, &lm.liftoff_t);
+    snap_v3(s, &lm.accel_ng); snap_f64(s, &lm.altitude); snap_f64(s, &lm.hdot); snap_f64(s, &lm.hspeed);
+    // This file's own state.
+    snap_int(s, &rod_pending); snap_f64(s, &rod_hold); snap_int(s, &engine_stop_latched); snap_int(s, &pad_hit);
+    snap_int(s, &att_mode_cur); snap_f64(s, &radar_timer);
+}

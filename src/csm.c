@@ -5,6 +5,7 @@
 #include "moon.h"
 
 Csm csm;
+static double track_acc;   // seconds since the tracking attitude was last updated
 
 void csm_reset(void)
 {
@@ -45,10 +46,9 @@ void csm_step(double dt, V3 lm_r)
         csm.q = q4_normalize(q4_mul(csm.q, q4_from_rotvec(v3_scale(csm.w, dt))));
     } else {
         // Tracking: the probe follows the LM, the crew window (+Z) away from the Moon.
-        static double acc;
-        acc += dt;
-        if (acc >= 0.05) {
-            acc = 0;
+        track_acc += dt;
+        if (track_acc >= 0.05) {
+            track_acc = 0;
             csm_point_at(lm_r, v3_norm(csm.r));
         }
     }
@@ -73,4 +73,16 @@ void csm_propagate(V3 *r, V3 *v, double dt)
         *v = v3_add(v0, v3_scale(v3_add(v3_add(k1v, v3_scale(k2v, 2)), v3_add(v3_scale(k3v, 2), k4v)), s / 6));
         left -= s;
     }
+}
+
+// --- Save states ---------------------------------------------------------------------
+
+#include "snapshot.h"
+
+void csm_snap(Snap *s)
+{
+    snap_int(s, &csm.valid);
+    snap_v3(s, &csm.r); snap_v3(s, &csm.v); snap_q4(s, &csm.q); snap_v3(s, &csm.w);
+    snap_int(s, &csm.hold); snap_int(s, &csm.docked);
+    snap_f64(s, &track_acc);
 }

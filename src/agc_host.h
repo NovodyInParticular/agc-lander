@@ -77,6 +77,8 @@ enum {
 };
 void agc_host_pulse(int counter, int count, int kind);
 int agc_host_pending(int counter);
+// Keystrokes queued for the AGC but not yet delivered.
+int agc_host_keys_queued(void);
 
 // Rotational hand controller (ACA), -1..1 per axis (pitch=Q, yaw=P, roll=R).
 void agc_host_set_rhc(double pitch, double yaw, double roll);
@@ -86,5 +88,8 @@ void agc_host_set_input_bits(int channel, int mask, int value);
 
 // Convert a 5-bit DSKY digit code to '0'..'9', or ' ' for blank, '?' for other.
 char agc_digit_char(uint8_t code);
+
+// CRC-32 of the rope image the AGC runs (save states must match it).
+uint32_t agc_host_rope_crc(void);
 
 #endif

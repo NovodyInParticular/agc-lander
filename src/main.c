@@ -55,6 +55,8 @@ static double perf_mark(void) { if (perf_on) { rlDrawRenderBatchActive(); if (!p
 #include "render.h"
 #include "rocks.h"
 #include "scenario.h"
+#include "sim.h"
+#include "snapshot.h"
 #include "terrain.h"
 
 V3 lm_jet_position(int j);
@@ -174,17 +176,6 @@ static V3 local_up_at(V3 site)
     return v3_norm(v3_add(site, v3(0, r0, 0)));
 }
 
-static void sim_advance(double seconds)
-{
-    // Run in 0.1 s slices so the crew can react between them.
-    while (seconds > 1e-9) {
-        double s = seconds > 0.1 ? 0.1 : seconds;
-        lm_run(s);
-        crew_step();
-        ascent_step(s);
-        seconds -= s;
-    }
-}
 
 static void start_world(void)
 {

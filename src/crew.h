@@ -28,6 +28,8 @@ void crew_step(void);
 
 // Type keys into the DSKY: V N E R C K + - P(press) p(release) 0-9, space = wait 1 s.
 void crew_type(const char *keys);
+// The crew is part-way through a DSKY entry (keys left to press or PRO held).
+int crew_typing(void);
 
 void crew_say(const char *text);
 

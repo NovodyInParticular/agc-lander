@@ -451,9 +451,10 @@ void ascent_hide_results(int hide) { hidden = hide; }
 int ascent_results_hidden(void) { return hidden; }
 
 // Record the insertion numbers once, when the engine cuts off.
+static int ins_prev_aps;   // at file scope for save states
 static void note_insertion(void)
 {
-    static int prev_aps;
+#define prev_aps ins_prev_aps
     if (!active) { prev_aps = 0; return; }
     if (lm.aps_on && !ins.t_lift) ins.t_lift = lm.t;
     if (prev_aps && !lm.aps_on && lm.liftoff && !ins.have) {
@@ -464,6 +465,7 @@ static void note_insertion(void)
         ins.have = 1;
     }
     prev_aps = lm.aps_on;
+#undef prev_aps
 }
 
 const AscentStats *ascent_stats(void)
@@ -489,4 +491,22 @@ const AscentStats *ascent_stats(void)
     st.msg_t = dk.msg_t;
     snprintf(st.fail, sizeof st.fail, "%s", dk.fail);
     return &st;
+}
+
+// --- Save states ---------------------------------------------------------------------
+
+#include "snapshot.h"
+
+void ascent_snap(Snap *s)
+{
+    snap_int(s, &active); snap_int(s, &phase_override); snap_int(s, &hidden); snap_int(s, &mirrored);
+    snap_int(s, &dap_step); snap_f64(s, &dap_wait);
+    snap_int(s, &dk.state); snap_f64(s, &dk.t_capture); snap_f64(s, &dk.t_start); snap_f64(s, &dk.prev_axial);
+    snap_f64(s, &dk.cooldown); snap_int(s, &dk.bounces); snap_chars(s, dk.msg, sizeof dk.msg); snap_f64(s, &dk.msg_t);
+    snap_v3(s, &dk.p_rel0); snap_v3(s, &dk.p_rel1); snap_q4(s, &dk.q_rel);
+    snap_f64(s, &dk.c_speed); snap_f64(s, &dk.c_radial); snap_f64(s, &dk.c_angle); snap_f64(s, &dk.c_roll); snap_f64(s, &dk.c_rcs);
+    snap_f64(s, &dk.rcs_start); snap_chars(s, dk.fail, sizeof dk.fail);
+    snap_f64(s, &ins.t_lift); snap_f64(s, &ins.t_cut); snap_f64(s, &ins.peri); snap_f64(s, &ins.apo);
+    snap_f64(s, &ins.aps_left); snap_f64(s, &ins.rcs_left); snap_int(s, &ins.have);
+    snap_int(s, &ins_prev_aps);
 }

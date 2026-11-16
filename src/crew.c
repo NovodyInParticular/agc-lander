@@ -19,6 +19,9 @@ static double last_step_t;
 static int v50n18_count, v57_done, stopped, armed_said, ign_said, lr_said, p64_said, p65_said, p66_said,
            flat_said, thr_said, low_said, prev_dps, prog_alarm_said, contact_said;
 static int asc_count_said, asc_lift_said, asc_pitch_said, asc_quiet_said, asc_cut_said, prev_aps;
+static double next_action;   // the automatic crew's next allowed action (sim time)
+
+int crew_typing(void) { return keypos < keylen || pro_held; }
 
 void crew_reset(void)
 {
@@ -202,7 +205,6 @@ void crew_step(void)
 
     // ---- Automatic crew ------------------------------------------------------------
     // After each action, give Luminary time to respond before acting again.
-    static double next_action;
     if (lm.t < next_action - 100) next_action = 0;   // new run
     if (keypos < keylen || pro_held || lm.t < next_action) return;
     int acted = 1;
@@ -248,4 +250,22 @@ void crew_step(void)
         lm_set_attitude_mode(0);   // PGNS mode control OFF: stop the DAP fighting the ground
         crew_say("\"Houston, Tranquility Base here. The Eagle has landed.\"");
     }
+}
+
+// --- Save states ---------------------------------------------------------------------
+
+#include "snapshot.h"
+
+void crew_snap(Snap *s)
+{
+    snap_int(s, &crew.auto_crew); snap_int(s, &crew.auto_land);
+    snap_chars(s, crew.prompt, sizeof crew.prompt); snap_chars(s, crew.callout, sizeof crew.callout);
+    snap_f64(s, &crew.callout_time); snap_int(s, &crew.landed); snap_int(s, &crew.hint);
+    snap_int(s, &crew.in_orbit); snap_int(s, &crew.outside);
+    snap_chars(s, keybuf, sizeof keybuf); snap_int(s, &keypos); snap_int(s, &keylen);
+    snap_f64(s, &key_wait); snap_int(s, &pro_held); snap_f64(s, &last_step_t); snap_f64(s, &next_action);
+    int *flags[] = { &v50n18_count, &v57_done, &stopped, &armed_said, &ign_said, &lr_said, &p64_said, &p65_said, &p66_said,
+                     &flat_said, &thr_said, &low_said, &prev_dps, &prog_alarm_said, &contact_said,
+                     &asc_count_said, &asc_lift_said, &asc_pitch_said, &asc_quiet_said, &asc_cut_said, &prev_aps };
+    for (size_t i = 0; i < sizeof flags / sizeof flags[0]; i++) snap_int(s, flags[i]);
 }

@@ -41,6 +41,8 @@ static int pend_total;
 
 static void (*out_hook)(int channel, int value);
 
+int agc_host_keys_queued(void) { return (evq_tail - evq_head + EVQ_SIZE) % EVQ_SIZE; }
+
 static void evq_push(int type, int value)
 {
     int next = (evq_tail + 1) % EVQ_SIZE;
@@ -330,3 +332,80 @@ void agc_host_set_input_bits(int channel, int mask, int value)
 
 // Debug access to the raw CPU state.
 agc_t *agc_host_state(void) { return &agc; }
+
+// --- Save states ------------------------------------------------------------------
+
+#include "snapshot.h"
+
+void agc_engine_hidden_io(void (*io)(void *ctx, void *var, int bytes), void *ctx);
+
+uint32_t agc_host_rope_crc(void)
+{
+    static uint32_t crc;
+    if (!crc) crc = snap_crc32(rope_image, rope_image_len, 0);
+    return crc;
+}
+
+static void hidden_io(void *ctx, void *var, int bytes)
+{
+    if (bytes == 8) snap_u64((Snap *)ctx, (uint64_t *)var);
+    else snap_u32((Snap *)ctx, (uint32_t *)var);
+}
+
+// One bitfield of agc_t, widened to a byte.
+#define BITF(f) do { uint8_t t_ = s->mode == SNAP_SAVE ? (uint8_t)agc.f : 0; snap_u8(s, &t_); if (s->mode == SNAP_LOAD) agc.f = t_; } while (0)
+
+void agc_host_snap(Snap *s)
+{
+    // The core (agc_t). Not saved: Fixed[] and Parities[] (the rope, reloaded
+    // and checked by its CRC), agc_clientdata (a pointer).
+    snap_u64(s, (uint64_t *)&agc.CycleCounter);
+    for (int b = 0; b < 8; b++) snap_i16v(s, agc.Erasable[b], 0400);
+    snap_i16v(s, agc.InputChannel, NUM_CHANNELS);
+    snap_i16(s, &agc.OutputChannel7);
+    snap_i16v(s, agc.OutputChannel10, 16);
+    snap_i16(s, &agc.IndexValue);
+    for (int i = 0; i < 1 + NUM_INTERRUPT_TYPES; i++) snap_i8(s, &agc.InterruptRequests[i]);
+    BITF(ExtraCode); BITF(AllowInterrupt); BITF(InIsr); BITF(SubstituteInstruction); BITF(PendFlag);
+    BITF(PendDelay); BITF(ExtraDelay); BITF(DownruptTimeValid); BITF(NightWatchman); BITF(NightWatchmanTripped);
+    BITF(RuptLock); BITF(NoRupt); BITF(TCTrap); BITF(NoTC); BITF(Standby); BITF(SbyPressed); BITF(SbyStillPressed);
+    BITF(ParityFail); BITF(CheckParity); BITF(RestartLight); BITF(TookBZF); BITF(TookBZMF); BITF(GeneratedWarning);
+    BITF(Trap31A); BITF(Trap31B); BITF(Trap32); BITF(RadarGateCounter);
+    snap_u32(s, &agc.WarningFilter);
+    snap_u64(s, (uint64_t *)&agc.DownruptTime);
+    snap_int(s, &agc.Downlink);
+    snap_int(s, &agc.NextZ);
+    snap_int(s, &agc.ScalerCounter);
+    snap_int(s, &agc.ChannelRoutineCount);
+    snap_uint(s, &agc.DskyTimer);
+    snap_uint(s, &agc.DskyFlash);
+    snap_uint(s, &agc.DskyChannel163);
+
+    // The engine's own counters outside agc_t.
+    agc_engine_hidden_io(hidden_io, s);
+
+    // This host: latched outputs, the DSKY as decoded, time owed to the core,
+    // keystrokes and counter pulses not yet delivered, the hand controller.
+    snap_u16v(s, out.relay, 16);
+    snap_u16v(s, out.ch, 0200);
+    for (int i = 0; i < 2; i++) { snap_u8(s, &dsky.prog[i]); snap_u8(s, &dsky.verb[i]); snap_u8(s, &dsky.noun[i]); }
+    for (int r = 0; r < 3; r++) for (int i = 0; i < 5; i++) snap_u8(s, &dsky.reg[r][i]);
+    for (int i = 0; i < 3; i++) snap_u8(s, &dsky.sign[i]);
+    int *lamps[] = { &dsky.comp_acty, &dsky.uplink_acty, &dsky.temp, &dsky.no_att, &dsky.gimbal_lock, &dsky.stby, &dsky.prog_lamp,
+                     &dsky.key_rel, &dsky.restart, &dsky.opr_err, &dsky.tracker, &dsky.prio_disp, &dsky.alt, &dsky.no_dap, &dsky.vel,
+                     &dsky.vn_flash_off };
+    for (size_t i = 0; i < sizeof lamps / sizeof lamps[0]; i++) snap_int(s, lamps[i]);
+    snap_f64(s, &mct_debt);
+    snap_u64(s, &mct_count);
+    for (int i = 0; i < EVQ_SIZE; i++) { snap_int(s, &evq[i].type); snap_int(s, &evq[i].value); }
+    snap_int(s, &evq_head);
+    snap_int(s, &evq_tail);
+    snap_uint(s, &evq_cooldown);
+    snap_intv(s, pend, 0200);
+    snap_chars(s, (char *)pend_kind, 0200);
+    snap_int(s, &pend_scan);
+    snap_int(s, &pend_total);
+    snap_i16(s, &rhc_pitch);
+    snap_i16(s, &rhc_yaw);
+    snap_i16(s, &rhc_roll);
+}

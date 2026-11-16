@@ -1,10 +1,18 @@
 // Headless check that Luminary099 boots and drives the DSKY.
 // Exit status 0 = all checks passed.
 
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "agc_engine.h"
 #include "agc_host.h"
+#include "crew.h"
+#include "lm.h"
+#include "scenario.h"
+#include "sim.h"
+#include "snapshot.h"
 
 static void type(const char *s)
 {
@@ -67,6 +75,116 @@ static int verb_noun_is(const char *vn)
            agc_digit_char(d->noun[0]) == vn[2] && agc_digit_char(d->noun[1]) == vn[3];
 }
 
+// Save states must resume exactly: snapshot mid-P63 (auto crew, engine
+// burning), run 60 s, snapshot again; then wipe the world, restore the first
+// snapshot, run the same 60 s and compare the two results byte for byte. Any
+// piece of state the snapshot misses makes them differ.
+static void first_difference(const uint8_t *a, const uint8_t *b, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        if (a[i] != b[i]) {
+            // Walk the sections to name the one that differs.
+            size_t p = 4 * 4 + 40 + 4 + 8 + 4;
+            while (p + 12 <= n) {
+                uint32_t len = a[p + 8] | a[p + 9] << 8 | a[p + 10] << 16 | (uint32_t)a[p + 11] << 24;
+                if (i < p + 12 + len) {
+                    printf("    first difference at byte %zu: section %.4s, offset %zu\n", i, (const char *)a + p, i - p - 12);
+                    return;
+                }
+                p += 12 + len;
+            }
+            printf("    first difference at byte %zu (header)\n", i);
+            return;
+        }
+}
+
+// Wipe as much as possible: another LGC (the lift-off one), another crew
+// state, an odd amount of time run, so anything the snapshot leaves out keeps
+// a value unlike the original's.
+agc_t *agc_host_state(void);
+void agc_engine_hidden_io(void (*io)(void *ctx, void *var, int bytes), void *ctx);
+
+static void poison_io(void *ctx, void *var, int bytes)
+{
+    (void)ctx;
+    if (bytes == 8) *(uint64_t *)var = 3;
+    else *(uint32_t *)var = 3;
+}
+
+static void wipe(void)
+{
+    crew_reset();
+    crew.auto_crew = 0;
+    scenario_liftoff(0);
+    crew_type("V16N36E");
+    sim_advance(7.3137);
+    // Junk where an incomplete restore would leave it: every erasable word,
+    // the engine's hidden counters, counter pulses and a keystroke in flight.
+    agc_t *a = agc_host_state();
+    for (int bank = 0; bank < 8; bank++)
+        for (int i = 0; i < 0400; i++) a->Erasable[bank][i] ^= 012345;
+    agc_engine_hidden_io(poison_io, NULL);
+    for (int k = 0; k < 3; k++) agc_host_pulse(RegCDUX + k, 40 + k, AGC_PULSE_CDU_FAST);
+    agc_host_pulse(RegPIPAX, 7, AGC_PULSE_PINC);
+    agc_host_key(KEY_AGC_CLR);
+    agc_host_set_rhc(0.4, -0.3, 0.2);
+}
+
+// Snapshot now, run 60 s; wipe, restore, run the same 60 s; compare.
+static void round_trip(const char *where)
+{
+    uint8_t *s0, *x1, *x2;
+    size_t n0 = snapshot_save(&s0, where, -1);
+    sim_advance(60.0);
+    size_t n1 = snapshot_save(&x1, "after 60 s", -1);
+    wipe();
+    char err[200];
+    int rc = snapshot_load(s0, n0, NULL, err, sizeof err);
+    if (rc) printf("    load failed: %s\n", err);
+    sim_advance(60.0);
+    size_t n2 = snapshot_save(&x2, "after 60 s", -1);
+    int same = rc == 0 && n1 == n2 && memcmp(x1, x2, n1) == 0;
+    if (rc == 0 && !same && n1 == n2) first_difference(x1, x2, n1);
+    printf("    %s: snapshot %zu bytes, after 60 s: %s\n", where, n0, same ? "identical" : "DIFFERENT");
+    char what[160];
+    snprintf(what, sizeof what, "%s: restore + 60 s matches the original run bit for bit", where);
+    check(same, what);
+    // A snapshot from another rope is refused.
+    s0[12] ^= 1;
+    if (!strcmp(where, "mid-P63")) check(snapshot_load(s0, n0, NULL, err, sizeof err) != 0, "a snapshot from another rope is refused");
+    free(s0);
+    free(x1);
+    free(x2);
+}
+
+static void save_state_test(void)
+{
+    printf("save states (automatic crew, from 15 min before PDI):\n");
+    // 1. While the crew is keying something in: keys queued, mid-entry.
+    crew_reset();
+    crew.auto_crew = 1;
+    scenario_pre_pdi();
+    double t0 = lm.t;
+    while (lm.t - t0 < 900 && !(crew_typing() && agc_host_keys_queued() > 0)) sim_advance(0.0173);
+    check(crew_typing(), "caught the crew part-way through a DSKY entry");
+    round_trip("crew typing");
+
+    // 2. Mid-P63, the descent engine burning, at an odd time.
+    crew_reset();
+    crew.auto_crew = 1;
+    scenario_pre_pdi();
+    t0 = lm.t;
+    double tig = 0;
+    while (lm.t - t0 < 2400) {
+        sim_advance(1.0);
+        if (lm.dps_on && tig == 0) tig = lm.t;
+        if (tig > 0 && lm.t - tig > 200) break;
+    }
+    check(tig > 0, "the descent engine lit (P63 under way)");
+    sim_advance(0.4567);
+    round_trip("mid-P63");
+}
+
 int main(void)
 {
     if (agc_host_init() != 0) {
@@ -103,6 +221,8 @@ int main(void)
     show("RSET:");
     const DskyState *d = agc_host_dsky();
     check(!d->restart && !d->prog_lamp, "RSET clears RESTART and PROG lamps");
+
+    save_state_test();
 
     printf("%s (%d failure%s)\n", fails ? "FAILED" : "ALL PASSED", fails, fails == 1 ? "" : "s");
     return fails ? 1 : 0;

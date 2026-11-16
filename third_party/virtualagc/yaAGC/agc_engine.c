@@ -1626,10 +1626,12 @@ UnprogrammedIncrement (agc_t *State, int Counter, int IncType)
 // Function handles the coarse-alignment output pulses for one IMU CDU drive axis.  
 // It returns non-0 if a non-zero count remains on the axis, 0 otherwise.
 
+// AGC Lander: at file scope (was function-local) so save states can reach it.
+static int CountCDUX = 0, CountCDUY = 0, CountCDUZ = 0; // In target CPU format.
+
 static int
 BurstOutput (agc_t *State, int DriveBitMask, int CounterRegister, int Channel)
 {
-  static int CountCDUX = 0, CountCDUY = 0, CountCDUZ = 0; // In target CPU format.
   int DriveCount = 0, DriveBit, Direction = 0, Delta, DriveCountSaved;
   if (CounterRegister == RegCDUXCMD)
     DriveCountSaved = CountCDUX;
@@ -3517,3 +3519,33 @@ agc_engine (agc_t * State)
   return (0);
 }
 
+
+//----------------------------------------------------------------------------
+// AGC Lander: the engine's state that lives outside agc_t (CDU counter FIFOs,
+// gyro-torquing and IMU CDU drive accumulators, coarse-align counts), handed
+// one variable at a time to a save-state serialiser. `io` is called with each
+// variable's address and size in bytes (4 or 8); it reads or writes it.
+void
+agc_engine_hidden_io (void (*io) (void *ctx, void *var, int bytes), void *ctx)
+{
+  int i, j;
+  io (ctx, &TrapPIPA, 4);
+  for (i = 0; i < NUM_CDU_FIFOS; i++)
+    {
+      io (ctx, &CduFifos[i].Ptr, 4);
+      io (ctx, &CduFifos[i].Size, 4);
+      io (ctx, &CduFifos[i].IntervalType, 4);
+      io (ctx, &CduFifos[i].NextUpdate, 8);
+      for (j = 0; j < MAX_CDU_FIFO_ENTRIES; j++)
+        io (ctx, &CduFifos[i].Counts[j], 4);
+    }
+  io (ctx, &CduChecker, 4);
+  io (ctx, &GyroCount, 4);
+  io (ctx, &OldChannel14, 4);
+  io (ctx, &GyroTimer, 4);
+  io (ctx, &ImuCduCount, 8);
+  io (ctx, &ImuChannel14, 4);
+  io (ctx, &CountCDUX, 4);
+  io (ctx, &CountCDUY, 4);
+  io (ctx, &CountCDUZ, 4);
+}

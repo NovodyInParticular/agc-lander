@@ -268,3 +268,15 @@ void scenario_liftoff(int keep_pose)
     lm_set_attitude_mode(2);
     lm_set_engine_arm(0);
 }
+
+// --- Save states ---------------------------------------------------------------------
+
+#include "snapshot.h"
+
+void scenario_snap(Snap *s)
+{
+    snap_v3(s, &scenario_info.rls);
+    snap_f64(s, &scenario_info.site_lat); snap_f64(s, &scenario_info.site_lon); snap_f64(s, &scenario_info.site_radius);
+    snap_f64(s, &scenario_info.tland); snap_f64(s, &scenario_info.sv_age);
+    snap_m3(s, &scenario_info.refsmmat);
+}

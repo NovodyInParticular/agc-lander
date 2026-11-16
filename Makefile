@@ -17,7 +17,9 @@ TEX_NAMES := lm_panel lm_foil lm_blanket rock cabin cabin_wall regolith
 
 AGC_CORE := $(VAGC)/yaAGC/agc_engine.c $(VAGC)/yaAGC/agc_engine_init.c $(VAGC)/yaAGC/agc_utilities.c
 HOST     := src/agc_host.c src/agc_mem.c src/moon.c src/lm.c src/csm.c src/coop.c src/net.c $(ROPE_C) $(SYMS_C)
-GAME     := src/main.c src/dsky.c src/scenario.c src/crew.c src/hints.c src/terrain.c src/render.c src/lmmodel.c src/hud.c src/cockpit.c src/cockpit_panels.c src/pcanvas.c src/sky_extras.c src/controls.c src/rocks.c src/assets.c src/sound.c src/eva.c src/ascent.c src/ascent_ui.c src/csmmodel.c data/a11_pdi_lgc.c data/a11_liftoff_lgc.c $(FONTS_C)
+# The GL-free simulation around the AGC: scenarios, crew, mission, stepping, save states.
+SIM      := src/scenario.c src/crew.c src/ascent.c src/sim.c src/snapshot.c data/a11_pdi_lgc.c data/a11_liftoff_lgc.c
+GAME     := src/main.c src/dsky.c src/hints.c src/terrain.c src/render.c src/lmmodel.c src/hud.c src/cockpit.c src/cockpit_panels.c src/pcanvas.c src/sky_extras.c src/controls.c src/rocks.c src/assets.c src/sound.c src/eva.c src/ascent_ui.c src/csmmodel.c $(SIM) $(FONTS_C)
 
 # Vendor core: build quietly, it predates modern warning sets.
 CORE_FLAGS := -O2 -w -I$(VAGC)/yaAGC
@@ -100,14 +102,14 @@ build/linux/core.a: $(AGC_CORE)
 
 linux: build/linux/agc-lander build/linux/agc-selftest build/linux/agc-lab
 
-build/linux/agc-lab: src/lab.c src/scenario.c src/crew.c src/ascent.c data/a11_pdi_lgc.c data/a11_liftoff_lgc.c $(HOST) src/*.h build/linux/core.a
-	$(LINUX_CC) $(APP_FLAGS) -o $@ src/lab.c src/scenario.c src/crew.c src/ascent.c data/a11_pdi_lgc.c data/a11_liftoff_lgc.c $(HOST) build/linux/core.a -lm
+build/linux/agc-lab: src/lab.c $(SIM) $(HOST) src/*.h build/linux/core.a
+	$(LINUX_CC) $(APP_FLAGS) -o $@ src/lab.c $(SIM) $(HOST) build/linux/core.a -lm
 
 build/linux/agc-lander: $(GAME) $(HOST) src/*.h build/linux/core.a build/raylib-linux/libraylib.a $(LINUX_TEX)
 	$(LINUX_CC) $(APP_FLAGS) -o $@ $(GAME) $(HOST) $(LINUX_TEX) build/linux/core.a build/raylib-linux/libraylib.a -lm -lpthread -ldl
 
-build/linux/agc-selftest: src/selftest.c $(HOST) src/agc_host.h build/linux/core.a
-	$(LINUX_CC) $(APP_FLAGS) -o $@ src/selftest.c $(HOST) build/linux/core.a -lm
+build/linux/agc-selftest: src/selftest.c $(SIM) $(HOST) src/*.h build/linux/core.a
+	$(LINUX_CC) $(APP_FLAGS) -o $@ src/selftest.c $(SIM) $(HOST) build/linux/core.a -lm
 
 test: build/linux/agc-selftest build/linux/agc-lab
 	./build/linux/agc-selftest
@@ -129,8 +131,8 @@ windows: build/win/agc-lander.exe build/win/agc-selftest.exe
 build/win/agc-lander.exe: $(GAME) $(HOST) src/*.h build/win/core.a build/raylib-win/libraylib.a $(WIN_TEX)
 	$(WIN_CC) $(APP_FLAGS) -DWIN32 -mwindows -o $@ $(GAME) $(HOST) $(WIN_TEX) build/win/core.a build/raylib-win/libraylib.a $(WIN_LINK)
 
-build/win/agc-selftest.exe: src/selftest.c $(HOST) src/agc_host.h build/win/core.a
-	$(WIN_CC) $(APP_FLAGS) -DWIN32 -o $@ src/selftest.c $(HOST) build/win/core.a -static -lws2_32
+build/win/agc-selftest.exe: src/selftest.c $(SIM) $(HOST) src/*.h build/win/core.a
+	$(WIN_CC) $(APP_FLAGS) -DWIN32 -o $@ src/selftest.c $(SIM) $(HOST) build/win/core.a -static -lws2_32
 
 test-wine: build/win/agc-selftest.exe
 	WINEDEBUG=-all wine ./build/win/agc-selftest.exe
