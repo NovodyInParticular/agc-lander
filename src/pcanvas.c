@@ -99,7 +99,8 @@ typedef struct {
 
 static Layer layers[PC_MAX_LAYERS];
 static Layer *L;
-static V3 pl_o, pl_du, pl_dv;
+static V3 pl_o, pl_du, pl_dv, pl_n;
+static double lift_m;   // extra lift of the following primitives, metres
 static struct { float ox, oy, zoom; } xf[8];
 static int nxf;
 static float glow_rgb[3], glow_k;
@@ -141,6 +142,8 @@ void pc_begin(int layer, V3 origin, V3 du, V3 dv, V3 normal, double lift)
     pl_o = v3_add(origin, v3_scale(normal, lift));
     pl_du = du;
     pl_dv = dv;
+    pl_n = normal;
+    lift_m = 0;
     nxf = 0;
     xf[0].ox = 0; xf[0].oy = 0; xf[0].zoom = 1;
     glow_mode = 0;
@@ -166,6 +169,11 @@ void pc_glow(Color c)
 void pc_glow_paint(float k) { glow_mode = 2; glow_k = k; }
 void pc_glow_off(void) { glow_mode = 0; }
 
+void pc_lift(float units)
+{
+    lift_m = units * xf[nxf].zoom * v3_len(pl_du);
+}
+
 static void grow(void)
 {
     L->cap = L->cap ? L->cap * 2 : 4096;
@@ -181,9 +189,9 @@ static void grow(void)
 static void vert(float cx, float cy, float u, float v, const float par[4], float stroke, Color c)
 {
     int k = L->nv++;
-    L->pos[3 * k] = (float)(pl_o.x + pl_du.x * cx + pl_dv.x * cy);
-    L->pos[3 * k + 1] = (float)(pl_o.y + pl_du.y * cx + pl_dv.y * cy);
-    L->pos[3 * k + 2] = (float)(pl_o.z + pl_du.z * cx + pl_dv.z * cy);
+    L->pos[3 * k] = (float)(pl_o.x + pl_du.x * cx + pl_dv.x * cy + pl_n.x * lift_m);
+    L->pos[3 * k + 1] = (float)(pl_o.y + pl_du.y * cx + pl_dv.y * cy + pl_n.y * lift_m);
+    L->pos[3 * k + 2] = (float)(pl_o.z + pl_du.z * cx + pl_dv.z * cy + pl_n.z * lift_m);
     L->uv[2 * k] = u; L->uv[2 * k + 1] = v;
     float *g = &L->glow[3 * k];
     if (glow_mode == 1) { g[0] = glow_rgb[0]; g[1] = glow_rgb[1]; g[2] = glow_rgb[2]; }

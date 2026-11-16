@@ -24,6 +24,9 @@ int lmmodel_triangles(void);
 // site_from_body: rotation body -> site frame; pos_cam_rel: CG relative to camera.
 void lmmodel_draw(M3 site_from_body, V3 pos_cam_rel);
 void lmmodel_draw_depth(M3 site_from_body, V3 pos_cam_rel);
+// The planted flag: site_from_flag takes its axes (+X up the pole, +Z along
+// the cloth) to the site frame; base_cam_rel is the foot of the pole.
+void lmmodel_draw_flag(M3 site_from_flag, V3 base_cam_rel);
 void lmmodel_update_dust(float dt, float intensity);
 void lmmodel_draw_effects(M3 site_from_body, V3 pos_cam_rel, const LmFx *fx);
 

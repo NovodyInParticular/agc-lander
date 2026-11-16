@@ -100,6 +100,83 @@ Milestones, each with a headless test in src/selftest*.c:
 - DSKY floats bottom-right; 3D view always full width; DSKY default only in the full mission.
 - DPS bell rebuilt: curved profile, blanket upper half, lip ring, inner wall to a closed throat.
 
+## Graphics pass, terrain LOD, cabin sound (2026-11-15, branch quest-vr)
+- Terrain never pops now. Three parts, all in terrain.c + the terrain shader in render.c:
+  1. Geomorph: every chunk vertex carries its parent chunk's surface (position delta in
+     `vertexTangent.xyz`, shadow in `.w`, normal xz in texcoord, albedo/fresh in texcoord2). The
+     vertex shader blends toward it over the far 72-95 % of the level's range (`morph` uniform),
+     and over FADE_TIME (0.6 s) when a chunk first appears (Node.fade). A parent hands over to its
+     children only once its own fade is done. Camera jumps (> 400 m in a frame) set `settling`:
+     chunks appear at once until the build queue drains. AGC_NOMORPH=1 = old hard switching.
+  2. Per-pixel craters: the shader draws crater octaves 6000..6 m (terrain.c octaves[1..6], same
+     hash, cells, radius, profile; OCT_* tables in render.c MUST match) for every octave the mesh
+     has not taken over, with an exact parabolic-bowl sun shadow. Octave.gk decides the handover:
+     geometry includes an octave when cell * gk >= 1.5 * spacing (gk 0.15 = about 10 vertices per
+     cell). The shader weight is 1 - that test, blended by the morph factor, so mesh and shader
+     trade places invisibly. Shadow drawing continues until 12-48 spacings per cell (vertex
+     shadows are too coarse before that). Plane position comes from gl_VertexID (33 x 33 grid +
+     skirts) and per-chunk `cellBase`/`cellFrac` uniforms. AGC_DBG=6 turns the crater pass off.
+  3. Chunk-border normals use central differences (one sample outside the chunk): no lighting seams.
+- Soil detail is soft-clipped (softplus) instead of clamped: no black speckle at the low Sun.
+- LM: vertex colours are linear albedo (black 3 %, anodised skin = material 10, half metal,
+  rough 0.6); bump gain per material, specular anti-aliasing from normal derivatives, sunlight on
+  the vehicle held at 6.5 (regolith and rocks 9) so bright skins keep detail. Aft equipment bay:
+  stand-off shield panels and gas tanks instead of the white fins.
+- Post: tonemap now writes an LDR target with luma in alpha (blending OFF for that pass), then
+  FXAA 3.11 + film grain + dither to the output. Sun: tight corona, faint six-point star, bloom
+  input clamped at 260 so the disc does not fog the sky.
+- Sound (src/sound.c, all synthesised, one raylib AudioStream callback): fans + 400 Hz inverter
+  whine, DPS rumble following thrust, RCS knocks + hiss, switch and DSKY clicks, pulsed 3 kHz
+  master alarm (stops after 12 s or on MASTER ALARM push), touchdown thud, crash. Heard only in the
+  cockpit and DAC window views; M mutes. Not started in --shot/--audit/--spectator runs.
+- AGC_SEQ=N with --shot NAME saves N consecutive frames (NAME-000.bmp ...), for motion checks.
+- Still open in Phase 2: panel lettering is small/faint from the seat (LEG 1.28, EL glow 0.6);
+  needs a size + overlap review per panel, then the Quest legibility check.
+
+## 3D controls, hints on controls, moonwalk (2026-11-15, branch quest-vr, uncommitted)
+- Sound: src/sound.c opens its own miniaudio device (the copy inside raylib) at the device's native
+  rate, 1024-frame periods. The "audio cutting out" report was NOT the game: an `adb` server
+  polls USB once a second and stalls one core ~21 ms each time; start it with `ADB_LIBUSB=1`
+  (hotplug, no polling) or `adb kill-server` when done.
+- Every control is modelled (cockpit.c build_controls: toggles with nut + bat handle + wicket
+  guards, bar knobs, thumbwheels, push-button and DSKY/DEDA key caps, breaker plungers). The panel
+  code registers them (Lever kinds in cockpit_int.h); legends ride on the caps via pc_lift().
+  The mesh is rebuilt only when a control moves.
+- Hints: hints_target() names the one control to use next; cockpit_panels.c rings it (green,
+  pulsing, with an instruction), dsky.c rings the DSKY key (also on the 2D DSKY), and
+  cockpit_overlay() points to it when it is out of view or hidden behind another panel.
+- Panel 3's top rows (ENG ARM, PGNS mode) cannot be seen from the standing eye point: End now
+  steps back and down ("duck") so they can; Home stands up again.
+- Newly working switches: mission timer (start/stop/reset + slew wheels), event timer count
+  up/down + slew + panel-3 reset, FLOOD ALL/POST, SIDE PNLS, ANUN/NUM BRT/DIM, DSKY LTG, the
+  TEMP/PRESS, TEMP, HEATER, POWER and SIG STR monitor selectors, SUIT FAN / CABIN FAN (heard),
+  and all 480 circuit breakers pull and push (wired: FLOOD, INTGL, SIDE PNLS, MISSION TIMER,
+  EVENT TIMER, PRPLNT QTY, SUIT FAN 1/2, CABIN FAN CONT). Not wired: ABORT / ABORT STAGE,
+  ENGINE START, RCS isolation, radar power, batteries, explosive devices.
+- Cabin look from the user's reference photos (~/Downloads, LM interior): blue-grey panels and
+  structure, cream overhead, yellow handholds, caution stripes round ABORT and START/STOP, AOT
+  with its orange guard, metal forward hatch.
+- Moonwalk (src/eva.c): after a good landing with the engine off, X opens the forward hatch
+  (door swings in, the wall has a real opening), the crewman kneels, goes out and down the
+  ladder; on the surface W A S D walk, Shift lope, Space jump (1.62 m/s2), F plants the flag
+  (lmmodel_draw_flag), X at the foot of the ladder climbs back in.
+- Debug switches: AGC_HINT=arm|auto|stop|alarm|rodup|roddown|<key letter>, AGC_CBOPEN=n,
+  AGC_DUCK=1, AGC_EVA=hatch|crawl|ladder|walk|flag|auto (auto = parked LM, hatch opens itself).
+
+### Plan agreed with the user 2026-11-15 (in this order)
+1. DONE first pass: cabin realism from the photos; hatch, moonwalk, jump, flag.
+2. NEXT: ascent and docking. Split the LM mesh into descent and ascent stages (the descent
+   stage stays on the surface), ascent engine (15.6 kN, fixed thrust) lift-off from the cockpit,
+   a guided climb to orbit, then a rendezvous shortcut to a few hundred metres from the CSM
+   and a hand-flown docking. Needs a CSM model.
+3. Two builds: PC "high" (i9-9900K 8c/16t, RTX 2070 Super, 32 GB: more terrain detail,
+   shadows, 4K) and Quest 3 (72 fps, cut-down shaders). One code base, a quality tier switch.
+4. Quest APK itself (old phases 3-4) still needs: Android NDK, Khronos OpenXR loader, astcenc,
+   and the headset authorised for USB debugging (it shows "unauthorized" until the prompt in
+   the headset is accepted).
+- Still missing in the moonwalk: an astronaut body/shadow, footprints, the second crewman,
+  rock collisions, VR hand interaction.
+
 ## Next
 - GitHub: public repo + v0.1.0 release (2026-11-02). GPLv2 (Virtual AGC, NASSP data).
 

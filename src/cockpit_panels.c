@@ -12,8 +12,10 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "sound.h"
 #include "raylib.h"
 #include "rlgl.h"
 
@@ -21,12 +23,14 @@
 #include "cockpit_int.h"
 #include "crew.h"
 #include "dsky.h"
+#include "hints.h"
 #include "hud.h"
 #include "lm.h"
 #include "pcanvas.h"
 
 PanelItems cp_items[NPANELS];
 int cp_dirty = 1;
+unsigned cp_live_panels;
 
 static int cur_panel;
 
@@ -34,7 +38,7 @@ static int cur_panel;
 
 // --- Colours -------------------------------------------------------------------
 
-static const Color C_PANEL = { 74, 78, 82, 255 };       // panel grey
+static const Color C_PANEL = { 104, 112, 126, 255 };    // panel blue-grey (as the flight panels photograph)
 static const Color C_WHITE = { 236, 236, 230, 255 };    // nomenclature
 static const Color C_FACE = { 16, 17, 19, 255 };        // instrument faces
 static const Color C_BEZEL = { 34, 35, 38, 255 };
@@ -81,18 +85,143 @@ static const char ID_ET[] = "EVENT TIMER";
 static const char ID_ABORT[] = "ABORT";
 static const char ID_ABSTAGE[] = "ABORT STAGE";
 static const char ID_DEDA[] = "AGS DEDA";
+static const char ID_FLOODSEL[] = "FLOOD SEL";
+static const char ID_SIDEPNL[] = "SIDE PNLS";
+static const char ID_ANUNBRT[] = "ANUN/NUM BRT";
+static const char ID_DSKYLTG[] = "DSKY LTG";
+static const char ID_MT[] = "MISSION TIMER";
+static const char ID_MTH[] = "MT HOURS", ID_MTM[] = "MT MIN", ID_MTS[] = "MT SEC";
+static const char ID_ETM[] = "ET MIN", ID_ETS[] = "ET SEC";
+static const char ID_ETCOUNT[] = "ET COUNT";
+static const char ID_ETRESET[] = "EVENT TIMER RESET";
+static const char ID_PRPMON[] = "PRPLNT MON";
+static const char ID_TEMPMON[] = "TEMP MON";
+static const char ID_HTRMON[] = "HEATER MON";
+static const char ID_PWRMON[] = "PWR MON";
+static const char ID_SIGMON[] = "SIG STR";
+static const char ID_SUITFAN[] = "SUIT FAN";
+static const char ID_CABFAN[] = "CABIN FAN";
 
 static float rod_anim, plusx_timer;
 static double event_timer = 0;
 static int event_run = 0;
+static double mission_timer = -1;   // seconds shown on the mission timer (-1: not yet synchronised)
 static int master_alarm, prev_alarm;
+int cp_master_alarm(void) { return master_alarm; }
 static char deda_addr[4] = "   ", deda_data[7] = "      ";
 static int deda_n, deda_mode, deda_err;   // mode 0: address entry, 1: data entry
 
+// Push buttons and DEDA keys stay down for a moment after a click.
+static const char *press_id;
+static int press_idx;
+static float press_t;
+static int pressed(const char *id, int idx) { return press_t > 0 && press_id == id && press_idx == idx; }
+
+// Circuit breakers of panels 11 and 16, in drawing order: 1 = pulled open.
+#define CB_PER_PANEL 240
+static unsigned char cb_open[2][CB_PER_PANEL];
+static const char *cb_label[2][CB_PER_PANEL];
+static int cb_count[2], cb_side, cb_next;
+
+// A named breaker is open on either panel (the same circuits repeat on both buses).
+static int cb_out(const char *name)
+{
+    for (int k = 0; k < 2; k++)
+        for (int i = 0; i < cb_count[k]; i++)
+            if (cb_open[k][i] && cb_label[k][i] && !strcmp(cb_label[k][i], name)) return 1;
+    return 0;
+}
+
+static int side_panel(int p) { return p == P8 || p == P11 || p == P12 || p == P14 || p == P16; }
+
 static int lamp_test(void) { return ST(ID_LTGTEST, -1) > 0; }
-float cp_flood_level(void) { return ST(ID_FLOOD, 5) / 10.0f; }
-float cp_integral_level(void) { return ST(ID_INTEG, 6) / 10.0f; }
-float cp_numerics_level(void) { return 0.35f + ST(ID_NUM, 8) / 10.0f * 0.65f; }
+float cp_flood_level(void)
+{
+    if (cb_out("FLOOD")) return 0;
+    return ST(ID_FLOOD, 5) / 10.0f * (ST(ID_FLOODSEL, 1) > 0 ? 1.0f : 0.55f);
+}
+static int drawing_panel;   // inside cp_draw_panel: lighting follows the panel being drawn
+float cp_integral_level(void)
+{
+    if (cb_out("INTGL")) return 0;
+    if (drawing_panel && side_panel(cur_panel) && (ST(ID_SIDEPNL, 1) < 0 || cb_out("SIDE PNLS"))) return 0;
+    return ST(ID_INTEG, 6) / 10.0f;
+}
+float cp_numerics_level(void) { return (0.35f + ST(ID_NUM, 8) / 10.0f * 0.65f) * (ST(ID_ANUNBRT, 1) > 0 ? 1.0f : 0.45f); }
+float cp_fan_level(void)
+{
+    int suit = !cb_out(ST(ID_SUITFAN, 1) > 0 ? "SUIT FAN 1" : "SUIT FAN 2");
+    int cabin = ST(ID_CABFAN, -1) > 0 && !cb_out("CABIN FAN CONT");
+    return suit * 1.0f + cabin * 0.6f;
+}
+
+// --- Hint marker: a pulsing green ring and a short instruction by the control
+// the player should operate next. Drawn last on its panel, over the artwork.
+
+static HintTarget hint_tgt;
+static struct { int on, dir; float x, y, r, lift; const char *text; } mark;
+static struct { int on; float x, y; const char *text; } hint_rec[NPANELS];
+
+static void hint_at(float x, float y, float r, float lift, int dir)
+{
+    mark.on = 1; mark.x = x; mark.y = y; mark.r = r; mark.lift = lift; mark.dir = dir; mark.text = hint_tgt.text;
+}
+
+static void draw_mark(void)
+{
+    if (!mark.on) return;
+    mark.on = 0;
+    float p = 0.5f + 0.5f * sinf((float)GetTime() * 6.0f);
+    Color g = { 90, 255, 150, (unsigned char)(150 + 105 * p) };
+    float x = mark.x, y = mark.y, r = mark.r + 1.5f * p;
+    pc_lift(mark.lift + 0.4f);
+    pc_glow((Color){ 60, 230, 120, 255 });
+    pc_ring((Vector2){ x, y }, r, 1.8f, g);
+    if (mark.dir) {
+        // Which way to move it: a chevron bobbing in that direction, left of the ring.
+        float d = (float)-mark.dir, ax = x - r - 5.5f, ay = y + d * (1.5f + 2.5f * p);
+        pc_tri((Vector2){ ax - 3.2f, ay - d * 2.5f }, (Vector2){ ax + 3.2f, ay - d * 2.5f }, (Vector2){ ax, ay + d * 3.0f }, g);
+    }
+    pc_glow_off();
+    // The instruction: beside a switch (its own legends sit above and below
+    // it), above a button; kept on the panel.
+    float sz = 8.0f, pw = cp_panels[cur_panel].w_mm;
+    Vector2 m = pc_measure(mark.text, sz, 0.2f);
+    float tx, ty;
+    if (mark.dir) {
+        tx = x + r + 5.0f;
+        ty = y - sz / 2;
+        if (tx + m.x + 4 > pw) tx = x - r - 15.0f - m.x;
+    } else {
+        tx = x - m.x / 2;
+        ty = y - r - sz - 4.0f;
+        if (ty < 3) ty = y + r + 4.0f;
+        if (tx + m.x + 4 > pw) tx = pw - m.x - 4;
+        if (tx < 4) tx = 4;
+    }
+    pc_lift(mark.lift + 7.0f);
+    pc_rrect((Rectangle){ tx - 2.2f, ty - 1.4f, m.x + 4.4f, sz + 2.8f }, 0.5f, (Color){ 5, 24, 14, 240 });
+    pc_glow((Color){ 70, 220, 130, 255 });
+    pc_rrect_lines((Rectangle){ tx - 2.2f, ty - 1.4f, m.x + 4.4f, sz + 2.8f }, 0.5f, 0.35f, g);
+    pc_text(mark.text, tx, ty, sz, 0.2f, (Color){ 150, 255, 190, 255 });
+    pc_glow_off();
+    pc_lift(0);
+    hint_rec[cur_panel].on = 1;
+    hint_rec[cur_panel].x = x;
+    hint_rec[cur_panel].y = y;
+    hint_rec[cur_panel].text = mark.text;
+    cp_live_panels |= 1u << cur_panel;
+}
+
+int cp_hint_point(int *panel, float *x_mm, float *y_mm, const char **text)
+{
+    for (int i = 0; i < NPANELS; i++)
+        if (hint_rec[i].on) {
+            *panel = i; *x_mm = hint_rec[i].x; *y_mm = hint_rec[i].y; *text = hint_rec[i].text;
+            return 1;
+        }
+    return 0;
+}
 
 // --- Drawing helpers (millimetres, on the panel canvas) ------------------------------
 //
@@ -172,11 +301,44 @@ static void add_hot(int kind, Rectangle r, const char *id, int idx)
     it->hot[it->nhot++] = (Hot){ cur_panel, kind, r, id, idx };
 }
 
-static void add_lever(int kind, float x, float y, float val, float size, int guard, Color c)
+static void add_part(int kind, float x, float y, float val, float size, float w, float h, int guard, Color c)
 {
     PanelItems *it = &cp_items[cur_panel];
     if (it->nlev >= CP_MAXLEV) return;
-    it->lev[it->nlev++] = (Lever){ cur_panel, kind, x, y, val, size, guard, c.r, c.g, c.b };
+    Lever *l = &it->lev[it->nlev++];
+    memset(l, 0, sizeof *l);
+    l->panel = cur_panel; l->kind = kind; l->x = x; l->y = y; l->val = val; l->size = size;
+    l->w = w; l->h = h; l->guard = guard; l->r = c.r; l->g = c.g; l->b = c.b;
+}
+
+static void add_lever(int kind, float x, float y, float val, float size, int guard, Color c)
+{
+    add_part(kind, x, y, val, size, 0, 0, guard, c);
+}
+
+// Height of the modelled caps above the panel, mm.
+#define BTN_UP 4.5f
+#define BTN_DOWN 1.6f
+#define KEY_UP 3.2f
+#define KEY_DOWN 0.9f
+
+// Yellow-and-black caution border, as round the ABORT pair and the engine
+// START / STOP buttons.
+static void hazard_frame(float x, float y, float w, float h, float t)
+{
+    Color yel = { 216, 178, 30, 255 }, blk = { 16, 16, 16, 255 };
+    pc_rect_lines((Rectangle){ x, y, w, h }, t, yel);
+    float step = t * 1.5f;
+    for (float s = step * 0.5f; s < w - step * 0.5f; s += 2 * step) {
+        float len = fminf(step, w - s);
+        pc_rect(x + s, y, len, t, blk);
+        pc_rect(x + s, y + h - t, len, t, blk);
+    }
+    for (float s = step * 0.5f; s < h - step * 0.5f; s += 2 * step) {
+        float len = fminf(step, h - s);
+        pc_rect(x, y + s, t, len, blk);
+        pc_rect(x + w - t, y + s, t, len, blk);
+    }
 }
 
 // Toggle switch. up/mid/dn labels (mid NULL = two positions). State: +1 up,
@@ -198,6 +360,10 @@ static int toggle(float x, float y, const char *id, const char *title, const cha
     }
     add_lever(LEV_TOGGLE, x, y, (float)s, 16, guard, (Color){ 196, 198, 202, 255 });
     add_hot(HOT_TOGGLE, (Rectangle){ x - 7, y - 11, 14, 22 }, id, mid ? 3 : 2);
+    if (id == ID_ENGARM && hint_tgt.kind == HT_ENG_ARM) hint_at(x, y, 13.0f, 0, -1);
+    else if (id == ID_PGNS && hint_tgt.kind == HT_PGNS_AUTO) hint_at(x, y, 13.0f, 0, +1);
+    else if (id == ID_ROD && hint_tgt.kind == HT_ROD_UP) hint_at(x, y, 13.0f, 0, +1);
+    else if (id == ID_ROD && hint_tgt.kind == HT_ROD_DOWN) hint_at(x, y, 13.0f, 0, -1);
     return s;
 }
 
@@ -237,6 +403,7 @@ static void thumbwheel(float x, float y, const char *id, const char *title)
     for (int i = 0; i < 6; i++)
         DrawRectangleRec((Rectangle){ x - 2.8f, y - 6 + i * 2.3f + (s % 2) * 1.1f, 5.6f, 0.6f }, (Color){ 70, 70, 74, 255 });
     TXT_C("MAX", x + 8, y - 7, 2.2f);
+    add_lever(LEV_THUMB, x, y, (float)s, 9, 0, (Color){ 46, 46, 50, 255 });
     add_hot(HOT_KNOB, (Rectangle){ x - 4, y - 8, 8, 16 }, id, 10);
 }
 
@@ -268,15 +435,13 @@ static void pushbtn(float x, float y, float w, float h, const char *id, const ch
     DrawRectangleRounded((Rectangle){ x - 1.2f, y - 1.2f, w + 2.4f, h + 2.4f }, 0.2f, 4, C_BEZEL);
     Color face = lit ? lit_col : (Color){ 58, 56, 54, 255 };
     if (!lit && lit_col.r > 200 && lit_col.g < 120) face = (Color){ 96, 40, 36, 255 };
+    // The cap is modelled in the cabin; its face and legend ride on top of it.
+    float up = pressed(id, 0) ? BTN_DOWN : BTN_UP;
+    add_part(LEV_BUTTON, x + w / 2, y + h / 2, up, 0, w, h, guard, scale_col(face, 0.45f));
+    pc_lift(up + 0.12f);
     if (lit) pc_glow(scale_col(lit_col, cp_numerics_level()));
     DrawRectangleRounded((Rectangle){ x, y, w, h }, 0.15f, 4, face);
     pc_glow_off();
-    if (guard) {
-        DrawRectangleLinesEx((Rectangle){ x - 3, y - 3, w + 6, h + 6 }, 1.2f, (Color){ 180, 180, 184, 255 });
-        for (int i = 0; i < 6; i++)
-            DrawLineEx((Vector2){ x - 3 + i * (w + 6) / 6, y - 3 }, (Vector2){ x - 3 + i * (w + 6) / 6 + 4, y - 6 }, 0.6f,
-                       (Color){ 200, 200, 204, 255 });
-    }
     float sz = 3.4f * LEG;
     Vector2 m = pc_measure(label, sz, 0.15f);
     if (m.x > w - 3) sz *= (w - 3) / m.x;
@@ -284,18 +449,24 @@ static void pushbtn(float x, float y, float w, float h, const char *id, const ch
     else pc_glow(el_col(0.35f));
     pc_text_box(label, (Rectangle){ x, y, w, h }, sz, 0.15f, lit ? (Color){ 255, 250, 240, 255 } : (Color){ 235, 232, 225, 255 });
     pc_glow_off();
+    pc_lift(0);
     add_hot(HOT_BUTTON, (Rectangle){ x, y, w, h }, id, 0);
+    if (((id == ID_STOP5 || id == ID_STOP6) && hint_tgt.kind == HT_ENGINE_STOP) ||
+        ((id == ID_MA1 || id == ID_MA2) && hint_tgt.kind == HT_MASTER_ALARM))
+        hint_at(x + w / 2, y + h / 2, fmaxf(w, h) * 0.5f + 5.0f, up, 0);
 }
 
 // Circuit breaker with its label above.
-static void breaker(float x, float y, const char *label, int popped)
+static void breaker(float x, float y, const char *label)
 {
+    int i = cb_next < CB_PER_PANEL ? cb_next++ : CB_PER_PANEL - 1;
+    cb_label[cb_side][i] = label;
+    if (cb_count[cb_side] <= i) cb_count[cb_side] = i + 1;
+    int popped = cb_open[cb_side][i];
     if (label) TXT_C(label, x, y - 8.4f, 2.7f);
     DrawCircleV((Vector2){ x, y }, 4.6f, (Color){ 14, 14, 15, 255 });
-    if (popped) DrawCircleV((Vector2){ x, y }, 3.2f, (Color){ 230, 230, 230, 255 });
-    DrawCircleV((Vector2){ x, y }, 2.6f, (Color){ 26, 26, 28, 255 });
-    DrawCircleV((Vector2){ x - 0.8f, y - 0.8f }, 0.8f, (Color){ 70, 70, 74, 255 });
-    add_hot(HOT_CB, (Rectangle){ x - 4.6f, y - 4.6f, 9.2f, 9.2f }, label, 0);
+    add_part(LEV_CB, x, y, (float)popped, 2.7f, 0, 0, 0, (Color){ 24, 24, 26, 255 });
+    add_hot(HOT_CB, (Rectangle){ x - 4.6f, y - 4.6f, 9.2f, 9.2f }, label, i);
 }
 
 // Talkback flag indicator: 0 = barber pole, 1 = grey.
@@ -318,9 +489,10 @@ static void talkback(float x, float y, int grey)
 }
 
 // Seven-segment EL numerics (DSKY style). str: digits, ' ' blank, '+', '-', ':'.
+static int el_power = 1;   // 0: the display's breaker is open
 static void el_segment(Rectangle r, int on)
 {
-    if (on) {
+    if (on && el_power) {
         pc_glow(scale_col((Color){ 110, 255, 140, 255 }, cp_numerics_level()));
         pc_rrect(r, 0.9f, (Color){ 150, 230, 160, 255 });
         pc_glow_off();
@@ -601,6 +773,7 @@ static void panel1(void)
     if (q > 99) q = 99;
     snprintf(b, sizeof b, "%02d", q);
     TXT_C("FUEL", 120, 349, 2.6f);
+    el_power = !cb_out("PRPLNT QTY");
     el_digits(110, 355, 12, b);
     snprintf(b, sizeof b, "%02d", q > 0 ? q - (q > 1) : 0);
     TXT_C("OXID", 182, 349, 2.6f);
@@ -608,7 +781,9 @@ static void panel1(void)
     group(94, 396, 116, 36, "EVENT TIMER");
     int et = (int)event_timer;
     snprintf(b, sizeof b, "%02d:%02d", (et / 60) % 100, et % 60);
+    el_power = !cb_out("EVENT TIMER");
     el_digits(112, 407, 13, b);
+    el_power = 1;
 
     toggle(240, 372, "RATE/ERR MON", "RATE/ERR MON", "LDG RDR/CMPTR", NULL, "RNDZ RDR", -1, 0);
     toggle(300, 372, "ATT MON", "ATT MON", "PGNS", NULL, "AGS", 1, 0);
@@ -630,14 +805,21 @@ static void panel1(void)
     toggle(212, 538, "DEADBAND", "DEADBAND", "MIN", NULL, "MAX", 1, 0);
 
     group(268, 462, 190, 92, "MAIN PROPULSION");
-    float he = 0.55f + 0.02f * sinf((float)GetTime() * 0.1f);
-    meter(282, 482, 11, 58, "HE", he, "4", "0");
-    meter(312, 482, 11, 58, "FUEL T", 0.52f, "100", "20");
-    meter(342, 482, 11, 58, "OXID T", 0.50f, "100", "20");
-    meter(372, 482, 11, 58, "PRESS", lm.dps_on ? 0.62f : 0.55f, "300", "0");
+    // The four meters show whichever tank set TEMP/PRESS MON selects:
+    // supercritical helium, descent tank set 1 or 2, or the ascent tanks.
+    static const float pm[4][4] = { { 0.55f, 0.20f, 0.20f, 0.30f }, { 0.55f, 0.52f, 0.50f, 0.55f },
+                                    { 0.55f, 0.53f, 0.51f, 0.56f }, { 0.74f, 0.50f, 0.49f, 0.58f } };
+    int ps = ST(ID_PRPMON, 1);
+    if (ps < 0 || ps > 3) ps = 1;
+    float wob = 0.02f * sinf((float)GetTime() * 0.1f), burn = lm.dps_on && (ps == 1 || ps == 2) ? 0.07f : 0;
+    meter(282, 482, 11, 58, "HE", pm[ps][0] + wob, "4", "0");
+    meter(312, 482, 11, 58, "FUEL T", pm[ps][1], "100", "20");
+    meter(342, 482, 11, 58, "OXID T", pm[ps][2], "100", "20");
+    meter(372, 482, 11, 58, "PRESS", pm[ps][3] + burn, "300", "0");
     static const char *const mon[4] = { "HE", "DES 1", "DES 2", "ASC" };
-    rotary(425, 516, "PRPLNT MON", "TEMP/PRESS", mon, 4, 1, 120);
+    rotary(425, 516, ID_PRPMON, "TEMP/PRESS", mon, 4, 1, 120);
 
+    hazard_frame(274, 570, 180, 60, 3.2f);
     pushbtn(282, 578, 70, 44, ID_ABORT, "ABORT", RED_L, 0, 0);
     pushbtn(372, 578, 74, 44, ID_ABSTAGE, "ABORT\nSTAGE", RED_L, 0, 1);
     toggle(38, 604, "SBD AUD", "AUDIO", "T/R", "RCV", "OFF", 1, 0);
@@ -661,9 +843,11 @@ static void panel2(void)
     // Mission timer (GET).
     group(12, 82, 150, 30, "MISSION TIMER");
     char b[24];
-    int t = (int)lm.t;
+    int t = (int)(mission_timer < 0 ? lm.t : mission_timer);
     snprintf(b, sizeof b, "%03d:%02d:%02d", (t / 3600) % 1000, (t / 60) % 60, t % 60);
+    el_power = !cb_out("MISSION TIMER");
     el_digits(20, 90, 14, b);
+    el_power = 1;
 
     fdai(215, 210, 72);
     x_pointer(338, 108, 112, 1);
@@ -698,7 +882,7 @@ static void panel2(void)
     meter(162, 482, 11, 64, "SUIT T", 0.45f, "80", "20");
     meter(196, 482, 11, 64, "H2O QTY", 0.70f, "100", "0");
     TXT_C("PSIA  PSIA  MMHG  DEG F  DEG F   %", 112, 552, 2.4f);
-    toggle(254, 500, "SUIT FAN", "SUIT FAN", "1", NULL, "2", 1, 0);
+    toggle(254, 500, ID_SUITFAN, "SUIT FAN", "1", NULL, "2", 1, 0);
     toggle(304, 500, "GLYCOL", "GLYCOL", "PUMP 1", "INST", "PUMP 2", 1, 0);
     toggle(354, 500, "QTY MON", "QTY MON", "DEADFACE", NULL, "RESET", 1, 0);
     toggle(404, 500, "TEMP/PRESS MON", "ECS MON", "SUIT", "CABIN", "GLYCOL", 0, 0);
@@ -716,12 +900,18 @@ static void panel3(void)
 {
     group(8, 18, 236, 252, "RADAR");
     static const char *const tm[6] = { "RNDZ", "LDG", "S-BD", "AFT", "QUAD 1", "QUAD 4" };
-    rotary(48, 66, "TEMP MON", "TEMP MONITOR", tm, 6, 1, 200);
-    dial(150, 66, 20, "TEMP", 0.45f, "-100", "+200");
-    float sig = lm.lr_range_good ? 0.72f + 0.04f * sinf((float)GetTime() * 3) : 0.05f;
-    dial(48, 160, 20, "SIGNAL STRENGTH", sig, "0", "5");
+    static const float tmv[6] = { 0.30f, 0.45f, 0.52f, 0.40f, 0.58f, 0.57f };
+    int tsel = rotary(48, 66, ID_TEMPMON, "TEMP MONITOR", tm, 6, 1, 200);
+    dial(150, 66, 20, "TEMP", tmv[tsel], "-100", "+200");
+    // Signal strength of the selected transmitter: the landing radar's two
+    // (altitude, velocity) follow the radar's lock; the rendezvous radar is off.
     static const char *const ss[6] = { "ALT XMTR", "VEL XMTR", "RNDZ", "S-BD", "VHF", "CDR" };
-    rotary(150, 160, "SIG STR", "SIG STR MON", ss, 6, 0, 200);
+    int ssel = ST(ID_SIGMON, 0);
+    float lock = 0.72f + 0.04f * sinf((float)GetTime() * 3);
+    float sig = ssel == 0 ? (lm.lr_range_good ? lock : 0.05f) : ssel == 1 ? (lm.lr_vel_good ? lock - 0.06f : 0.05f) :
+                ssel == 2 ? 0.0f : ssel == 3 ? 0.78f : ssel == 4 ? 0.66f : 0.5f;
+    dial(48, 160, 20, "SIGNAL STRENGTH", sig, "0", "5");
+    rotary(150, 160, ID_SIGMON, "SIG STR MON", ss, 6, 0, 200);
     toggle(40, 236, "RDR TEST", "RDR TEST", "LDG", "OFF", "RNDZ", 0, 0);
     toggle(100, 236, "RNDZ RDR", "RNDZ RDR", "LGC", "AUTO TRK", "SLEW", 1, 0);
     toggle(160, 236, "LDG ANT", "LDG ANT", "AUTO", "DES", "HOVER", 1, 0);
@@ -753,12 +943,13 @@ static void panel3(void)
     toggle(580, 226, "TTCA JETS", "TTCA JETS", "4", NULL, "2", 1, 0);
     toggle(640, 226, "ATT CONT DEADBAND", "DEADBAND", "MIN", NULL, "MAX", 1, 0);
     toggle(700, 226, "PROP PRESS", "PROP PRESS", "ON", NULL, "OFF", -1, 1);
-    toggle(760, 226, "EVENT TIMER RESET", "EVT TMR", "RESET", "", "COUNT", 0, 0);
+    toggle(760, 226, ID_ETRESET, "EVT TMR", "RESET", "", "COUNT", 0, 0);
 
     group(818, 18, 214, 252, "HEATERS / INST");
     static const char *const hm[7] = { "RNDZ", "LDG", "S-BD", "QUAD 1", "QUAD 2", "QUAD 3", "QUAD 4" };
-    rotary(870, 70, "HEATER MON", "HEATER MON", hm, 7, 1, 220);
-    dial(970, 70, 20, "HTR TEMP", 0.5f, "-200", "+200");
+    static const float hmv[7] = { 0.44f, 0.50f, 0.55f, 0.62f, 0.61f, 0.63f, 0.62f };
+    int hsel = rotary(870, 70, ID_HTRMON, "HEATER MON", hm, 7, 1, 220);
+    dial(970, 70, 20, "HTR TEMP", hmv[hsel], "-200", "+200");
     toggle(850, 160, "SBD ANT HTR", "S-BD ANT", "ON", NULL, "OFF", -1, 0);
     toggle(910, 160, "LDG RDR HTR", "LDG RDR", "ON", NULL, "OFF", 1, 0);
     toggle(970, 160, "RNDZ RDR HTR", "RNDZ RDR", "ON", NULL, "OFF", 1, 0);
@@ -791,12 +982,28 @@ static void panel4(void)
     rect(dsky_mm.x - 3, dsky_mm.y - 3, dsky_mm.width + 6, dsky_mm.height + 6, (Color){ 30, 30, 32, 255 });
     // The DSKY draws itself in its own units, scaled into its cut-out.
     Rectangle n = dsky_native_rect();
+    // Key caps are modelled in the cabin; the DSKY draws their tops at that height.
+    dsky_set_key_lift((KEY_UP + 0.12f) / n.width, (KEY_DOWN + 0.12f) / n.width);
+    for (int i = 0; ; i++) {
+        Rectangle k;
+        int down;
+        if (!dsky_key_layout(i, &k, &down)) break;
+        float kx = n.x + (k.x + k.width / 2) * n.width, ky = n.y + (k.y + k.height / 2) * n.width;
+        add_part(LEV_KEY, kx, ky, down ? KEY_DOWN : KEY_UP, 0, k.width * n.width, k.height * n.width, 0, (Color){ 20, 20, 22, 255 });
+        if (hint_tgt.kind == HT_DSKY_KEY && dsky_key_index(hint_tgt.arg) == i) {
+            // The DSKY rings the key itself; note where it is for the off-screen pointer.
+            hint_rec[cur_panel].on = 1;
+            hint_rec[cur_panel].x = kx;
+            hint_rec[cur_panel].y = ky;
+            hint_rec[cur_panel].text = hint_tgt.text;
+        }
+    }
     pc_push(n.x, n.y, n.width);
-    dsky_draw_canvas(cp_numerics_level());
+    dsky_draw_canvas(cp_numerics_level() * (ST(ID_DSKYLTG, 1) > 0 ? 1.0f : 0.45f));
     pc_pop();
     add_hot(HOT_DSKY, dsky_mm, "DSKY", 0);
     // Side switches: X-pointer scale, attitude monitor... and the PGNS lighting.
-    toggle(48, 80, "DSKY LTG", "DSKY", "BRT", NULL, "DIM", 1, 0);
+    toggle(48, 80, ID_DSKYLTG, "DSKY", "BRT", NULL, "DIM", 1, 0);
     toggle(48, 150, "LGC PWR", "LGC", "OPR", NULL, "STBY", 1, 1);
     toggle(48, 220, "IMU PWR", "IMU", "OPR", NULL, "STBY", 1, 1);
     static const char *const nm[11] = { "OFF", "", "", "", "", "", "", "", "", "", "BRT" };
@@ -809,23 +1016,25 @@ static void panel4(void)
 static void panel5(void)
 {
     group(8, 18, 344, 92, "TIMERS");
-    toggle(40, 64, "MISSION TIMER", "MSN TIMER", "START", "STOP", "RESET", 1, 0);
-    thumbwheel(90, 64, "MT HOURS", "HRS");
-    thumbwheel(118, 64, "MT MIN", "MIN");
-    thumbwheel(146, 64, "MT SEC", "SEC");
+    toggle(40, 64, ID_MT, "MSN TIMER", "START", "STOP", "RESET", 1, 0);
+    thumbwheel(90, 64, ID_MTH, "HRS");
+    thumbwheel(118, 64, ID_MTM, "MIN");
+    thumbwheel(146, 64, ID_MTS, "SEC");
     toggle(196, 64, ID_ET, "EVENT TIMER", "START", "STOP", "RESET", 1, 0);
-    thumbwheel(246, 64, "ET MIN", "MIN");
-    thumbwheel(274, 64, "ET SEC", "SEC");
-    toggle(322, 64, "ET COUNT", "COUNT", "UP", NULL, "DOWN", 1, 0);
+    thumbwheel(246, 64, ID_ETM, "MIN");
+    thumbwheel(274, 64, ID_ETS, "SEC");
+    toggle(322, 64, ID_ETCOUNT, "COUNT", "UP", NULL, "DOWN", 1, 0);
 
     group(8, 124, 166, 150, "LIGHTING");
     static const char *const fl[11] = { "OFF", "", "", "", "", "", "", "", "", "", "BRT" };
     rotary(48, 170, ID_FLOOD, "FLOOD", fl, 11, 5, 270);
-    toggle(120, 170, "FLOOD SEL", "FLOOD", "ALL", NULL, "POST", 1, 0);
-    toggle(48, 244, "ANUN/NUM BRT", "ANUN/NUM", "BRT", NULL, "DIM", 1, 0);
-    toggle(120, 244, "SIDE PNLS", "SIDE PNLS", "ON", NULL, "OFF", 1, 0);
+    toggle(120, 170, ID_FLOODSEL, "FLOOD", "ALL", NULL, "POST", 1, 0);
+    toggle(48, 244, ID_ANUNBRT, "ANUN/NUM", "BRT", NULL, "DIM", 1, 0);
+    toggle(120, 244, ID_SIDEPNL, "SIDE PNLS", "ON", NULL, "OFF", 1, 0);
 
     group(184, 124, 168, 150, "ENGINE");
+    hazard_frame(190, 132, 58, 42, 2.6f);
+    hazard_frame(254, 126, 92, 56, 2.8f);
     pushbtn(196, 138, 46, 30, ID_START5, "ENGINE\nSTART", GRN_L, 0, 0);
     pushbtn(260, 132, 80, 44, ID_STOP5, "ENGINE\nSTOP", RED_L, lm_engine_stop_is_latched(), 0);
     pushbtn(196, 184, 46, 30, ID_PLUSX5, "PLUS X", WHT_L, plusx_timer > 0, 0);
@@ -849,15 +1058,21 @@ static void panel6(void)
     static const char *const keys[16] = { "+", "7", "8", "9", "-", "4", "5", "6", "0", "1", "2", "3", "CLR", "READ\nOUT", "ENTR", "HOLD" };
     for (int i = 0; i < 16; i++) {
         float x = 32 + (i % 4) * 48, y = 96 + (i / 4) * 42;
-        DrawRectangleRounded((Rectangle){ x, y, 38, 32 }, 0.15f, 4, (Color){ 32, 33, 35, 255 });
+        int dn = pressed(ID_DEDA, i);
+        float up = dn ? KEY_DOWN : KEY_UP;
+        add_part(LEV_KEY, x + 19, y + 16, up, 0, 38, 32, 0, (Color){ 20, 20, 22, 255 });
+        pc_lift(up + 0.12f);
+        DrawRectangleRounded((Rectangle){ x, y, 38, 32 }, 0.15f, 4, dn ? (Color){ 66, 68, 72, 255 } : (Color){ 32, 33, 35, 255 });
         DrawRectangleRoundedLinesEx((Rectangle){ x, y, 38, 32 }, 0.15f, 4, 0.6f, (Color){ 12, 12, 12, 255 });
         float sz = strlen(keys[i]) > 2 ? 6.0f : 11.0f;
         pc_glow(el_col(0.5f));
         pc_text_box(keys[i], (Rectangle){ x, y, 38, 32 }, sz, 0.1f, C_WHITE);
         pc_glow_off();
+        pc_lift(0);
         add_hot(HOT_DEDA, (Rectangle){ x, y, 38, 32 }, ID_DEDA, i);
     }
     group(248, 18, 104, 256, "ENGINE");
+    hazard_frame(258, 34, 86, 56, 2.8f);
     pushbtn(264, 40, 74, 44, ID_STOP6, "ENGINE\nSTOP", RED_L, lm_engine_stop_is_latched(), 0);
     pushbtn(272, 104, 58, 30, ID_PLUSX6, "PLUS X", WHT_L, plusx_timer > 0, 0);
     toggle(300, 176, "AGS STATUS", "AGS STATUS", "OPERATE", "STBY", "OFF", 1, 1);
@@ -927,11 +1142,17 @@ static void panel14(void)
 {
     group(8, 16, 584, 220, "ELECTRICAL POWER");
     float jitter = 0.01f * sinf((float)GetTime() * 0.7f);
-    dial(70, 78, 30, "DC VOLTS", 0.66f + jitter, "20", "40");
-    float amps = 0.45f + (float)(lm.thrust / 46978.0) * 0.08f + jitter;
-    dial(160, 78, 30, "DC AMPS", amps, "0", "120");
+    // Volts and amps of whatever POWER/TEMP MON selects: the two buses, the
+    // four descent batteries (carrying the load), the ascent batteries (idle).
     static const char *const mon[9] = { "CDR BUS", "LMP BUS", "BAT 1", "BAT 2", "BAT 3", "BAT 4", "BAT 5", "BAT 6", "XLUNAR" };
-    rotary(270, 78, "PWR MON", "POWER/TEMP MON", mon, 9, 0, 260);
+    static const float pv[9] = { 0.42f, 0.42f, 0.46f, 0.46f, 0.45f, 0.46f, 0.60f, 0.60f, 0.0f };
+    static const float pa[9] = { 0.45f, 0.38f, 0.22f, 0.21f, 0.20f, 0.21f, 0.0f, 0.0f, 0.0f };
+    int psel = ST(ID_PWRMON, 0);
+    if (psel < 0 || psel > 8) psel = 0;
+    float load = pa[psel] > 0 ? pa[psel] + (float)(lm.thrust / 46978.0) * 0.08f * pa[psel] / 0.45f + jitter : 0;
+    dial(70, 78, 30, "DC VOLTS", pv[psel] > 0 ? pv[psel] + jitter : 0, "20", "40");
+    dial(160, 78, 30, "DC AMPS", load, "0", "120");
+    rotary(270, 78, ID_PWRMON, "POWER/TEMP MON", mon, 9, 0, 260);
     for (int i = 0; i < 4; i++) {
         float x = 340 + i * 62;
         char *lab = (char *)(i == 0 ? "DES BAT 1" : i == 1 ? "DES BAT 2" : i == 2 ? "DES BAT 3" : "DES BAT 4");
@@ -959,7 +1180,7 @@ static void panel14(void)
     toggle(280, 320, "DIVERT VLV", "SUIT GAS DIV", "EGRESS", NULL, "CABIN", 1, 1);
     toggle(350, 320, "CO2 CAN", "CO2 CANISTER", "PRIM", NULL, "SEC", 1, 0);
     toggle(420, 320, "WATER SEP", "WATER SEP", "1", NULL, "2", 1, 0);
-    toggle(490, 320, "CABIN FAN", "CABIN FAN", "ON", NULL, "OFF", -1, 0);
+    toggle(490, 320, ID_CABFAN, "CABIN FAN", "ON", NULL, "OFF", -1, 0);
     toggle(280, 420, "O2 DES", "DES O2", "OPEN", NULL, "CLOSE", 1, 0);
     toggle(350, 420, "O2 ASC1", "ASC O2 #1", "OPEN", NULL, "CLOSE", -1, 0);
     toggle(420, 420, "O2 ASC2", "ASC O2 #2", "OPEN", NULL, "CLOSE", -1, 0);
@@ -990,6 +1211,16 @@ static const char *const cbg11[5] = { "COMMUNICATIONS / FLIGHT DISPLAYS", "PROPU
 
 static void cb_panel(int lmp)
 {
+    cb_side = lmp;
+    cb_next = 0;
+    // Debugging: AGC_CBOPEN=n starts with every n-th breaker pulled.
+    static int preset;
+    if (!preset) {
+        preset = 1;
+        const char *e = getenv("AGC_CBOPEN");
+        int n = e ? atoi(e) : 0;
+        for (int i = 0; n > 0 && i < CB_PER_PANEL; i += n) cb_open[0][i] = cb_open[1][i] = 1;
+    }
     TXT_C(lmp ? "CB PANEL 16 - LMP BUS" : "CB PANEL 11 - CDR BUS", 575, 6, 4.0f);
     for (int r = 0; r < 5; r++) {
         float y = 44 + r * 104;
@@ -997,8 +1228,8 @@ static void cb_panel(int lmp)
         for (int i = 0; i < 24; i++) {
             const char *lab = cb11[(r + lmp * 2) % 5][(i + lmp * 7) % 24];
             float x = 34 + i * 46.5f;
-            breaker(x, y + 18, lab, 0);
-            breaker(x, y + 46, NULL, 0);
+            breaker(x, y + 18, lab);
+            breaker(x, y + 46, NULL);
         }
     }
 }
@@ -1006,8 +1237,13 @@ static void cb_panel(int lmp)
 void cp_draw_panel(int panel)
 {
     cur_panel = panel;
+    drawing_panel = 1;
     cp_items[panel].nlev = 0;
     cp_items[panel].nhot = 0;
+    hints_target(&hint_tgt);
+    mark.on = 0;
+    hint_rec[panel].on = 0;
+    cp_live_panels &= ~(1u << panel);
     const PanelDef *pd = &cp_panels[panel];
     DrawRectangleRec((Rectangle){ 0, 0, pd->w_mm, pd->h_mm }, C_PANEL);
     // Mounting screws in the corners, as on the real panels.
@@ -1030,6 +1266,8 @@ void cp_draw_panel(int panel)
     case P14: panel14(); break;
     case P16: cb_panel(1); break;
     }
+    draw_mark();
+    drawing_panel = 0;
 }
 
 // --- Logic --------------------------------------------------------------------------
@@ -1047,6 +1285,10 @@ void cp_panels_update(float dt)
     if (plusx_timer > 0) {
         plusx_timer -= dt;
         if (plusx_timer <= 0) lm_set_thc(0, 0);
+    }
+    if (press_t > 0) {
+        press_t -= dt;
+        if (press_t <= 0) cp_dirty = 1;   // the cap comes back up
     }
     // Master alarm: any program alarm (PROG lamp) or warning.
     const DskyState *d = agc_host_dsky();
@@ -1066,7 +1308,20 @@ void cp_panels_update(float dt)
     was_on = lm.dps_on;
     int ets = ST(ID_ET, 1);
     if (ets == -1) { event_timer = 0; event_run = 0; ST(ID_ET, 1) = 0; }
-    if (event_run && ets != 0) event_timer += dts;
+    // Panel 3 duplicate: RESET (spring-loaded) zeroes the timer, COUNT starts it.
+    int er = ST(ID_ETRESET, 0);
+    if (er == 1) { event_timer = 0; event_run = 0; ST(ID_ETRESET, 0) = 0; cp_dirty = 1; }
+    if (er == -1) { event_run = 1; if (ets == 0) ST(ID_ET, 1) = 1; ST(ID_ETRESET, 0) = 0; cp_dirty = 1; }
+    if (event_run && ST(ID_ET, 1) != 0) {
+        if (ST(ID_ETCOUNT, 1) > 0) event_timer += dts;
+        else if ((event_timer -= dts) <= 0) { event_timer = 0; event_run = 0; }   // counted down to zero
+    }
+
+    // Mission timer: follows mission time until the crew stops, resets or slews it.
+    if (mission_timer < 0 || dts > 600 || lm.t < 1) mission_timer = lm.t;   // first frame, or a new scenario
+    int mts = ST(ID_MT, 1);
+    if (mts == -1) { mission_timer = 0; ST(ID_MT, 1) = 0; cp_dirty = 1; }
+    else if (mts == 1) mission_timer += dts;
 }
 
 static void deda_key(int i)
@@ -1107,16 +1362,25 @@ static int dsky_key_from_mm(float u, float v)
 void cp_click(const Hot *h, float u, float v)
 {
     cp_dirty = 1;
+    if (h->kind == HOT_DEDA) sound_key();
+    else if (h->kind != HOT_DSKY) sound_switch();   // DSKY keys click in dsky.c
     switch (h->kind) {
     case HOT_DSKY:
         dsky_mouse_press(dsky_key_from_mm(u, v));
         return;
     case HOT_DEDA:
         deda_key(h->idx);
+        press_id = ID_DEDA; press_idx = h->idx; press_t = 0.14f;
         return;
-    case HOT_CB:
-        crew_say("Circuit breakers stay in: pulling them is not modelled");
+    case HOT_CB: {
+        int k = h->panel == P16;
+        unsigned char *o = &cb_open[k][h->idx < CB_PER_PANEL ? h->idx : 0];
+        *o = !*o;
+        static char b[120];
+        snprintf(b, sizeof b, "Circuit breaker %s: %s", h->id ? h->id : "(spare)", *o ? "OPEN" : "closed");
+        crew_say(b);
         return;
+    }
     case HOT_TOGGLE: {
         int *s = state_of(h->id, 0);
         int up = v < h->r.y + h->r.height / 2;
@@ -1145,13 +1409,25 @@ void cp_click(const Hot *h, float u, float v)
     case HOT_KNOB: {
         int *s = state_of(h->id, 0);
         float cx = h->r.x + h->r.width / 2;
-        int n = *s + (u >= cx ? 1 : -1);
+        int step = u >= cx ? 1 : -1;
+        // Timer slew thumbwheels turn freely: each click moves the reading one unit.
+        double *tm = h->id == ID_MTH || h->id == ID_MTM || h->id == ID_MTS ? &mission_timer :
+                     h->id == ID_ETM || h->id == ID_ETS ? &event_timer : NULL;
+        if (tm) {
+            step = v < h->r.y + h->r.height / 2 ? 1 : -1;   // roll the wheel up or down
+            double unit = h->id == ID_MTH ? 3600 : h->id == ID_MTM || h->id == ID_ETM ? 60 : 1;
+            *tm = fmax(0, *tm + step * unit);
+            *s = ((*s + step) % 10 + 10) % 10;
+            return;
+        }
+        int n = *s + step;
         if (n < 0) n = 0;
         if (n > h->idx - 1) n = h->idx - 1;
         *s = n;
         return;
     }
     case HOT_BUTTON:
+        press_id = h->id; press_idx = 0; press_t = 0.16f;
         if (h->id == ID_STOP5 || h->id == ID_STOP6) {
             lm_engine_stop();
             crew_say("ENGINE STOP");
@@ -1182,10 +1458,14 @@ const char *cp_tooltip(const Hot *h, float u, float v)
     (void)u;
     (void)v;
     (void)pos_name;
-    int functional = h->id == ID_ENGARM || h->id == ID_PGNS || h->id == ID_ROD || h->id == ID_STOP5 || h->id == ID_STOP6 ||
-                     h->id == ID_MA1 || h->id == ID_MA2 || h->id == ID_FLOOD || h->id == ID_INTEG || h->id == ID_NUM ||
-                     h->id == ID_LTGTEST || h->id == ID_XSCALE || h->id == ID_RATESCALE || h->id == ID_MODESEL ||
-                     h->id == ID_ET || h->id == ID_PLUSX5 || h->id == ID_PLUSX6;
+    static const char *const works[] = {
+        ID_ENGARM, ID_PGNS, ID_ROD, ID_STOP5, ID_STOP6, ID_MA1, ID_MA2, ID_FLOOD, ID_INTEG, ID_NUM, ID_LTGTEST, ID_XSCALE,
+        ID_RATESCALE, ID_MODESEL, ID_ET, ID_PLUSX5, ID_PLUSX6, ID_FLOODSEL, ID_SIDEPNL, ID_ANUNBRT, ID_DSKYLTG, ID_MT, ID_MTH,
+        ID_MTM, ID_MTS, ID_ETM, ID_ETS, ID_ETCOUNT, ID_ETRESET, ID_PRPMON, ID_TEMPMON, ID_HTRMON, ID_PWRMON, ID_SIGMON,
+        ID_SUITFAN, ID_CABFAN,
+    };
+    int functional = 0;
+    for (size_t i = 0; i < sizeof works / sizeof works[0]; i++) functional |= h->id == works[i];
     switch (h->kind) {
     case HOT_DSKY: {
         int k = dsky_key_from_mm(u, v);
@@ -1193,13 +1473,26 @@ const char *cp_tooltip(const Hot *h, float u, float v)
         return b;
     }
     case HOT_DEDA: return "AGS DEDA (abort guidance not simulated)";
-    case HOT_CB: snprintf(b, sizeof b, "Circuit breaker  %s  (closed)", h->id ? h->id : ""); return b;
+    case HOT_CB: {
+        static const char *const wired[] = { "FLOOD", "INTGL", "SIDE PNLS", "MISSION TIMER", "EVENT TIMER", "PRPLNT QTY",
+                                             "SUIT FAN 1", "SUIT FAN 2", "CABIN FAN CONT" };
+        int w = 0;
+        for (size_t i = 0; h->id && i < sizeof wired / sizeof wired[0]; i++) w |= !strcmp(h->id, wired[i]);
+        int open = cb_open[h->panel == P16][h->idx < CB_PER_PANEL ? h->idx : 0];
+        snprintf(b, sizeof b, "Circuit breaker  %s  (%s)   click to %s%s", h->id ? h->id : "spare", open ? "OPEN" : "closed",
+                 open ? "push in" : "pull", w ? "" : "   (its circuit is not modelled)");
+        return b;
+    }
     case HOT_TOGGLE:
         if (h->id == ID_ROD) return "RATE OF DESCENT  click up: -1 ft/s  down: +1 ft/s  (P66)";
         snprintf(b, sizeof b, "%s  %s%s", h->id, *state_of(h->id, 0) > 0 ? "UP" : *state_of(h->id, 0) < 0 ? "DOWN" : "CENTRE",
                  functional ? "" : "   (not modelled)");
         return b;
     case HOT_KNOB:
+        if (h->id == ID_MTH || h->id == ID_MTM || h->id == ID_MTS || h->id == ID_ETM || h->id == ID_ETS) {
+            snprintf(b, sizeof b, "%s  timer slew: click the upper half to add one, the lower half to take one off", h->id);
+            return b;
+        }
         snprintf(b, sizeof b, "%s  position %d   click left/right half to turn%s", h->id, *state_of(h->id, 0),
                  functional ? "" : "   (not modelled)");
         return b;

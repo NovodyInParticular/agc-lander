@@ -21,7 +21,7 @@
 
 // Materials (vertex alpha): 1 gold foil, 2 metal, 3 black paint, 4 white paint,
 // 5 mylar blanket, 6 glass, 7 emissive.
-enum { M_GOLD = 1, M_METAL, M_BLACK, M_WHITE, M_MYLAR, M_GLASS, M_EMIT };
+enum { M_GOLD = 1, M_METAL, M_BLACK, M_WHITE, M_MYLAR, M_GLASS, M_EMIT, M_ANOD = 10 };
 
 typedef struct { unsigned char r, g, b, m; } Mat;
 static const Mat MT_GOLD = { 220, 160, 60, M_GOLD };
@@ -29,9 +29,9 @@ static const Mat MT_AMBER = { 190, 110, 40, M_GOLD };
 static const Mat MT_SILVER = { 200, 200, 205, M_METAL };
 static const Mat MT_GREY = { 150, 150, 152, M_METAL };
 static const Mat MT_DARKMETAL = { 70, 66, 62, M_METAL };
-static const Mat MT_BLACK = { 18, 18, 20, M_BLACK };
-static const Mat MT_WHITE = { 190, 190, 186, M_WHITE };   // aged thermal paint: keeps panel detail under full sun
-static const Mat MT_MYLAR = { 175, 175, 180, M_MYLAR };
+static const Mat MT_BLACK = { 8, 8, 9, M_BLACK };          // colours are linear albedo: black paint ~3 %
+static const Mat MT_WHITE = { 160, 160, 155, M_WHITE };   // aged thermal paint: keeps panel detail under full sun
+static const Mat MT_MYLAR = { 168, 168, 174, M_MYLAR };
 static const Mat MT_GLASS = { 20, 25, 35, M_GLASS };
 static const Mat MT_DPSIN = { 40, 34, 30, M_METAL };
 
@@ -238,8 +238,8 @@ static void build_descent_stage(void)
     }
 }
 
-static const Mat MT_ANOD = { 120, 118, 112, M_METAL };     // anodised panel
-static const Mat MT_DARKGREY = { 60, 60, 64, M_BLACK };
+static const Mat MT_ANOD = { 88, 86, 82, M_ANOD };      // anodised micrometeoroid shield
+static const Mat MT_DARKGREY = { 22, 22, 24, M_BLACK };
 
 // Quad helper with the vertices given as (x, y, z) floats.
 #define Q(a,b,c,d,m) quad(V a, V b, V c, V d, m)
@@ -318,10 +318,22 @@ static void build_ascent_stage(void)
     // --- Aft equipment bay ----------------------------------------------------------
     box(V(xb + 0.55f, -1.15f, -2.35f), V(xb + 2.35f, 1.15f, -1.32f), MT_MYLAR);
     box(V(xb + 0.60f, -1.05f, -2.40f), V(xb + 2.30f, 1.05f, -2.35f), MT_BLACK);
-    // Radiator fins on the aft bay.
-    for (int k = 0; k < 5; k++) {
-        float y = -0.8f + k * 0.4f;
-        box(V(xb + 0.7f, y - 0.02f, -2.48f), V(xb + 2.2f, y + 0.02f, -2.38f), MT_WHITE);
+    // Thermal shield panels standing off the aft equipment rack: an upper row of
+    // anodised skin, a lower row of black-coated panels, on short standoffs.
+    for (int r = 0; r < 2; r++)
+        for (int k = 0; k < 3; k++) {
+            float y0 = -1.00f + k * 0.68f, xa = xb + 0.70f + r * 0.80f;
+            box(V(xa, y0, -2.455f), V(xa + 0.74f, y0 + 0.64f, -2.425f), r ? MT_ANOD : MT_DARKGREY);
+            for (int c = 0; c < 4; c++) {
+                float sx = xa + ((c & 1) ? 0.68f : 0.06f), sy = y0 + ((c & 2) ? 0.58f : 0.06f);
+                tube(V(sx, sy, -2.40f), V(sx, sy, -2.46f), 0.014f, 0.014f, 6, MT_SILVER, 1);
+            }
+        }
+    // Gaseous oxygen and helium tanks tucked between the bay and the mid section.
+    for (int side = -1; side <= 1; side += 2) {
+        tube(V(xb + 0.42f, side * 0.62f, -1.95f), V(xb + 0.42f, side * 0.62f, -1.62f), 0.19f, 0.19f, 16, MT_SILVER, 0);
+        tube(V(xb + 0.42f, side * 0.62f, -1.95f), V(xb + 0.42f, side * 0.62f, -2.05f), 0.19f, 0.09f, 16, MT_SILVER, 1);
+        tube(V(xb + 0.42f, side * 0.62f, -1.62f), V(xb + 0.42f, side * 0.62f, -1.52f), 0.19f, 0.09f, 16, MT_SILVER, 1);
     }
 
     // --- Top: docking tunnel, drogue, ascent engine cover ---------------------------
@@ -365,7 +377,7 @@ static void build_ascent_stage(void)
 
 // --- Extra detail: seams, bays, decals, lights, handrails ---------------------------
 
-static const Mat MT_RED = { 178, 34, 52, M_WHITE }, MT_BLUE = { 40, 50, 120, M_WHITE }, MT_PAINTW = { 236, 236, 236, M_WHITE };
+static const Mat MT_RED = { 178, 34, 52, M_WHITE }, MT_BLUE = { 40, 50, 120, M_WHITE }, MT_PAINTW = { 200, 200, 200, M_WHITE };
 
 // Flat rectangle on a plane: centre c, unit axes u (width) and v (height), outward normal n.
 static void plate(Vector3 c, Vector3 u, Vector3 v, Vector3 n, float w, float h, float off, Mat m)
@@ -484,7 +496,7 @@ static void build_details(void)
     box(V(xb + 2.35f, -1.14f, 0.20f), V(xb + 2.45f, -1.10f, 0.30f), (Mat){ 70, 6, 4, M_EMIT });
     box(V(xb + 2.35f, 1.10f, 0.20f), V(xb + 2.45f, 1.14f, 0.30f), (Mat){ 4, 60, 10, M_EMIT });
     box(V(xb + 2.92f, -0.05f, 0.40f), V(xb + 2.98f, 0.05f, 0.44f), (Mat){ 70, 45, 6, M_EMIT });
-    box(V(xb + 2.10f, -0.05f, -2.42f), V(xb + 2.20f, 0.05f, -2.38f), (Mat){ 55, 55, 50, M_EMIT });
+    box(V(xb + 2.36f, -0.05f, -2.40f), V(xb + 2.44f, 0.05f, -2.34f), (Mat){ 55, 55, 50, M_EMIT });
 
     // RCS quad thermal "doghouse" shields around each cluster.
     for (int q = 1; q <= 4; q++) {
@@ -497,9 +509,51 @@ static void build_details(void)
     }
 }
 
+// --- The flag the crew plants ---------------------------------------------------
+// Own axes: +X up the pole from the ground, cloth along +Z from the top.
+// The cloth hangs from a horizontal rod (no air to fly it) and keeps the
+// creases it was folded with.
+
+static float flag_wave(float x, float z) { return 0.035f * sinf(z * 8.5f + x * 1.5f) + 0.014f * sinf(z * 21.0f - x * 6.0f); }
+
+static void build_flag(void)
+{
+    const float top = 2.20f, fh = 0.90f, fw = 1.45f;
+    static const Mat MT_POLE = { 196, 170, 96, M_METAL };
+    // Nylon cloth: plain matte (material 9), not the riveted-panel paint.
+    static const Mat CL_RED = { 150, 30, 44, 9 }, CL_WHITE = { 190, 190, 186, 9 }, CL_BLUE = { 34, 42, 104, 9 };
+    tube(V(-0.30f, 0, 0), V(top + 0.03f, 0, 0), 0.012f, 0.012f, 8, MT_POLE, 1);
+    tube(V(top, 0, 0), V(top, 0, fw + 0.02f), 0.007f, 0.007f, 6, MT_POLE, 1);
+    const int NC = 14, NS = 13;
+    for (int j = 0; j < NC; j++)
+        for (int i = 0; i < NS; i++) {
+            float z0 = 0.02f + fw * j / NC, z1 = 0.02f + fw * (j + 1) / NC;
+            float x0 = top - fh * i / NS, x1 = top - fh * (i + 1) / NS;
+            int canton = i < 7 && j < NC * 2 / 5 + 1;
+            Mat m = canton ? CL_BLUE : (i & 1) ? CL_WHITE : CL_RED;
+            Vector3 a = V(x0, flag_wave(x0, z0), z0), b = V(x0, flag_wave(x0, z1), z1);
+            Vector3 c = V(x1, flag_wave(x1, z1), z1), d = V(x1, flag_wave(x1, z0), z0);
+            quad(a, b, c, d, m);
+            quad(a, d, c, b, m);   // the other face
+        }
+    // Stars: nine rows of six and five.
+    float cw = fw * (NC * 2 / 5 + 1) / NC, ch = fh * 7 / NS;
+    for (int r = 0; r < 9; r++)
+        for (int k = 0; k < (r & 1 ? 5 : 6); k++) {
+            float z = 0.02f + cw * ((r & 1 ? 1.0f : 0.5f) + k) / 6.0f, x = top - ch * (r + 0.5f) / 9.0f, e = 0.016f;
+            float y = flag_wave(x, z);
+            for (int side = -1; side <= 1; side += 2) {
+                float o = y + side * 0.004f;
+                Vector3 a = V(x + e, o, z - e), b = V(x + e, o, z + e), c = V(x - e, o, z + e), d = V(x - e, o, z - e);
+                if (side > 0) quad(a, b, c, d, CL_WHITE);
+                else quad(a, d, c, b, CL_WHITE);
+            }
+        }
+}
+
 // --- Public ---------------------------------------------------------------------
 
-static Mesh lm_mesh;
+static Mesh lm_mesh, flag_mesh;
 static Material lm_mat, depth_mat, fx_mat;
 
 void lmmodel_init(void)
@@ -516,6 +570,17 @@ void lmmodel_init(void)
     m.colors = B.c;
     UploadMesh(&m, false);
     lm_mesh = m;
+    // The flag: its own small mesh (the LM mesh keeps the arrays built so far).
+    memset(&B, 0, sizeof B);
+    build_flag();
+    Mesh f = { 0 };
+    f.vertexCount = B.count;
+    f.triangleCount = B.count / 3;
+    f.vertices = B.v;
+    f.normals = B.n;
+    f.colors = B.c;
+    UploadMesh(&f, false);
+    flag_mesh = f;
     lm_mat = LoadMaterialDefault();
     render_lm_material(&lm_mat);
     depth_mat = LoadMaterialDefault();
@@ -541,6 +606,11 @@ static Matrix to_matrix(M3 r, V3 t)
 void lmmodel_draw(M3 site_from_body, V3 pos_cam_rel)
 {
     DrawMesh(lm_mesh, lm_mat, to_matrix(site_from_body, pos_cam_rel));
+}
+
+void lmmodel_draw_flag(M3 site_from_flag, V3 base_cam_rel)
+{
+    DrawMesh(flag_mesh, lm_mat, to_matrix(site_from_flag, base_cam_rel));
 }
 
 void lmmodel_draw_depth(M3 site_from_body, V3 pos_cam_rel)

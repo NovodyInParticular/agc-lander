@@ -44,6 +44,9 @@ void terrain_update(V3 camera_site, double fov_y, int screen_h);
 // Draw visible chunks relative to the camera (camera-relative rendering).
 void terrain_draw(V3 camera_site, void *shader);
 
+// Two eyes: hold the fade-in of new chunks while the first eye is drawn.
+void terrain_hold_fade(int hold);
+
 // Stats for the debug overlay.
 void terrain_stats(int *chunks_drawn, int *chunks_loaded, int *jobs_pending);
 

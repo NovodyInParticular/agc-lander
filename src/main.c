@@ -15,12 +15,19 @@ __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void *module, c
 #include "raymath.h"
 #include "rlgl.h"
 
+#include "input.h"
+#include "vr.h"
+
 // AGC_PERF=1: print per-section frame timings once a second (GPU-synced).
-extern void *glfwGetProcAddress(const char *);
-static void (*perf_finish)(void);
 static int perf_on;
 static double perf_t[8], perf_n;
+#ifdef AGC_VR
+static double perf_mark(void) { return GetTime(); }
+#else
+extern void *glfwGetProcAddress(const char *);
+static void (*perf_finish)(void);
 static double perf_mark(void) { if (perf_on) { rlDrawRenderBatchActive(); if (!perf_finish) perf_finish = (void (*)(void))glfwGetProcAddress("glFinish"); perf_finish(); } return GetTime(); }
+#endif
 
 #include "agc_host.h"
 #include "assets.h"
@@ -29,6 +36,7 @@ static double perf_mark(void) { if (perf_on) { rlDrawRenderBatchActive(); if (!p
 #include "controls.h"
 #include "coop.h"
 #include "crew.h"
+#include "eva.h"
 #include "dsky.h"
 #include "hints.h"
 #include "hud.h"
@@ -36,6 +44,7 @@ static double perf_mark(void) { if (perf_on) { rlDrawRenderBatchActive(); if (!p
 #include "lmmodel.h"
 #include "net.h"
 #include "moon.h"
+#include "sound.h"
 #include "render.h"
 #include "rocks.h"
 #include "scenario.h"
@@ -176,6 +185,7 @@ static void start_world(void)
     lm_reset();
     lm_attach_agc();
     crew_reset();
+    eva_reset();
     scenario_pre_pdi();
     if (!terrain_ready) {
         terrain_set_sun(sun_site);
@@ -190,12 +200,13 @@ static void start_world(void)
 // Cameras.
 
 enum { CAM_CHASE, CAM_CDR, CAM_DAC, CAM_TOWER, CAM_CINEMA, CAM_GLOBE, CAM_COUNT };
+enum { CAM_EVA = CAM_COUNT };   // the astronaut's own eyes on the surface: not in the camera cycle
 static const char *cam_names[CAM_COUNT] = { "CHASE", "COCKPIT", "16MM DAC (LMP WINDOW)", "TOWER", "CINEMATIC", "LUNAR ORBIT" };
 static double orbit_yaw = -0.9, orbit_pitch = 0.16, orbit_dist = 24;
 
 static ViewCam make_camera(int mode, V3 lm_pos, M3 R, double t_wall)
 {
-    ViewCam c;
+    ViewCam c = { 0 };
     c.fov_y = 50 * DEG;
     V3 up = local_up_at(lm_pos);
     V3 east = v3_norm(v3_cross(v3(0, 0, 1), up));   // site +Z is south: z x up = east-ish
@@ -204,6 +215,8 @@ static ViewCam make_camera(int mode, V3 lm_pos, M3 R, double t_wall)
     switch (mode) {
     case CAM_CDR:
         return cockpit_camera(lm_pos, R);
+    case CAM_EVA:
+        return eva_camera();
     case CAM_GLOBE:
         return globe_camera(lm_pos);
     case CAM_DAC: {
@@ -255,7 +268,37 @@ static ViewCam make_camera(int mode, V3 lm_pos, M3 R, double t_wall)
 
 static V3 earth_site_g;
 
-static void draw_world(const ViewCam *cam, int w, int h, float film, int camera)
+// Once per frame, before any eye is drawn: terrain level of detail for the
+// viewpoint, the LM's sun shadow map, the dust simulation.
+static float world_dust;
+static void world_prepare(const ViewCam *cam, int h, int camera)
+{
+    if (camera == CAM_GLOBE) return;
+    V3 lm_pos = lm_site_pos();
+    M3 R = lm_site_rot();
+    terrain_update(cam->pos, cam->fov_y, h);
+
+    // LM shadow map (LM at the origin of the light space).
+    render_shadow_begin(v3_sub(lm_pos, cam->pos), sun_site, 8.0f);
+    lmmodel_draw_depth(R, v3(0, 0, 0));
+    render_shadow_end();
+
+    // Dust kicked up by the descent engine.
+    float dust = 0;
+    if (!pose_override && lm.thrust > 500 && lm.altitude < 70)
+        dust = (float)fmin(1.0, pow(1.0 - lm.altitude / 70.0, 1.3) * lm.thrust / 11000.0);
+    float crash_age = lm.land_result == LAND_CRASH ? (float)(lm.t - lm.crash_t) : -1.0f;
+    if (crash_age >= 0 && crash_age < 8) {
+        // Impact blows a ring of dust out that settles over a few seconds.
+        float burst = (float)fmin(1.0, 0.35 + lm.crash_speed / 8.0) * expf(-crash_age / 1.8f);
+        if (burst > dust) dust = burst;
+    }
+    lmmodel_update_dust(GetFrameTime(), dust);
+    world_dust = dust;
+}
+
+// One view of the world (the screen, or one eye).
+static void world_draw(const ViewCam *cam, int w, int h, float film, int camera)
 {
     V3 lm_pos = lm_site_pos();
     M3 R = lm_site_rot();
@@ -273,33 +316,18 @@ static void draw_world(const ViewCam *cam, int w, int h, float film, int camera)
         render_end_scene();
         return;
     }
-    terrain_update(cam->pos, cam->fov_y, h);
-
-    // LM shadow map (LM at the origin of the light space).
-    render_shadow_begin(rel, sun_site, 8.0f);
-    lmmodel_draw_depth(R, v3(0, 0, 0));
-    render_shadow_end();
+    render_set_shadow_center(rel);   // the shadow map was made once; this view sees it from its own eye point
 
     render_set_film(film);
     render_begin_scene(cam, w, h);
     render_sky(cam, sun_site, earth_site, sun_site);
     render_scene_3d_begin(w, h);
 
-    // Dust kicked up by the descent engine.
     V3 up = local_up_at(lm_pos);
     double ground_dist = lm.altitude + 2.75;
     V3 ground = v3_sub(v3_add(lm_pos, v3_scale(up, -ground_dist)), cam->pos);
-    float dust = 0;
-    if (pose_override) ground_dist = 2.75;
-    if (!pose_override && lm.thrust > 500 && lm.altitude < 70)
-        dust = (float)fmin(1.0, pow(1.0 - lm.altitude / 70.0, 1.3) * lm.thrust / 11000.0);
+    float dust = world_dust;
     float crash_age = lm.land_result == LAND_CRASH ? (float)(lm.t - lm.crash_t) : -1.0f;
-    if (crash_age >= 0 && crash_age < 8) {
-        // Impact blows a ring of dust out that settles over a few seconds.
-        float burst = (float)fmin(1.0, 0.35 + lm.crash_speed / 8.0) * expf(-crash_age / 1.8f);
-        if (burst > dust) dust = burst;
-    }
-    lmmodel_update_dust(GetFrameTime(), dust);
     V3 cam_mod = v3(fmod(cam->pos.x, 4096.0), fmod(cam->pos.y, 4096.0), fmod(cam->pos.z, 4096.0));
     render_set_scene_uniforms(sun_site, cam_mod, local_up_at(cam->pos), 0.11f, ground, dust);
 
@@ -312,6 +340,7 @@ static void draw_world(const ViewCam *cam, int w, int h, float film, int camera)
     if (camera == CAM_CDR) render_set_lm_extras(COCKPIT_NEAR_CUT, 1.0f, NULL, NULL, 0);
     lmmodel_draw(R, rel);
     render_set_lm_extras(0.0f, 1.0f, NULL, NULL, 0);
+    eva_draw(cam);
 
     LmFx fx = { 0 };
     fx.thrust = pose_override ? 0 : (float)lm.thrust;
@@ -333,6 +362,14 @@ static void draw_world(const ViewCam *cam, int w, int h, float film, int camera)
     if (camera == CAM_CDR) cockpit_draw(R, rel, w, h);
     render_end_scene();
 }
+
+#ifndef AGC_VR
+static void draw_world(const ViewCam *cam, int w, int h, float film, int camera)
+{
+    world_prepare(cam, h, camera);
+    world_draw(cam, w, h, film, camera);
+}
+#endif
 
 // Commander's window: Landing Point Designator reticle (angles from N64).
 static void draw_lpd(int w, int h, double fov_y)
@@ -518,8 +555,12 @@ static void draw_results(int w, int h, int client)
     hud_text(font_ui, "Fuel left", x + 70 * sc, ry, 26 * sc, (Color){ 170, 176, 186, 255 });
     hud_text(font_mono, line, x + 360 * sc, ry + 2 * sc, 24 * sc, (Color){ 220, 224, 230, 255 });
 
+#ifdef AGC_VR
+    hud_text_centered(font_ui, "B  fly it again      A  hide this      X  open the hatch      Menu button  menu",
+#else
     hud_text_centered(font_ui, client ? "Waiting for the Commander.   Space hides this   Esc  menu"
                                       : "Enter  fly it again      Space  hide this      Esc  menu",
+#endif
                       w / 2.0f, y + bh - 50 * sc, 22 * sc, (Color){ 150, 158, 170, 255 });
 }
 
@@ -594,6 +635,166 @@ static const AuditView audit_views[] = {
 };
 #define N_AUDIT ((int)(sizeof audit_views / sizeof audit_views[0]))
 
+#ifdef AGC_VR
+// ---------------------------------------------------------------------------
+// Headset. The world is drawn once per eye; everything two-dimensional (menu,
+// hints, prompts, results) is drawn into a picture that floats in front of
+// the seat. The right-hand controller points at the cabin's switches.
+
+#define UI_W 1600
+#define UI_H 900
+#define UI_DIST 0.75      // m in front of the seat's eye point
+#define UI_WIDTH 0.95     // m
+#define UI_DROP 0.03      // m below the eye line
+
+static RenderTexture2D ui_rt;
+static Shader ui_sh;
+static Texture2D ui_white;
+
+static const char *ui_vs =
+    "in vec3 vertexPosition; in vec2 vertexTexCoord; in vec4 vertexColor;\n"
+    "uniform mat4 mvp; out vec2 uv; out vec4 vcol;\n"
+    "void main(){ uv = vertexTexCoord; vcol = vertexColor; gl_Position = mvp * vec4(vertexPosition, 1.0); }\n";
+// The picture holds ordinary display colours with the alpha already multiplied in.
+static const char *ui_fs =
+    "in vec2 uv; in vec4 vcol; uniform sampler2D texture0; out vec4 finalColor;\n"
+    "void main(){\n"
+    "  vec4 c = texture(texture0, uv) * vcol;\n"
+    "#if DIRECT_OUT == 1\n"
+    "  vec3 s = c.a > 0.001 ? c.rgb / c.a : vec3(0.0);\n"
+    "  c.rgb = pow(s, vec3(2.2)) * c.a;\n"   // the eye target expects linear light
+    "#endif\n"
+    "  finalColor = c;\n"
+    "}\n";
+
+static void vr_game_init(void)
+{
+    ui_rt = LoadRenderTexture(UI_W, UI_H);
+    SetTextureFilter(ui_rt.texture, TEXTURE_FILTER_BILINEAR);
+    ui_sh = render_load_shader(ui_vs, ui_fs);
+    static const unsigned char px[4] = { 255, 255, 255, 255 };
+    Image img = { (void *)px, 1, 1, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
+    ui_white = LoadTextureFromImage(img);
+}
+
+// Tracking-space vector -> site frame, for a seat whose view is `b`.
+static V3 vr_map(const ViewCam *b, V3 v)
+{
+    V3 r = v3_norm(v3_cross(b->fwd, b->upv));
+    return v3_add(v3_add(v3_scale(r, v.x), v3_scale(b->upv, v.y)), v3_scale(b->fwd, -v.z));
+}
+
+static ViewCam vr_eye_cam(const ViewCam *b, const VrEye *e)
+{
+    ViewCam c = *b;
+    c.pos = v3_add(b->pos, vr_map(b, e->pos));
+    c.fwd = v3_norm(vr_map(b, e->fwd));
+    c.upv = v3_norm(vr_map(b, e->up));
+    c.asym = 1;
+    c.tan_l = e->tan_l; c.tan_r = e->tan_r; c.tan_d = e->tan_d; c.tan_u = e->tan_u;
+    c.fov_y = atan(e->tan_u) - atan(e->tan_d);
+    return c;
+}
+
+// Controller buttons as the keys the game already understands.
+static void vr_map_keys(int menu, int results_showing)
+{
+    const VrInput *in = vr_input();
+    static int hold_a = 1, hold_b = 1;   // a button used in the menu must be let go before it acts in flight
+    in_begin_frame();
+    if (menu) {
+        in_set_key(KEY_UP, in->ly > 0.6f || in->ry > 0.6f);
+        in_set_key(KEY_DOWN, in->ly < -0.6f || in->ry < -0.6f);
+        in_set_key(KEY_LEFT, in->lx < -0.6f || in->rx < -0.6f);
+        in_set_key(KEY_RIGHT, in->lx > 0.6f || in->rx > 0.6f);
+        in_set_key(KEY_ENTER, in->a || in->rtrig > 0.6f);
+        hold_a = hold_b = 1;
+        return;
+    }
+    if (!in->a) hold_a = 0;
+    if (!in->b) hold_b = 0;
+    in_set_key(KEY_ESCAPE, in->menu);
+    in_set_key(KEY_X, in->x);
+    in_set_key(KEY_TAB, in->y);
+    in_set_key(KEY_F6, in->lclick);
+    in_set_key(KEY_H, in->rclick);
+    in_set_key(KEY_SPACE, in->a && !hold_a);
+    if (eva_phase() == EVA_SURFACE) {
+        in_set_key(KEY_W, in->ly > 0.4f);
+        in_set_key(KEY_S, in->ly < -0.4f);
+        in_set_key(KEY_D, in->lx > 0.4f);
+        in_set_key(KEY_A, in->lx < -0.4f);
+        in_set_key(KEY_F, in->ltrig > 0.6f);
+        in_set_key(KEY_LEFT_SHIFT, in->lgrip > 0.5f);
+        static int turn_was;
+        int turn = in->rx > 0.6f ? 1 : in->rx < -0.6f ? -1 : 0;
+        if (turn && turn != turn_was) eva_turn(turn * 30 * DEG);   // snap turns: easier on the stomach than a smooth one
+        turn_was = turn;
+    } else if (results_showing) {
+        in_set_key(KEY_ENTER, in->b && !hold_b);
+    } else {
+        in_set_key(VKEY_PRO, in->b && !hold_b);
+    }
+}
+
+// The floating display and the pointing ray, drawn over the finished view of one eye.
+static void vr_draw_overlays(const ViewCam *base, const ViewCam *eye, int w, int h, int show_ui, int laser, V3 laser_from, V3 laser_to, int laser_hit)
+{
+    render_scene_3d_begin_near(w, h, 0.05);
+    rlDisableDepthTest();
+    rlDisableBackfaceCulling();
+    rlSetBlendFactors(RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_FUNC_ADD);
+    rlSetBlendMode(RL_BLEND_CUSTOM);
+    BeginShaderMode(ui_sh);
+    V3 r = v3_norm(v3_cross(base->fwd, base->upv)), u = base->upv;
+    if (show_ui) {
+        V3 c = v3_sub(v3_add(base->pos, vr_map(base, v3(0, -UI_DROP, -UI_DIST))), eye->pos);
+        V3 hx = v3_scale(r, UI_WIDTH / 2), hy = v3_scale(u, UI_WIDTH * UI_H / UI_W / 2);
+        V3 p0 = v3_sub(v3_sub(c, hx), hy), p1 = v3_sub(v3_add(c, hx), hy), p2 = v3_add(v3_add(c, hx), hy), p3 = v3_add(v3_sub(c, hx), hy);
+        rlSetTexture(ui_rt.texture.id);
+        rlBegin(RL_QUADS);
+        rlColor4ub(255, 255, 255, 255);
+        rlTexCoord2f(0, 0); rlVertex3f((float)p0.x, (float)p0.y, (float)p0.z);
+        rlTexCoord2f(1, 0); rlVertex3f((float)p1.x, (float)p1.y, (float)p1.z);
+        rlTexCoord2f(1, 1); rlVertex3f((float)p2.x, (float)p2.y, (float)p2.z);
+        rlTexCoord2f(0, 1); rlVertex3f((float)p3.x, (float)p3.y, (float)p3.z);
+        rlEnd();
+        rlDrawRenderBatchActive();
+    }
+    if (laser) {
+        // A thin beam (a strip turned toward the eye) and a dot where it lands.
+        V3 a = v3_sub(laser_from, eye->pos), b = v3_sub(laser_to, eye->pos);
+        V3 side = v3_norm(v3_cross(v3_sub(b, a), a));
+        V3 s0 = v3_scale(side, 0.0012), s1 = v3_scale(side, 0.0008);
+        V3 q0 = v3_sub(a, s0), q1 = v3_add(a, s0), q2 = v3_add(b, s1), q3 = v3_sub(b, s1);
+        rlSetTexture(ui_white.id);
+        rlBegin(RL_QUADS);
+        rlColor4ub(60, 190, 110, 150);
+        rlTexCoord2f(0, 0); rlVertex3f((float)q0.x, (float)q0.y, (float)q0.z);
+        rlTexCoord2f(1, 0); rlVertex3f((float)q1.x, (float)q1.y, (float)q1.z);
+        rlTexCoord2f(1, 1); rlVertex3f((float)q2.x, (float)q2.y, (float)q2.z);
+        rlTexCoord2f(0, 1); rlVertex3f((float)q3.x, (float)q3.y, (float)q3.z);
+        if (laser_hit) {
+            V3 er = v3_norm(v3_cross(eye->fwd, eye->upv));
+            V3 dx = v3_scale(er, 0.005), dy = v3_scale(eye->upv, 0.005);
+            V3 d0 = v3_sub(v3_sub(b, dx), dy), d1 = v3_sub(v3_add(b, dx), dy), d2 = v3_add(v3_add(b, dx), dy), d3 = v3_add(v3_sub(b, dx), dy);
+            rlColor4ub(120, 255, 170, 230);
+            rlTexCoord2f(0, 0); rlVertex3f((float)d0.x, (float)d0.y, (float)d0.z);
+            rlTexCoord2f(1, 0); rlVertex3f((float)d1.x, (float)d1.y, (float)d1.z);
+            rlTexCoord2f(1, 1); rlVertex3f((float)d2.x, (float)d2.y, (float)d2.z);
+            rlTexCoord2f(0, 1); rlVertex3f((float)d3.x, (float)d3.y, (float)d3.z);
+        }
+        rlEnd();
+        rlDrawRenderBatchActive();
+    }
+    rlSetTexture(0);
+    EndShaderMode();
+    rlSetBlendMode(RL_BLEND_ALPHA);
+    rlEnableBackfaceCulling();
+    render_scene_3d_end();
+}
+#endif
+
 int main(int argc, char **argv)
 {
     Options opt;
@@ -602,8 +803,27 @@ int main(int argc, char **argv)
     int capture = opt.shot || opt.audit;
     int audit_i = -1, audit_frames = 0, audit_fail = 0;
 
+#ifdef AGC_VR
+#ifdef __ANDROID__
+    SetConfigFlags(FLAG_WINDOW_ALWAYS_RUN);
+    InitWindow(0, 0, "AGC Lander");
+#else
+    SetConfigFlags(FLAG_VSYNC_HINT);
+    InitWindow(1600, 844, "AGC Lander - headset stand-in");
+#endif
+    if (vr_init() != 0) {
+        TraceLog(LOG_ERROR, "VR: the headset could not be started");
+        CloseWindow();
+        return 1;
+    }
+    render_set_direct(vr_srgb_target() ? 1 : 2);
+    capture = 0;
+    opt.windowed = 1;
+    if (opt.camera == 0) opt.camera = CAM_CDR;   // in the headset you start at the Commander's station
+#else
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT | FLAG_MSAA_4X_HINT);
     InitWindow(1600, 900, opt.spectator ? "AGC Lander - Outside View" : "AGC Lander - Apollo 11 / Luminary099");
+#endif
 #ifdef _WIN32
     GetModuleFileNameA(NULL, self_exe, sizeof self_exe);
 #else
@@ -622,7 +842,9 @@ int main(int argc, char **argv)
         opt.start = 0;
     }
     SetExitKey(KEY_NULL);
+#ifndef AGC_VR
     SetTargetFPS(60);
+#endif
 
     // Sun 10.8 deg up in the east, Earth 66 deg up toward WSW (site frame: x E, y up, z S).
     sun_site = v3_norm(v3(0.978, 0.187, -0.0856));
@@ -637,6 +859,9 @@ int main(int argc, char **argv)
     lmmodel_init();
     cockpit_init();
     extras_init();
+#ifdef AGC_VR
+    vr_game_init();
+#endif
     start_world();
     (void)earth_site_g;
     if (opt.ufo > 0) extras_force_ufo(opt.ufo);
@@ -686,10 +911,33 @@ int main(int argc, char **argv)
 
     RenderTexture2D shot_rt = { 0 };
     if (capture) shot_rt = LoadRenderTexture(1920, 1080);
+#if defined(AGC_VR) && !defined(__ANDROID__)
+    if (opt.shot) capture = 1;   // stand-in screenshots: stay silent
+#endif
+    if (!capture && !opt.spectator) sound_init();
+#ifdef AGC_VR
+    capture = 0;
+#endif
 
     perf_on = getenv("AGC_PERF") != NULL;
     while (!WindowShouldClose()) {
         double pf0 = perf_on ? perf_mark() : 0, pf1 = 0, pf2 = 0, pf3 = 0, pf4 = 0;
+#ifdef AGC_VR
+        float dt = 0;
+        {
+            // Headset off, or the system menu is up: nothing is drawn and the flight waits.
+            int vr_quit = 0;
+            if (!vr_begin_frame(&dt, &vr_quit)) {
+                if (vr_quit) break;
+                continue;
+            }
+        }
+        if (dt > 0.1f) dt = 0.1f;
+        wall += dt;
+        int w = UI_W, h = UI_H;
+        vr_map_keys(gs == GS_MENU, gs == GS_FLY && lm.land_result != LAND_NONE && !lm.dps_on && !results_hidden &&
+                                   eva_phase() == EVA_INSIDE);
+#else
         float dt = GetFrameTime();
         if (dt > 0.1f) dt = 0.1f;
         wall += dt;
@@ -697,6 +945,7 @@ int main(int argc, char **argv)
         if (capture) { w = 1920; h = 1080; }
         render_set_output(w, h);
         render_set_output_fbo(capture ? shot_rt.id : 0);
+#endif
         // The DSKY floats over the bottom-right corner; the 3D view always fills the screen.
         int dsky_w = (show_dsky && gs != GS_MENU) ? (int)(h * 0.30f) : 0;
 
@@ -783,12 +1032,20 @@ int main(int argc, char **argv)
             if (IsKeyPressed(KEY_PAGE_UP)) warp = warp >= 60 ? 60 : warp < 1 ? 1 : warp * (warp < 2 ? 2 : warp < 5 ? 2.5 : 2);
             if (IsKeyPressed(KEY_PAGE_DOWN)) warp = warp <= 1 ? 1 : warp / (warp <= 2 ? 2 : warp <= 5 ? 2.5 : 2);
             if (IsKeyPressed(KEY_F7)) lm_set_engine_arm(!lm.engine_armed);
+            if (IsKeyPressed(KEY_M)) {
+                sound_set_muted(!sound_muted());
+                crew_say(sound_muted() ? "Cabin sound off (M turns it on)" : "Cabin sound on (heard in the cockpit and window views)");
+            }
             if (IsKeyPressed(KEY_H)) {
                 hints_on = !hints_on;
                 hints_save();
                 crew_say(hints_on ? "Hints on (H hides them)" : "Hints off (H shows them)");
             }
-            if (lm.land_result != LAND_NONE && !lm.dps_on) {
+            if (IsKeyPressed(KEY_X) && !opt.spectator) {
+                if (eva_phase() == EVA_INSIDE && eva_available()) { results_hidden = 1; camera = CAM_CDR; }
+                eva_key();
+            }
+            if (lm.land_result != LAND_NONE && !lm.dps_on && eva_phase() == EVA_INSIDE) {
                 if (IsKeyPressed(KEY_SPACE)) results_hidden = !results_hidden;
                 if (coop_role != COOP_CLIENT && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) &&
                     lm.t - lm.touchdown_t > 3) {
@@ -806,6 +1063,13 @@ int main(int argc, char **argv)
             {
                 Controls ct;
                 controls_poll(&ct);
+                if (eva_phase() != EVA_INSIDE) {
+                    // Outside (or at the hatch) the same keys walk the astronaut: nothing reaches the LM.
+                    char dev[sizeof ct.device];
+                    memcpy(dev, ct.device, sizeof dev);
+                    memset(&ct, 0, sizeof ct);
+                    memcpy(ct.device, dev, sizeof dev);
+                }
                 if (coop_role == COOP_HOST) coop_host_rhc(&ct.pitch, &ct.yaw, &ct.roll);
                 agc_host_set_rhc(ct.pitch, ct.yaw, ct.roll);
                 cockpit_set_hand_controls(ct.pitch, ct.yaw, ct.roll);
@@ -972,28 +1236,108 @@ int main(int argc, char **argv)
         if (!opt.spectator && gs != GS_MENU) dsky_frame();
         int scene_w0 = w;
         if (opt.look_set) { cockpit_set_view(opt.look_yaw, opt.look_pitch); opt.look_set = 0; }
-        if (gs != GS_MENU && camera == CAM_CDR) cockpit_input(scene_w0, h);
-        if (gs != GS_MENU && camera == CAM_GLOBE) globe_input(scene_w0, h);
-        ViewCam cam = make_camera(camera, lm_site_pos(), lm_site_rot(), wall);
-        if (lm.land_result == LAND_CRASH && camera != CAM_GLOBE) {
+        {   // Debugging: AGC_EVA=hatch|crawl|ladder|walk|flag parks the LM and jumps into the moonwalk.
+            static int eva_dbg;
+            const char *ed = getenv("AGC_EVA");
+            if (ed && ed[0] == 'a') {
+                // "auto": the LM stands parked as after a good landing, and the hatch opens by itself.
+                if (gs == GS_FLY) {
+                    if (!eva_dbg) { pose_park(); paused = 1; }
+                    lm.touchdown = 1; lm.dps_on = 0; lm.land_result = LAND_GOOD;
+                    if (!eva_dbg) { eva_dbg = 2; results_hidden = 1; eva_key(); }
+                    eva_update(dt, lm_site_pos(), lm_site_rot());   // the sim is paused; the walk is not
+                }
+            } else if (ed && gs == GS_FLY && !eva_dbg) {
+                eva_dbg = 1;
+                pose_park();
+                paused = 1;
+                eva_debug(ed, lm_site_pos(), lm_site_rot());
+            }
+        }
+        // The moonwalk takes the view over: kneeling at the hatch in the cabin, then the astronaut's own eyes.
+        if (gs == GS_FLY && !paused && !opt.spectator) eva_update(dt, lm_site_pos(), lm_site_rot());
+        cockpit_set_egress(eva_hatch(), eva_at_hatch() ? eva_kneel() : 0);
+        int vcam = eva_outside() ? CAM_EVA : eva_at_hatch() ? CAM_CDR : camera;
+        if (gs != GS_MENU && vcam == CAM_CDR) cockpit_input(scene_w0, h);
+        if (gs != GS_MENU && vcam == CAM_GLOBE) globe_input(scene_w0, h);
+#ifdef AGC_VR
+        // The seat's view is level and straight ahead; the head does the looking.
+        cockpit_vr_level();
+        {
+            const VrInput *in = vr_input();
+            eva_set_vr(atan2(in->head_fwd.x, -in->head_fwd.z));
+        }
+        if (gs == GS_MENU) vcam = CAM_CHASE;   // the menu floats outside, with the LM in view
+#endif
+        ViewCam cam = make_camera(vcam, lm_site_pos(), lm_site_rot(), wall);
+        if (lm.land_result == LAND_CRASH && vcam != CAM_GLOBE) {
             // Impact shake, strongest in the cockpit.
             double age = lm.t - lm.crash_t;
-            double amp = (camera == CAM_CDR ? 0.06 : 0.25) * fmin(1.0, lm.crash_speed / 6.0) * exp(-age * 1.6);
+            double amp = (vcam == CAM_CDR ? 0.06 : 0.25) * fmin(1.0, lm.crash_speed / 6.0) * exp(-age * 1.6);
             if (age >= 0 && amp > 0.002)
                 cam.pos = v3_add(cam.pos, v3(amp * sin(wall * 61.0), amp * sin(wall * 47.0 + 1.0), amp * sin(wall * 53.0 + 2.0)));
         }
         extras_update(dt, gs == GS_FLY && !paused && !opt.spectator, &cam);
-        float film_now = film > 0 || camera == CAM_DAC ? 1.0f : 0.0f;
-        if ((show_hud && gs != GS_MENU) || camera == CAM_CDR) hud_prepare();
+        float film_now = film > 0 || vcam == CAM_DAC ? 1.0f : 0.0f;
+        if ((show_hud && gs != GS_MENU) || vcam == CAM_CDR) hud_prepare();
         if (gs != GS_MENU && !opt.spectator) cockpit_update(dt);
+        {   // Cabin sound follows the flight state; only heard from inside.
+            static float prev_jet[LM_NJETS];
+            static int prev_result = LAND_NONE, prev_touch;
+            SoundState ss = { 0 };
+            ss.inside = vcam == CAM_CDR || vcam == CAM_DAC || vcam == CAM_EVA;   // on the surface: the suit's own fan
+            ss.running = gs == GS_FLY && !paused;
+            ss.thrust = (float)(lm.thrust / 45000.0);
+            for (int j = 0; j < LM_NJETS; j++) {
+                ss.rcs += lm.jet_level[j];
+                if (lm.jet_level[j] > 0.3f && prev_jet[j] <= 0.3f) ss.rcs_hits++;
+                prev_jet[j] = lm.jet_level[j];
+            }
+            ss.alarm = cp_master_alarm();
+            ss.fans = cp_fan_level();
+            if (ss.running) {
+                if (lm.land_result == LAND_CRASH && prev_result != LAND_CRASH) sound_crash();
+                else if (lm.touchdown && !prev_touch) sound_touchdown((float)lm.touchdown_speed);
+            }
+            prev_result = lm.land_result;
+            prev_touch = lm.touchdown;
+            sound_update(&ss, dt);
+        }
         if (perf_on) pf2 = perf_mark();
-        if (camera == CAM_CDR) cockpit_prepare(lm_site_rot(), sun_site, local_up_at(lm_site_pos()), dt);
+        if (vcam == CAM_CDR) cockpit_prepare(lm_site_rot(), sun_site, local_up_at(lm_site_pos()), dt);
         if (perf_on) pf3 = perf_mark();
+        int scene_w = w;
+#ifdef AGC_VR
+        // The right-hand controller points at the cabin's switches; the trigger works them.
+        int laser = 0, laser_hit = 0;
+        V3 laser_from = v3(0, 0, 0), laser_to = v3(0, 0, 0);
+        {
+            const VrInput *in = vr_input();
+            static int trig_was = 1;
+            int trig = in->rtrig > 0.6f, pressed = trig && !trig_was;
+            trig_was = trig || gs == GS_MENU;   // the trigger that chose a menu line must be let go first
+            if (gs == GS_FLY && vcam == CAM_CDR && in->aim_ok[1] && !eva_at_hatch()) {
+                M3 Rt = m3_transpose(lm_site_rot());
+                V3 o = v3_add(cam.pos, vr_map(&cam, in->aim_pos[1])), d = v3_norm(vr_map(&cam, in->aim_dir[1]));
+                double dist = cockpit_pointer(m3_apply(Rt, v3_sub(o, lm_site_pos())), m3_apply(Rt, d), pressed);
+                laser = 1;
+                laser_hit = dist > 0;
+                laser_from = o;
+                laser_to = v3_add(o, v3_scale(d, dist > 0 ? dist : 1.2));
+                if (pressed && laser_hit) vr_haptic(1, 0.5f, 0.03f);
+            }
+        }
+        // Everything two-dimensional goes into the floating display.
+        BeginTextureMode(ui_rt);
+        ClearBackground(BLANK);
+        rlSetBlendFactorsSeparate(RL_SRC_ALPHA, RL_ONE_MINUS_SRC_ALPHA, RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_FUNC_ADD, RL_FUNC_ADD);
+        rlSetBlendMode(RL_BLEND_CUSTOM_SEPARATE);
+#else
         BeginDrawing();
         if (capture) BeginTextureMode(shot_rt);
         ClearBackground(BLACK);
-        int scene_w = w;
-        draw_world(&cam, scene_w > 64 ? scene_w : w, h, film_now, gs == GS_MENU ? CAM_CHASE : camera);
+        draw_world(&cam, scene_w > 64 ? scene_w : w, h, film_now, gs == GS_MENU ? CAM_CHASE : vcam);
+#endif
         (void)draw_lpd;
         if (perf_on) pf4 = perf_mark();
 
@@ -1022,23 +1366,33 @@ int main(int argc, char **argv)
                              : menu_sel == 4 ? "Enter toggles. With HOST on, start any scenario above: a second player can join you as LM Pilot (UDP port 47012). You fly; they run the DSKY and the panels."
                                              : "Type the Commander's IP address (or name) and press Enter. You get the LMP station: DSKY, panels, switches. Same version of the game on both sides.";
             hud_text(font_ui, desc, 100, 250 + 7 * 56 + 40, 21, (Color){ 160, 168, 178, 255 });
+#ifdef AGC_VR
+            hud_text(font_ui, "Thumbstick up/down to choose, A or the right trigger to start.", 100, h - 132, 22, (Color){ 130, 136, 146, 255 });
+            hud_text(font_ui, "In flight:  right stick = hand controller   left stick = yaw, and up/down = ROD switch   A = ENGINE STOP   B = PRO",
+                     100, h - 100, 19, (Color){ 130, 136, 146, 255 });
+            hud_text(font_ui, "point the right hand at a switch and pull the trigger   X = hatch   Y = camera   left stick click = hide this display   Menu button = back here",
+                     100, h - 72, 19, (Color){ 130, 136, 146, 255 });
+#else
             hud_text(font_ui, "Up/Down to choose, Enter to start.  In flight: F1 for help.", 100, h - 70, 22,
                      (Color){ 130, 136, 146, 255 });
+#endif
         } else {
-            hud_set_minimal(camera == CAM_CDR || camera == CAM_GLOBE);
-            if (show_hud) hud_draw(w, h, 0, (float)warp, cam_names[camera], paused);
+            hud_set_minimal(vcam == CAM_CDR || vcam == CAM_GLOBE || vcam == CAM_EVA);
+            if (show_hud) hud_draw(w, h, 0, (float)warp, vcam == CAM_EVA ? "MOONWALK" : cam_names[vcam], paused);
+            hints_set_cockpit(vcam == CAM_CDR);
             if (show_hud && gs == GS_FLY) hints_draw(w, h, 0);
-            if (gs == GS_FLY && lm.land_result != LAND_NONE && !lm.dps_on && !results_hidden &&
+            if (gs == GS_FLY && !opt.audit) eva_overlay(scene_w, h);
+            if (gs == GS_FLY && lm.land_result != LAND_NONE && !lm.dps_on && !results_hidden && eva_phase() == EVA_INSIDE &&
                 lm.t - (lm.land_result == LAND_CRASH ? lm.crash_t : lm.touchdown_t) > 3)
                 draw_results(scene_w, h, coop_role == COOP_CLIENT);
-            if (camera == CAM_CDR && gs == GS_FLY && !opt.audit) cockpit_overlay(scene_w, h);
+            if (vcam == CAM_CDR && gs == GS_FLY && !opt.audit) cockpit_overlay(scene_w, h);
             if (coop_role != COOP_OFF) {
                 float sc = h / 1080.0f;
                 if (sc < 0.7f) sc = 0.7f;
                 hud_text(font_mono, coop_status(), 18 * sc, 166 * sc, 17 * sc,
                          coop_peer_connected() ? (Color){ 120, 220, 255, 255 } : (Color){ 255, 190, 60, 255 });
             }
-            if (camera == CAM_GLOBE) globe_overlay(&cam, scene_w, h, lm_site_pos());
+            if (vcam == CAM_GLOBE) globe_overlay(&cam, scene_w, h, lm_site_pos());
             if (gs == GS_FASTFWD) {
                 DrawRectangle(0, h / 2 - 50, scene_w, 100, (Color){ 0, 0, 0, 170 });
                 char b[96];
@@ -1055,7 +1409,7 @@ int main(int argc, char **argv)
                     "DSKY  0-9  V verb  N noun  Enter  C clr  R rset  P pro  K key rel  = +  - -",
                     "Tab  camera (chase, cockpit, 16mm, tower, cinematic, lunar orbit)   Right-drag look/orbit",
                     "PgUp/PgDn  time warp   F5  pause   Esc  menu   F10  outside view on 2nd monitor   F11  fullscreen",
-                    "F2  auto crew on/off  F3  16mm film  F4  DSKY  F6  HUD  H  plain-English hints",
+                    "F2  auto crew on/off  F3  16mm film  F4  DSKY  F6  HUD  H  plain-English hints  M  cabin sound",
                     "F7  descent engine arm    F8  PGNS mode AUTO/ATT HOLD    Space  ENGINE STOP",
                     "W/S A/D Q/E or stick/gamepad: hand controller   Up/Down, d-pad or hat: ROD switch (P66)",
                     "",
@@ -1078,6 +1432,41 @@ int main(int argc, char **argv)
                              i == coop_first ? (Color){ 120, 220, 255, 255 } : (Color){ 220, 224, 230, 255 });
             }
         }
+#ifdef AGC_VR
+        if (show_hud || gs == GS_MENU) {
+            // How the headset is coping: frame rate, load (above 100% = too slow), resolution in use.
+            float load, scale, fps;
+            char b[96];
+            vr_stats(&load, &scale, &fps);
+            snprintf(b, sizeof b, "%.0f fps   load %.0f%%   resolution %.0f%%", fps, load * 100, scale * 100);
+            hud_text(font_mono, b, 18, h - 26, 14, (Color){ 120, 128, 138, 200 });
+        }
+        rlDrawRenderBatchActive();
+        rlSetBlendMode(RL_BLEND_ALPHA);
+        EndTextureMode();
+        {
+            int wcam = gs == GS_MENU ? CAM_CHASE : vcam;
+            int show_ui = gs != GS_FLY || show_hud || show_help;
+            VrEye eyes[2];
+            ViewCam ecam[2];
+            for (int i = 0; i < 2; i++) { vr_eye_begin(i, &eyes[i]); ecam[i] = vr_eye_cam(&cam, &eyes[i]); }
+            // Level of detail and shadows are worked out once, for the point between the eyes.
+            ViewCam mid = ecam[0];
+            mid.pos = v3_scale(v3_add(ecam[0].pos, ecam[1].pos), 0.5);
+            world_prepare(&mid, eyes[0].h, wcam);
+            M3 Rt = m3_transpose(lm_site_rot());
+            for (int i = 0; i < 2; i++) {
+                terrain_hold_fade(i == 0);
+                cockpit_set_eye_offset(m3_apply(Rt, v3_sub(ecam[i].pos, cam.pos)));
+                render_set_direct_target(eyes[i].fbo, 0, 0);
+                world_draw(&ecam[i], eyes[i].w, eyes[i].h, film_now, wcam);
+                vr_draw_overlays(&cam, &ecam[i], eyes[i].w, eyes[i].h, show_ui, laser, laser_from, laser_to, laser_hit);
+                vr_eye_end(i);
+            }
+            terrain_hold_fade(0);
+        }
+        vr_end_frame();
+#else
         if (capture) {
             EndTextureMode();
             DrawTexturePro(shot_rt.texture, (Rectangle){ 0, 0, 1920, -1080 },
@@ -1100,6 +1489,7 @@ int main(int argc, char **argv)
         } else {
             EndDrawing();
         }
+#endif
 
         if (getenv("AGC_DBG") && ((int)(wall * 2) != (int)((wall - dt) * 2))) {
             int dn, ld, pd;
@@ -1130,12 +1520,22 @@ int main(int argc, char **argv)
                 break;
             }
         }
-        if (opt.shot && wall >= opt.after) {
+#if defined(AGC_VR) && !defined(__ANDROID__)
+        if (opt.shot && wall >= opt.after) { vr_sim_save(opt.shot); break; }
+#endif
+        if (!render_direct() && opt.shot && wall >= opt.after) {
+            // AGC_SEQ=N: save N consecutive frames (SHOT-000.bmp ...) instead of one
+            // picture, to check motion for popping.
+            static int seq_i;
+            const char *seq_env = getenv("AGC_SEQ");
+            int seq_n = seq_env ? atoi(seq_env) : 0;
+            char seq_path[600];
+            snprintf(seq_path, sizeof seq_path, "%s-%03d.bmp", opt.shot, seq_i);
             Image img = LoadImageFromTexture(shot_rt.texture);
             ImageFlipVertical(&img);
-            ExportImage(img, opt.shot);
+            ExportImage(img, seq_n > 0 ? seq_path : opt.shot);
             UnloadImage(img);
-            break;
+            if (++seq_i >= seq_n) break;
         }
     }
 
@@ -1146,10 +1546,14 @@ int main(int argc, char **argv)
     }
     net_close();
     coop_stop();
+    sound_shutdown();
     cockpit_shutdown();
     terrain_shutdown();
     hud_shutdown();
     render_shutdown();
+#ifdef AGC_VR
+    vr_shutdown();
+#endif
     CloseWindow();
     return audit_fail;
 }

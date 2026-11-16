@@ -13,6 +13,8 @@
 #include "rlgl.h"
 #include "raymath.h"
 
+#include "input.h"
+
 #include "moon.h"
 #include "terrain.h"
 
@@ -86,11 +88,17 @@ static double vnoise(double x, double y, uint32_t seed)
 // ---------------------------------------------------------------------------
 // Craters.
 
-typedef struct { double cell; double prob; uint32_t seed; } Octave;
+// gk: an octave is modelled as geometry once cell * gk >= the chunk's detail
+// floor (1.5 x vertex spacing). Below that the terrain shader draws the very
+// same craters per pixel (render.c, OCT_* tables: keep the two in step), so
+// they are visible from any height and the mesh takes them over unnoticed.
+typedef struct { double cell; double prob; uint32_t seed; double gk; } Octave;
 static const Octave octaves[] = {
-    { 24000, 0.30, 11 }, { 6000, 0.45, 12 }, { 1500, 0.55, 13 }, { 400, 0.60, 14 },
-    { 100, 0.65, 15 }, { 25, 0.65, 16 }, { 6, 0.55, 17 }, { 1.6, 0.45, 18 },
+    { 24000, 0.30, 11, 0.38 }, { 6000, 0.45, 12, 0.15 }, { 1500, 0.55, 13, 0.15 }, { 400, 0.60, 14, 0.15 },
+    { 100, 0.65, 15, 0.15 }, { 25, 0.65, 16, 0.15 }, { 6, 0.55, 17, 0.38 }, { 1.6, 0.45, 18, 0.38 },
 };
+#define SHADER_OCT0 1   // octaves[1..6] are the ones the shader can draw
+#define SHADER_NOCT 6
 #define NOCT (int)(sizeof octaves / sizeof octaves[0])
 
 // Hand-placed features near the landing site, in plane coordinates.
@@ -168,7 +176,7 @@ static void eval(double x, double z, double min_feature, Sample *s)
     s->h = a * flat;
 
     for (int i = 0; i < NOCT; i++) {
-        if (octaves[i].cell * 0.38 < min_feature) break;
+        if (octaves[i].cell * octaves[i].gk < min_feature) break;
         Sample c = { 0, 0 };
         crater_octave(x, z, &octaves[i], &c);
         double damp = (i < 2) ? flat : 1.0;
@@ -232,12 +240,14 @@ typedef struct Node {
     double hmin, hmax;
     // CPU-side data (filled by worker), freed after upload.
     float *pos, *nrm;
+    float *tan, *tc, *tc2;            // morph target: the parent chunk's surface at each vertex
     unsigned char *col;
     unsigned short *idx;
     int nverts, nidx;
     V3 origin;                        // site-frame chunk origin
     Mesh mesh;
     unsigned last_used;
+    float fade;                       // 0 = just appeared (shown as the parent's surface), 1 = fully itself
 } Node;
 
 static Node *root;
@@ -288,6 +298,16 @@ static float shadow_at(double x, double z, double h0, double spacing)
     }
     if (vis > 1) vis = 1;
     return (float)vis;
+}
+
+// Surface point of grid vertex (i, j); indices outside the chunk are evaluated on demand.
+static V3 grid_point(const Node *n, const V3 *p3, int i, int j, double spacing, double mf)
+{
+    if (i >= 0 && i <= GRID && j >= 0 && j <= GRID) return p3[j * (GRID + 1) + i];
+    double x = n->x0 + i * spacing, z = n->z0 + j * spacing;
+    Sample s;
+    eval(x, z, mf, &s);
+    return terrain_plane_to_site(x, z, s.h);
 }
 
 static void build_chunk(Node *n)
@@ -347,10 +367,11 @@ static void build_chunk(Node *n)
             n->pos[3 * k + 1] = (float)p.y;
             n->pos[3 * k + 2] = (float)p.z;
             // Normal from neighbours (with curvature).
-            int il = i > 0 ? i - 1 : i, ir = i < GRID ? i + 1 : i;
-            int jd = j > 0 ? j - 1 : j, ju = j < GRID ? j + 1 : j;
-            V3 dx = v3_sub(p3[j * (GRID + 1) + ir], p3[j * (GRID + 1) + il]);
-            V3 dz = v3_sub(p3[ju * (GRID + 1) + i], p3[jd * (GRID + 1) + i]);
+            // Central differences everywhere: border vertices sample one step
+            // outside the chunk, so neighbouring chunks agree on the edge normal
+            // and no lighting seam shows between them.
+            V3 dx = v3_sub(grid_point(n, p3, i + 1, j, spacing, mf), grid_point(n, p3, i - 1, j, spacing, mf));
+            V3 dz = v3_sub(grid_point(n, p3, i, j + 1, spacing, mf), grid_point(n, p3, i, j - 1, spacing, mf));
             V3 nn = v3_norm(v3_cross(dz, dx));
             n->nrm[3 * k] = (float)nn.x;
             n->nrm[3 * k + 1] = (float)nn.y;
@@ -360,6 +381,65 @@ static void build_chunk(Node *n)
             n->col[4 * k + 2] = (unsigned char)(fr[k] * 255.0f);
             n->col[4 * k + 3] = 255;
         }
+
+    // Morph target. The even vertices of this grid are the parent chunk's
+    // vertices; evaluate the surface there exactly as the parent does (its
+    // coarser detail floor, its shadow step), and interpolate the odd vertices
+    // along the parent's triangles. The vertex shader blends every vertex
+    // toward this target with distance, so a chunk swap changes nothing on
+    // screen: detail grows in and melts away instead of popping.
+    {
+        const int HG = GRID / 2, HW = HG + 3;   // coarse grid with a one-step apron for the normals
+        double cs = spacing * 2, cmf = cs * 1.5;
+        V3 *cp = malloc(sizeof(V3) * HW * HW), *cn = malloc(sizeof(V3) * (HG + 1) * (HG + 1));
+        float *ca = malloc(sizeof(float) * 3 * (HG + 1) * (HG + 1));   // albedo, shadow, fresh
+        for (int J = -1; J <= HG + 1; J++)
+            for (int I = -1; I <= HG + 1; I++) {
+                double x = n->x0 + I * cs, z = n->z0 + J * cs;
+                Sample sc;
+                eval(x, z, cmf, &sc);
+                cp[(J + 1) * HW + I + 1] = terrain_plane_to_site(x, z, sc.h);
+                if (I < 0 || J < 0 || I > HG || J > HG) continue;
+                float *a = &ca[3 * (J * (HG + 1) + I)];
+                terrain_surface_props(x, z, cmf, &a[0], &a[2]);
+                a[1] = cs > 50 ? sh[(2 * J) * (GRID + 1) + 2 * I] : shadow_at(x, z, sc.h, cs);
+            }
+        for (int J = 0; J <= HG; J++)
+            for (int I = 0; I <= HG; I++) {
+                V3 dx = v3_sub(cp[(J + 1) * HW + I + 2], cp[(J + 1) * HW + I]);
+                V3 dz = v3_sub(cp[(J + 2) * HW + I + 1], cp[J * HW + I + 1]);
+                cn[J * (HG + 1) + I] = v3_norm(v3_cross(dz, dx));
+            }
+        n->tan = malloc(sizeof(float) * 4 * nv);
+        n->tc = malloc(sizeof(float) * 2 * nv);
+        n->tc2 = malloc(sizeof(float) * 2 * nv);
+        for (int j = 0; j <= GRID; j++)
+            for (int i = 0; i <= GRID; i++) {
+                int k = j * (GRID + 1) + i;
+                // The one or two coarse vertices this vertex sits on / between.
+                int I0 = i / 2, J0 = j / 2, I1 = I0, J1 = J0;
+                if ((i & 1) && (j & 1)) {
+                    if ((I0 ^ J0) & 1) { I0 += 1; J1 += 1; }   // parent diagonal (I+1,J)-(I,J+1)
+                    else { I1 += 1; J1 += 1; }                 // parent diagonal (I,J)-(I+1,J+1)
+                } else if (i & 1) I1 += 1;
+                else if (j & 1) J1 += 1;
+                int ka = J0 * (HG + 1) + I0, kb = J1 * (HG + 1) + I1;
+                V3 pc = v3_scale(v3_add(cp[(J0 + 1) * HW + I0 + 1], cp[(J1 + 1) * HW + I1 + 1]), 0.5);
+                V3 nc = v3_norm(v3_add(cn[ka], cn[kb]));
+                V3 d = v3_sub(pc, p3[k]);
+                n->tan[4 * k] = (float)d.x;
+                n->tan[4 * k + 1] = (float)d.y;
+                n->tan[4 * k + 2] = (float)d.z;
+                n->tan[4 * k + 3] = 0.5f * (ca[3 * ka + 1] + ca[3 * kb + 1]);
+                n->tc[2 * k] = (float)nc.x;
+                n->tc[2 * k + 1] = (float)nc.z;
+                n->tc2[2 * k] = fminf(1.0f, 0.5f * (ca[3 * ka] + ca[3 * kb]) * 1000.0f / 255.0f);
+                n->tc2[2 * k + 1] = 0.5f * (ca[3 * ka + 2] + ca[3 * kb + 2]);
+            }
+        free(cp);
+        free(cn);
+        free(ca);
+    }
 
     // Skirts: copies of the border vertices, pushed down, to hide LOD cracks.
     double drop = spacing * 1.5 + 2.0;
@@ -375,6 +455,9 @@ static void build_chunk(Node *n)
             n->pos[3 * sk + 2] = n->pos[3 * k + 2] - (float)(dn.z * drop);
             memcpy(&n->nrm[3 * sk], &n->nrm[3 * k], sizeof(float) * 3);
             memcpy(&n->col[4 * sk], &n->col[4 * k], 4);
+            memcpy(&n->tan[4 * sk], &n->tan[4 * k], sizeof(float) * 4);
+            memcpy(&n->tc[2 * sk], &n->tc[2 * k], sizeof(float) * 2);
+            memcpy(&n->tc2[2 * sk], &n->tc2[2 * k], sizeof(float) * 2);
             sk++;
         }
 
@@ -467,12 +550,15 @@ static void upload(Node *n)
     m.vertices = n->pos;
     m.normals = n->nrm;
     m.colors = n->col;
+    m.tangents = n->tan;
+    m.texcoords = n->tc;
+    m.texcoords2 = n->tc2;
     m.indices = shared_idx;
     UploadMesh(&m, false);
     // Keep only GPU copies of the vertex data.
-    free(n->pos); free(n->nrm); free(n->col); free(n->idx);
-    m.vertices = NULL; m.normals = NULL; m.colors = NULL;
-    n->pos = NULL; n->nrm = NULL; n->col = NULL; n->idx = NULL;
+    free(n->pos); free(n->nrm); free(n->col); free(n->idx); free(n->tan); free(n->tc); free(n->tc2);
+    m.vertices = NULL; m.normals = NULL; m.colors = NULL; m.tangents = NULL; m.texcoords = NULL; m.texcoords2 = NULL;
+    n->pos = NULL; n->nrm = NULL; n->col = NULL; n->idx = NULL; n->tan = NULL; n->tc = NULL; n->tc2 = NULL;
     n->mesh = m;
     n->state = 3;
 }
@@ -497,6 +583,9 @@ void terrain_init(V3 site_fixed)
     cores = sysconf(_SC_NPROCESSORS_ONLN);
 #endif
     nworkers = (int)(cores > 2 ? cores - 1 : 1);
+#ifdef __ANDROID__
+    nworkers = 2;   // headset: leave the fast cores to the simulation and the renderer
+#endif
     if (nworkers > 15) nworkers = 15;
     for (int i = 0; i < nworkers; i++)
         pthread_create(&workers[i], NULL, worker, NULL);
@@ -510,7 +599,7 @@ static void free_node(Node *n)
         n->mesh.indices = NULL;   // shared, not owned by this mesh
         UnloadMesh(n->mesh);
     }
-    free(n->pos); free(n->nrm); free(n->col); free(n->idx);
+    free(n->pos); free(n->nrm); free(n->col); free(n->idx); free(n->tan); free(n->tc); free(n->tc2);
     free(n);
     node_count--;
 }
@@ -534,6 +623,11 @@ static Node *draw_list[MAX_DRAW];
 static int draw_n;
 static double lod_k;
 static double cam_x, cam_z, cam_h;
+// After a camera jump (start, camera cut, teleport) chunks appear at once;
+// otherwise each new chunk grows out of its parent's surface over FADE_TIME.
+#define FADE_TIME 0.6f
+static int settling = 1, settle_frames;
+static V3 last_cam;
 
 static double node_distance(Node *n)
 {
@@ -581,7 +675,9 @@ static void select_lod(Node *n)
             }
         int all = 1;
         for (int i = 0; i < 4; i++) if (!n->child[i]) all = 0;
-        if (all && children_ready(n)) {
+        // Hand over to the children only once this chunk has finished growing
+        // in itself, so each level blends out of the one before it.
+        if (all && children_ready(n) && (settling || n->state != 3 || n->fade >= 1.0f)) {
             for (int i = 0; i < 4; i++) select_lod(n->child[i]);
             return;
         }
@@ -638,6 +734,17 @@ void terrain_update(V3 camera_site, double fov_y, int screen_h)
     // Split when the chunk is closer than k * size; k from screen resolution.
     double pix_per_rad = screen_h / fov_y;
     lod_k = 2.2 * pix_per_rad / 900.0 + 0.8;
+    {
+        double moved = v3_len(v3_sub(camera_site, last_cam));
+        last_cam = camera_site;
+        if (moved > fmax(400.0, 0.5 * fabs(cam_h))) { settling = 1; settle_frames = 0; }
+        if (settling) {
+            pthread_mutex_lock(&q_mx);
+            int pending = (q_tail - q_head + QCAP) % QCAP + busy;
+            pthread_mutex_unlock(&q_mx);
+            if (++settle_frames > 20 && (pending == 0 || settle_frames > 900)) settling = 0;
+        }
+    }
 
     // Upload finished chunks (bounded per frame).
     int uploads = 0;
@@ -658,16 +765,54 @@ void terrain_update(V3 camera_site, double fov_y, int screen_h)
     if ((frame_no & 63) == 0) prune(root);
 }
 
+// Headset: the terrain is drawn once per eye; the fade-in of new chunks must
+// advance only once per frame (hold it for the first eye).
+static int fade_hold;
+void terrain_hold_fade(int hold) { fade_hold = hold; }
+
 void terrain_draw(V3 cam, void *shader_ptr)
 {
     Shader *shader = shader_ptr;
     Material mat = LoadMaterialDefault();
     if (!getenv("AGC_DEFSH")) mat.shader = *shader;
     drawn_count = 0;
+    int morph_loc = GetShaderLocation(*shader, "morph");
+    int chunk_loc = GetShaderLocation(*shader, "chunk");
+    int base_loc = GetShaderLocation(*shader, "cellBase"), frac_loc = GetShaderLocation(*shader, "cellFrac");
+    static int no_morph = -1;   // AGC_NOMORPH=1: old hard LOD switching, for comparison
+    if (no_morph < 0) no_morph = getenv("AGC_NOMORPH") != NULL;
+    float dt = GetFrameTime();
+    if (dt > 0.1f) dt = 0.1f;
+    if (fade_hold) dt = 0;
     for (int i = 0; i < draw_n; i++) {
         Node *n = draw_list[i];
         V3 o = v3_sub(n->origin, cam);
         Matrix t = MatrixTranslate((float)o.x, (float)o.y, (float)o.z);
+        if (settling || no_morph) n->fade = 1.0f;
+        // Blend toward the parent's surface across the far part of this
+        // level's range (it hands over to the parent at 2 * size * k).
+        float range = (float)(2.0 * n->size * lod_k);
+        float morph[3] = { range * 0.72f, range * 0.95f, n->level == 0 ? 1.0f : n->fade };
+        if (n->level == 0 || no_morph) morph[0] = morph[1] = 1e30f;
+        SetShaderValue(*shader, morph_loc, morph, SHADER_UNIFORM_VEC3);
+        // Where this chunk sits in each crater octave's cell grid (integer cell
+        // + fraction, so the shader keeps full precision far from the site).
+        float chunk[4] = { (float)(n->size / GRID), 0, 0, 0 };
+        int base[2 * SHADER_NOCT];
+        float frac[2 * SHADER_NOCT];
+        for (int k = 0; k < SHADER_NOCT; k++) {
+            double c = octaves[SHADER_OCT0 + k].cell;
+            double fx = floor(n->x0 / c), fz = floor(n->z0 / c);
+            base[2 * k] = (int)fx;
+            base[2 * k + 1] = (int)fz;
+            frac[2 * k] = (float)(n->x0 / c - fx);
+            frac[2 * k + 1] = (float)(n->z0 / c - fz);
+        }
+        SetShaderValue(*shader, chunk_loc, chunk, SHADER_UNIFORM_VEC4);
+        SetShaderValueV(*shader, base_loc, base, SHADER_UNIFORM_IVEC2, SHADER_NOCT);
+        SetShaderValueV(*shader, frac_loc, frac, SHADER_UNIFORM_VEC2, SHADER_NOCT);
+        n->fade += dt / FADE_TIME;
+        if (n->fade > 1.0f) n->fade = 1.0f;
         DrawMesh(n->mesh, mat, t);
         drawn_count++;
     }

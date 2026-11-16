@@ -37,6 +37,10 @@ void pc_glow(Color c);
 void pc_glow_paint(float k);
 void pc_glow_off(void);
 
+// Raise the following primitives `units` (local canvas units) off the plane,
+// toward the viewer: legends on top of modelled button caps. 0 = on the plane.
+void pc_lift(float units);
+
 void pc_rect(float x, float y, float w, float h, Color c);
 void pc_rect_lines(Rectangle r, float thick, Color c);
 // roundness as raylib: corner radius = roundness * min(w, h) / 2.

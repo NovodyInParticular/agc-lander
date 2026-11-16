@@ -1,15 +1,19 @@
+#include <math.h>
 #include <stddef.h>
 #include <string.h>
 
+#include "sound.h"
 #include "agc_host.h"
 #include "dsky.h"
+#include "hints.h"
 #include "hud.h"
+#include "input.h"
 #include "pcanvas.h"
 
 // ---------------------------------------------------------------------------
 // Colours.
 
-static const Color C_HOUSING   = { 74, 76, 78, 255 };
+static const Color C_HOUSING   = { 104, 112, 126, 255 };
 static const Color C_PANEL     = { 40, 42, 44, 255 };
 static const Color C_EL_BG     = { 14, 18, 16, 255 };
 static const Color C_EL_ON     = { 120, 255, 140, 255 };
@@ -210,6 +214,7 @@ static void press(int i)
     } else {
         agc_host_key(keys[i].code);
     }
+    sound_key();
     key_flash[i] = 0.12f;
 }
 
@@ -267,6 +272,40 @@ const char *dsky_key_name(int i)
     for (; *s && n < 15; s++) b[n++] = *s == '\n' ? ' ' : *s;
     b[n] = 0;
     return b;
+}
+
+int dsky_key_index(int c)
+{
+    static const char *const name = "VN+-0741852963CPKER";   // order of keys[]
+    for (int i = 0; i < 19; i++)
+        if (name[i] == c) return i;
+    return -1;
+}
+
+static int key_is_down(int i)
+{
+    return key_flash[i] > 0 || i == mouse_held_key || (keys[i].code == PRO_CODE && pro_down);
+}
+
+int dsky_key_layout(int i, Rectangle *native, int *down)
+{
+    if (i < 0 || i >= 19) return 0;
+    *native = key_rect(&keys[i]);
+    *down = key_is_down(i);
+    return 1;
+}
+
+// Height of the key tops above the panel canvas, in native units (the cabin
+// models the caps; their legends are drawn at that height).
+static float key_lift_up, key_lift_down;
+void dsky_set_key_lift(float up, float down) { key_lift_up = up; key_lift_down = down; }
+
+// The key the hints want pressed next (-1 = none).
+static int hint_key(void)
+{
+    HintTarget t;
+    if (!hints_target(&t) || t.kind != HT_DSKY_KEY) return -1;
+    return dsky_key_index(t.arg);
 }
 
 static void handle_mouse(Camera2D cam)
@@ -362,11 +401,30 @@ static void draw_native(void)
     }
 
     // Keypad (the legends are back-lit in the cabin).
+    int hk = hint_key();
+    float pulse = 0.5f + 0.5f * sinf((float)GetTime() * 6.0f);
     for (int i = 0; i < 19; i++) {
-        int down = key_flash[i] > 0 || i == mouse_held_key || (keys[i].code == PRO_CODE && pro_down);
+        int down = key_is_down(i);
         Rectangle r = key_rect(&keys[i]);
+        if (canvas) pc_lift(down ? key_lift_down : key_lift_up);
         rbox(r, 0.12f, down ? C_KEY_DOWN : C_KEY);
         rbox_lines(r, 0.12f, 2, (Color){ 20, 20, 20, 255 });
-        label(keys[i].label, r, strlen(keys[i].label) > 2 ? 17 : 30, C_KEY_TEXT, 0.45f);
+        if (i == hk) {
+            // Hint: this is the key to press. Green legend and a pulsing frame.
+            Color g = { 90, 255, 150, 255 };
+            label(keys[i].label, r, strlen(keys[i].label) > 2 ? 17 : 30, g, 0.9f);
+            Rectangle o = { r.x - 3 - 3 * pulse, r.y - 3 - 3 * pulse, r.width + 6 + 6 * pulse, r.height + 6 + 6 * pulse };
+            g.a = (unsigned char)(150 + 105 * pulse);
+            if (canvas) {
+                pc_glow((Color){ 60, 230, 120, 255 });
+                pc_rrect_lines(o, 0.16f, 4.5f, g);
+                pc_glow_off();
+            } else {
+                DrawRectangleRoundedLinesEx(o, 0.16f, 6, 4.5f, g);
+            }
+        } else {
+            label(keys[i].label, r, strlen(keys[i].label) > 2 ? 17 : 30, C_KEY_TEXT, 0.45f);
+        }
     }
+    if (canvas) pc_lift(0);
 }

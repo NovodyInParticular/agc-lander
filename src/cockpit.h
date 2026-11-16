@@ -25,6 +25,14 @@ ViewCam cockpit_camera(V3 lm_pos_site, M3 site_from_body);
 // lm_rel: LM centre of mass relative to the camera (site frame).
 void cockpit_draw(M3 site_from_body, V3 lm_rel, int w, int h);
 
+// Headset: a hand controller points at the panels instead of the mouse.
+// Ray in the LM body frame; pressed = the trigger went down this frame.
+// Returns the distance along the ray to the panel it meets (0 = none).
+double cockpit_pointer(V3 origin_body, V3 dir_body, int pressed);
+// Headset: where the eye being drawn is, relative to the seat's eye point
+// (body frame), so highlights sit right for each eye.
+void cockpit_set_eye_offset(V3 offset_body);
+
 // 2D overlay: tooltip for the control under the mouse, view hints.
 void cockpit_overlay(int scene_w, int scene_h);
 
@@ -35,6 +43,17 @@ void cockpit_set_fov(double fov_deg);
 int cockpit_panel_count(void);
 void cockpit_look_at_panel(int panel, double u, double v, double fov_deg, double aspect);
 void cockpit_set_seat(int lmp);   // 0 Commander, 1 LM Pilot
+void cockpit_vr_level(void);      // headset: seat view straight ahead and level
+
+// MASTER ALARM lit (until a crewman pushes it).
+int cp_master_alarm(void);
+
+// Cabin fans running (suit fan 1.0, plus 0.6 with the cabin fan on), for the sound.
+float cp_fan_level(void);
+
+// Forward hatch door (0 closed .. 1 open) and the crewman's move to it
+// (0 at his station .. 1 kneeling at the hatch .. 2 in the opening).
+void cockpit_set_egress(double hatch, double kneel);
 
 // Hand controller deflections for the 3D ACA (-1..1).
 void cockpit_set_hand_controls(double pitch, double yaw, double roll);

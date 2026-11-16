@@ -20,6 +20,14 @@ void dsky_draw_canvas(float brightness);
 void dsky_frame(void);
 
 // Key under a point in native DSKY coordinates (-1 = none); press it with the mouse.
+// Key geometry and state for the cabin's modelled key caps: rectangle in
+// native units, and whether it is pressed right now. Returns 0 past the last key.
+int dsky_key_layout(int i, Rectangle *native, int *down);
+// Height of the key tops above the canvas plane (native units), up and pressed.
+void dsky_set_key_lift(float up, float down);
+// Index of a key from its letter: V N E R P C K, + - or a digit (-1 = none).
+int dsky_key_index(int c);
+
 int dsky_key_at(Vector2 native);
 void dsky_mouse_press(int key_index);
 const char *dsky_key_name(int key_index);

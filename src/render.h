@@ -9,6 +9,10 @@ typedef struct {
     V3 pos;          // site frame (double)
     V3 fwd, upv;     // unit vectors, site frame
     double fov_y;    // radians
+    // Off-centre frustum (one eye of a headset): tangents of the angles to the
+    // left, right, bottom and top edges (left and bottom negative). asym = 0: symmetric, from fov_y.
+    int asym;
+    double tan_l, tan_r, tan_d, tan_u;
 } ViewCam;
 
 void render_init(void);
@@ -17,6 +21,16 @@ void render_shutdown(void);
 // Common uniforms for all scene shaders; call once per frame inside 3D mode.
 void render_begin_scene(const ViewCam *cam, int screen_w, int screen_h);
 void render_end_scene(void);
+
+// Scene output mode; set before render_init(). 0 = HDR target with bloom,
+// tonemap and edge smoothing (PC). 1 = straight into a linear target that the
+// display encodes (Quest swapchain). 2 = straight into a plain 8-bit target.
+void render_set_direct(int mode);
+int render_direct(void);
+// Direct modes: the framebuffer (with depth) and viewport origin the scene goes to.
+void render_set_direct_target(unsigned int fbo, int x, int y);
+// Compile a shader pair: adds the GLSL version line and sceneOut().
+Shader render_load_shader(const char *vs, const char *fs);
 
 Shader *render_terrain_shader(void);
 Shader *render_lm_shader(void);
@@ -51,6 +65,8 @@ float render_log_far(void);   // logFar uniform value for log-depth shaders
 // Sun shadow map around a camera-relative centre.
 void render_shadow_begin(V3 center_cam_rel, V3 sun, float radius);
 void render_shadow_end(void);
+// Same shadow map seen from another eye point: move its centre (camera-relative).
+void render_set_shadow_center(V3 center_cam_rel);
 Shader *render_depth_shader(void);
 
 #endif

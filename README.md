@@ -52,6 +52,7 @@ propellant left and the impact is hard, the hypergolic propellants go up in a fi
 | F5 / Pause | Pause |
 | F6 | HUD on/off |
 | H | Plain-English hints on/off (remembered between runs) |
+| M | Cabin sound on/off (heard in the cockpit and 16 mm window views; outside views are silent, as in vacuum) |
 | F10 | Outside view on your **second monitor** (press again to close it) |
 | F11 | Fullscreen / window |
 | PgUp / PgDn | Time warp |
@@ -148,7 +149,9 @@ Tab to **COCKPIT**. You stand at the Commander's station of the LM cabin.
 | Mouse wheel | Zoom |
 | Shift + wheel, or L | Lean toward the window |
 | Home | Look out of the window |
-| End | Look down at the panels |
+| End | Step back and look down at the lower panels (again: stand up) |
+| X | After landing, engine off: open the hatch and go outside; outside, at the foot of the ladder: climb back in |
+| W A S D, Shift, Space, F | On the surface: walk, lope, jump, plant the flag (right-drag or arrow keys to look) |
 | F9 | Swap to the LM Pilot's station |
 | Left click | Operate switches, knobs, buttons and the DSKY |
 

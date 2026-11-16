@@ -19,6 +19,8 @@
 #include "raymath.h"
 #include "rlgl.h"
 
+#include "input.h"
+
 #include "assets.h"
 #include "cockpit.h"
 #include "cockpit_int.h"
@@ -68,6 +70,11 @@ static const V3 EYE_LMP = { 2.84, 0.66, 0.30 };
 #define CABIN_HALF 1.04
 #define CABIN_AFT (-1.25)
 // Docking (overhead rendezvous) window above the CDR.
+// Forward hatch opening in the lower front wall (z = 1.00): body X range and half width.
+#define HATCH_X0 1.40
+#define HATCH_X1 1.72
+#define HATCH_HW 0.40
+
 #define DW_Y0 (-0.80)
 #define DW_Y1 (-0.52)
 #define DW_Z0 (-0.35)
@@ -83,7 +90,7 @@ typedef struct {
     int count, cap;
 } Builder;
 
-static Builder SB, DB, TB;   // static opaque, dynamic (levers etc.), transparent
+static Builder SB, DB, TB, CB;   // static opaque, dynamic (hand controllers), transparent, modelled controls
 static Builder *B = &SB;
 static const float white_u = 0, white_v = 0;   // texture coordinates are unused
 
@@ -137,7 +144,8 @@ static void obox(V3 ctr, V3 a, V3 b, V3 c, double ha, double hb, double hc, Colo
     quad(p[0], p[4], p[6], p[2], col, mat); quad(p[1], p[3], p[7], p[5], col, mat);
 }
 
-static void tube(V3 a, V3 b, double ra, double rb, int seg, Color col, int mat, int caps)
+// Cylinder or cone frustum from a to b. caps: bit 0 closes the a end, bit 1 the b end.
+static void cyl(V3 a, V3 b, double ra, double rb, int seg, Color col, int mat, int caps)
 {
     V3 ax = v3_norm(v3_sub(b, a));
     V3 t = fabs(ax.x) < 0.9 ? v3(1, 0, 0) : v3(0, 1, 0);
@@ -149,20 +157,26 @@ static void tube(V3 a, V3 b, double ra, double rb, int seg, Color col, int mat, 
         V3 b0 = v3_add(b, v3_scale(d0, rb)), b1 = v3_add(b, v3_scale(d1, rb));
         bpush(a0, d0, white_u, white_v, col, mat); bpush(a1, d1, white_u, white_v, col, mat); bpush(b1, d1, white_u, white_v, col, mat);
         bpush(a0, d0, white_u, white_v, col, mat); bpush(b1, d1, white_u, white_v, col, mat); bpush(b0, d0, white_u, white_v, col, mat);
-        if (caps) {
-            tri(a, a1, a0, col, mat);
-            tri(b, b0, b1, col, mat);
-        }
+        if (caps & 1) tri(a, a1, a0, col, mat);
+        if (caps & 2) tri(b, b0, b1, col, mat);
     }
+}
+
+static void tube(V3 a, V3 b, double ra, double rb, int seg, Color col, int mat, int caps)
+{
+    cyl(a, b, ra, rb, seg, col, mat, caps ? 3 : 0);
 }
 
 // --- Colours ---------------------------------------------------------------------------
 
-static const Color K_WALL = { 168, 166, 158, 255 };     // cabin structure paint
-static const Color K_PANEL = { 74, 78, 82, 255 };       // panel grey
-static const Color K_CONSOLE = { 80, 84, 88, 255 };
+static const Color K_WALL = { 150, 158, 170, 255 };     // cabin structure: blue-grey
+static const Color K_CEIL = { 214, 208, 182, 255 };     // overhead and upper bulkhead: cream
+static const Color K_YELLOW = { 222, 176, 28, 255 };    // handholds
+static const Color K_ORANGE = { 204, 122, 40, 255 };    // AOT guard, wire lacing
+static const Color K_PANEL = { 104, 112, 126, 255 };    // panel blue-grey
+static const Color K_CONSOLE = { 112, 120, 134, 255 };
 static const Color K_FRAME = { 30, 31, 33, 255 };
-static const Color K_FLOOR = { 104, 104, 100, 255 };
+static const Color K_FLOOR = { 118, 124, 134, 255 };
 static const Color K_CLOTH = { 222, 220, 210, 255 };    // Beta cloth
 static const Color K_BLACK = { 22, 22, 24, 255 };
 static const Color K_METAL = { 170, 172, 176, 255 };
@@ -244,14 +258,17 @@ static void build_shell(void)
         box(v3(F, -0.95, z), v3(F + 0.004, 0.95, z + 0.02), K_BLACK, M_BLACK);   // floor rails
     }
     quad(v3(F, -H, A), v3(F, H, A), v3(C, H, A), v3(C, -H, A), K_WALL, M_WALL);
-    // Lower forward wall (hatch) and upper bevel.
-    quad(v3(F, -H, 1.00), v3(2.00, -H, 1.00), v3(2.00, H, 1.00), v3(F, H, 1.00), K_WALL, M_WALL);
-    quad(int_pt(-H, 1.199), int_pt(H, 1.199), v3(C, H, 0.10), v3(C, -H, 0.10), K_WALL, M_WALL);
+    // Lower forward wall, with the opening of the forward hatch, and upper bevel.
+    quad(v3(F, -H, 1.00), v3(2.00, -H, 1.00), v3(2.00, -HATCH_HW, 1.00), v3(F, -HATCH_HW, 1.00), K_WALL, M_WALL);
+    quad(v3(F, HATCH_HW, 1.00), v3(2.00, HATCH_HW, 1.00), v3(2.00, H, 1.00), v3(F, H, 1.00), K_WALL, M_WALL);
+    quad(v3(F, -HATCH_HW, 1.00), v3(HATCH_X0, -HATCH_HW, 1.00), v3(HATCH_X0, HATCH_HW, 1.00), v3(F, HATCH_HW, 1.00), K_WALL, M_WALL);
+    quad(v3(HATCH_X1, -HATCH_HW, 1.00), v3(2.00, -HATCH_HW, 1.00), v3(2.00, HATCH_HW, 1.00), v3(HATCH_X1, HATCH_HW, 1.00), K_WALL, M_WALL);
+    quad(int_pt(-H, 1.199), int_pt(H, 1.199), v3(C, H, 0.10), v3(C, -H, 0.10), K_CEIL, M_WALL);
     // Ceiling with the docking-window opening.
-    quad(v3(C, -H, A), v3(C, H, A), v3(C, H, DW_Z0), v3(C, -H, DW_Z0), K_WALL, M_WALL);
-    quad(v3(C, -H, DW_Z1), v3(C, H, DW_Z1), v3(C, H, 0.10), v3(C, -H, 0.10), K_WALL, M_WALL);
-    quad(v3(C, -H, DW_Z0), v3(C, DW_Y0, DW_Z0), v3(C, DW_Y0, DW_Z1), v3(C, -H, DW_Z1), K_WALL, M_WALL);
-    quad(v3(C, DW_Y1, DW_Z0), v3(C, H, DW_Z0), v3(C, H, DW_Z1), v3(C, DW_Y1, DW_Z1), K_WALL, M_WALL);
+    quad(v3(C, -H, A), v3(C, H, A), v3(C, H, DW_Z0), v3(C, -H, DW_Z0), K_CEIL, M_WALL);
+    quad(v3(C, -H, DW_Z1), v3(C, H, DW_Z1), v3(C, H, 0.10), v3(C, -H, 0.10), K_CEIL, M_WALL);
+    quad(v3(C, -H, DW_Z0), v3(C, DW_Y0, DW_Z0), v3(C, DW_Y0, DW_Z1), v3(C, -H, DW_Z1), K_CEIL, M_WALL);
+    quad(v3(C, DW_Y1, DW_Z0), v3(C, H, DW_Z0), v3(C, H, DW_Z1), v3(C, DW_Y1, DW_Z1), K_CEIL, M_WALL);
     // Docking window well.
     double xo = 3.39;
     quad(v3(C, DW_Y0, DW_Z0), v3(xo, DW_Y0, DW_Z0), v3(xo, DW_Y1, DW_Z0), v3(C, DW_Y1, DW_Z0), K_CONSOLE, M_PAINT);
@@ -341,13 +358,37 @@ static void build_panels(void)
 
 static void build_details(void)
 {
-    // Forward hatch (inner face) under the DSKY pedestal, with handle.
-    box(v3(1.40, -0.40, 0.975), v3(1.72, 0.40, 0.995), K_CLOTH, M_PAINT);
-    box(v3(1.40, -0.43, 0.97), v3(1.42, 0.43, 0.995), K_FRAME, M_BLACK);
-    box(v3(1.70, -0.43, 0.97), v3(1.72, 0.43, 0.995), K_FRAME, M_BLACK);
-    tube(v3(1.56, -0.18, 0.96), v3(1.56, 0.18, 0.96), 0.012, 0.012, 8, K_METAL, M_METAL, 1);
-    box(v3(1.55, -0.20, 0.955), v3(1.57, -0.16, 0.975), K_METAL, M_METAL);
-    box(v3(1.55, 0.16, 0.955), v3(1.57, 0.20, 0.975), K_METAL, M_METAL);
+    // Forward hatch frame under the DSKY pedestal (the door itself is dynamic: it opens for the EVA).
+    box(v3(1.385, -0.43, 0.97), v3(1.40, 0.43, 0.995), K_FRAME, M_BLACK);
+    box(v3(1.72, -0.43, 0.97), v3(1.735, 0.43, 0.995), K_FRAME, M_BLACK);
+    box(v3(1.385, -0.43, 0.97), v3(1.735, -0.415, 0.995), K_FRAME, M_BLACK);
+    box(v3(1.385, 0.415, 0.97), v3(1.735, 0.43, 0.995), K_FRAME, M_BLACK);
+
+    // Yellow handholds: a grip either side of each station's controllers, a rail on each side wall.
+    for (int side = -1; side <= 1; side += 2) {
+        for (int k = 0; k < 2; k++) {
+            double y = side * (k ? 1.025 : 0.652);
+            tube(v3(1.79, y, 0.395), v3(1.93, y, 0.375), 0.012, 0.012, 10, K_YELLOW, M_PAINT, 1);
+        }
+        double yw = side * 0.985;
+        tube(v3(2.30, yw, -0.70), v3(2.30, yw, -0.15), 0.013, 0.013, 10, K_YELLOW, M_PAINT, 1);
+        tube(v3(2.30, side * 1.035, -0.70), v3(2.30, yw, -0.70), 0.010, 0.010, 8, K_YELLOW, M_PAINT, 0);
+        tube(v3(2.30, side * 1.035, -0.15), v3(2.30, yw, -0.15), 0.010, 0.010, 8, K_YELLOW, M_PAINT, 0);
+    }
+
+    // Alignment optical telescope between the windows: eyepiece housing hung
+    // from the overhead, behind its orange guard hoop.
+    {
+        double z = 0.50;
+        tube(v3(3.30, 0, z + 0.06), v3(3.02, 0, z + 0.06), 0.060, 0.050, 18, K_FRAME, M_BLACK, 1);     // housing
+        tube(v3(3.04, 0, z + 0.04), v3(3.04, 0, z - 0.03), 0.030, 0.026, 14, K_BLACK, M_BLACK, 1);     // eyepiece
+        for (int side = -1; side <= 1; side += 2) {
+            tube(v3(3.30, side * 0.085, z), v3(3.08, side * 0.085, z - 0.04), 0.011, 0.011, 8, K_BLACK, M_BLACK, 0);   // struts
+            tube(v3(3.08, side * 0.085, z - 0.04), v3(2.90, side * 0.085, z - 0.05), 0.013, 0.013, 10, K_ORANGE, M_PAINT, 1);
+            tube(v3(2.90, side * 0.085, z - 0.05), v3(2.84, side * 0.045, z - 0.05), 0.013, 0.013, 10, K_ORANGE, M_PAINT, 1);
+        }
+        tube(v3(2.84, -0.045, z - 0.05), v3(2.84, 0.045, z - 0.05), 0.013, 0.013, 10, K_ORANGE, M_PAINT, 1);
+    }
 
     // Overhead (docking) hatch with its handle.
     tube(v3(CABIN_CEIL - 0.002, 0, -0.30), v3(CABIN_CEIL - 0.03, 0, -0.30), 0.42, 0.40, 40, K_WALL, M_WALL, 1);
@@ -493,15 +534,150 @@ static void build_lpd_numerals(void)
     pc_end();
 }
 
-// --- Dynamic geometry: switch levers, knobs, hand controllers -----------------------
-
 static double hc_pitch, hc_yaw, hc_roll;
 void cockpit_set_hand_controls(double pitch, double yaw, double roll) { hc_pitch = pitch; hc_yaw = yaw; hc_roll = roll; }
 
-static void build_dynamic(void)
+// --- Modelled controls -------------------------------------------------------------------
+// Every switch, knob, button, key and breaker the panel code registers gets
+// real geometry standing off its panel. The mesh is only rebuilt when a
+// control moves (or is still gliding to its new position).
+
+static float ctl_anim[NPANELS][CP_MAXLEV];
+static unsigned char ctl_anim_set[NPANELS][CP_MAXLEV];
+static unsigned long long ctl_sig;
+
+static unsigned long long mix(unsigned long long h, const void *data, size_t n)
 {
-    B = &DB;
-    DB.count = 0;
+    const unsigned char *p = data;
+    for (size_t i = 0; i < n; i++) h = (h ^ p[i]) * 1099511628211ull;
+    return h;
+}
+
+static void model_toggle(const Lever *l, V3 base, V3 n, V3 upv, V3 uv, double pos)
+{
+    Color c = { l->r, l->g, l->b, 255 };
+    // Mounting nut and threaded bushing.
+    V3 nut_top = v3_add(base, v3_scale(n, 0.0024));
+    cyl(base, nut_top, 0.0046, 0.0046, 6, (Color){ 150, 152, 156, 255 }, M_METAL, 2);
+    cyl(nut_top, v3_add(base, v3_scale(n, 0.0050)), 0.0030, 0.0027, 10, (Color){ 118, 120, 124, 255 }, M_METAL, 2);
+    // Bat handle: slim at the pivot, swelling toward a rounded tip.
+    double ang = pos * 22 * DEG;
+    V3 d = v3_add(v3_scale(n, cos(ang)), v3_scale(upv, sin(ang)));
+    V3 piv = v3_add(base, v3_scale(n, 0.0030));
+    static const double prof[6][2] = { { 0.0020, 0.00125 }, { 0.0065, 0.00125 }, { 0.0125, 0.00190 },
+                                       { 0.0165, 0.00225 }, { 0.0183, 0.00190 }, { 0.0192, 0.00110 } };
+    for (int k = 0; k < 5; k++)
+        cyl(v3_add(piv, v3_scale(d, prof[k][0])), v3_add(piv, v3_scale(d, prof[k + 1][0])), prof[k][1], prof[k + 1][1], 10, c,
+            M_METAL, k == 4 ? 2 : 0);
+    if (l->guard) {
+        // Wicket guards: a hoop either side, taller than the handle's swing.
+        Color g = { 176, 178, 182, 255 };
+        for (int s = -1; s <= 1; s += 2) {
+            V3 m = v3_add(base, v3_scale(uv, s * 0.0066));
+            V3 f0 = v3_add(m, v3_scale(upv, 0.0064)), f1 = v3_add(m, v3_scale(upv, -0.0064));
+            V3 t0 = v3_add(f0, v3_scale(n, 0.0130)), t1 = v3_add(f1, v3_scale(n, 0.0130));
+            cyl(f0, t0, 0.0008, 0.0008, 6, g, M_METAL, 0);
+            cyl(f1, t1, 0.0008, 0.0008, 6, g, M_METAL, 0);
+            cyl(v3_add(t0, v3_scale(upv, 0.0008)), v3_add(t1, v3_scale(upv, -0.0008)), 0.0008, 0.0008, 6, g, M_METAL, 3);
+        }
+    }
+}
+
+static void model_knob(const Lever *l, V3 base, V3 n, V3 upv, V3 uv, double ang)
+{
+    Color c = { l->r, l->g, l->b, 255 };
+    double r = l->size * 0.001;
+    V3 dir = v3_add(v3_scale(uv, sin(ang)), v3_scale(upv, cos(ang)));
+    V3 side = v3_cross(n, dir);
+    V3 skirt = v3_add(base, v3_scale(n, 0.0028));
+    cyl(base, skirt, r * 1.08, r, 20, c, M_BLACK, 2);
+    cyl(skirt, v3_add(base, v3_scale(n, 0.0105)), r * 0.70, r * 0.62, 16, c, M_BLACK, 2);
+    // Bar grip across the knob, with the white index line on its pointing half.
+    obox(v3_add(base, v3_add(v3_scale(n, 0.0085), v3_scale(dir, r * 0.10))), dir, side, n, r * 1.02, r * 0.24, 0.0045, c, M_BLACK);
+    obox(v3_add(base, v3_add(v3_scale(n, 0.01305), v3_scale(dir, r * 0.62))), dir, side, n, r * 0.44, 0.00045, 0.00012,
+         (Color){ 240, 240, 236, 255 }, M_PAINT);
+}
+
+// Thumbwheel: the top of a ridged wheel standing through its slot.
+static void model_thumb(const Lever *l, V3 base, V3 n, V3 upv, V3 uv)
+{
+    const double R = 0.0090, sink = 0.0062, hw = 0.0029;
+    V3 ctr = v3_sub(base, v3_scale(n, sink));
+    double tm = acos(sink / R);
+    int steps = 12, phase = (int)l->val;
+    for (int k = 0; k < steps; k++) {
+        double t0 = -tm + 2 * tm * k / steps, t1 = -tm + 2 * tm * (k + 1) / steps;
+        int ridge = (k + phase) & 1;
+        double rr = R + (ridge ? 0.00035 : 0);
+        Color c = ridge ? (Color){ 78, 78, 84, 255 } : (Color){ l->r, l->g, l->b, 255 };
+        V3 p0 = v3_add(ctr, v3_add(v3_scale(n, rr * cos(t0)), v3_scale(upv, rr * sin(t0))));
+        V3 p1 = v3_add(ctr, v3_add(v3_scale(n, rr * cos(t1)), v3_scale(upv, rr * sin(t1))));
+        V3 a0 = v3_sub(p0, v3_scale(uv, hw)), b0 = v3_add(p0, v3_scale(uv, hw));
+        V3 a1 = v3_sub(p1, v3_scale(uv, hw)), b1 = v3_add(p1, v3_scale(uv, hw));
+        quad(a0, b0, b1, a1, c, M_BLACK);
+        // Wheel flanks.
+        tri(v3_sub(base, v3_scale(uv, hw)), a0, a1, (Color){ 30, 30, 33, 255 }, M_BLACK);
+        tri(v3_add(base, v3_scale(uv, hw)), b1, b0, (Color){ 30, 30, 33, 255 }, M_BLACK);
+    }
+}
+
+// Push-button or key cap: a block standing `height` proud of the panel. Its
+// face and legend are panel-canvas artwork lifted to the same height.
+static void model_cap(const Lever *l, V3 base, V3 n, V3 upv, V3 uv, int bezel)
+{
+    Color c = { l->r, l->g, l->b, 255 };
+    double hw = l->w * 0.0005, hh = l->h * 0.0005, ht = l->val * 0.001;
+    double in = bezel ? 0 : 0.0003;   // keys: a hair of daylight between neighbours
+    obox(v3_add(base, v3_scale(n, ht / 2)), uv, upv, n, hw - in, hh - in, ht / 2, c, M_BLACK);
+    if (!bezel) return;
+    // Raised bezel round the button; a guarded button gets a tall frame instead.
+    for (int g = 0; g <= (l->guard ? 1 : 0); g++) {
+        double off = g ? 0.0034 : 0.0012, th = g ? 0.0005 : 0.0006, up = g ? 0.0034 : 0.0009;
+        Color fc = g ? (Color){ 178, 180, 184, 255 } : (Color){ 34, 35, 38, 255 };
+        int fm = g ? M_METAL : M_BLACK;
+        for (int s = -1; s <= 1; s += 2) {
+            obox(v3_add(base, v3_add(v3_scale(uv, s * (hw + off - th)), v3_scale(n, up))), uv, upv, n, th, hh + off, up, fc, fm);
+            obox(v3_add(base, v3_add(v3_scale(upv, s * (hh + off - th)), v3_scale(n, up))), uv, upv, n, hw + off, th, up, fc, fm);
+        }
+    }
+}
+
+// Circuit breaker: collar and plunger; pulled, the plunger stands out and shows its white band.
+static void model_breaker(const Lever *l, V3 base, V3 n, double out)
+{
+    Color c = { l->r, l->g, l->b, 255 };
+    cyl(base, v3_add(base, v3_scale(n, 0.0014)), 0.0045, 0.0040, 10, (Color){ 40, 40, 43, 255 }, M_BLACK, 2);
+    cyl(base, v3_add(base, v3_scale(n, 0.0034 + out * 0.0056)), 0.0027, 0.0027, 8, c, M_BLACK, 2);
+    if (out > 0.05)
+        cyl(v3_add(base, v3_scale(n, 0.0015)), v3_add(base, v3_scale(n, 0.0015 + out * 0.0046)), 0.00285, 0.00285, 8,
+            (Color){ 232, 232, 226, 255 }, M_PAINT, 0);
+}
+
+// Returns 1 if the mesh was rebuilt.
+static int build_controls(float dt)
+{
+    unsigned long long sig = 1469598103934665603ull;
+    int moving = 0;
+    for (int pn = 0; pn < NPANELS; pn++) {
+        sig = mix(sig, &cp_items[pn].nlev, sizeof(int));
+        for (int i = 0; i < cp_items[pn].nlev; i++) {
+            const Lever *l = &cp_items[pn].lev[i];
+            float f[7] = { (float)l->kind, l->x, l->y, l->val, l->size, l->w, l->h };
+            sig = mix(sig, f, sizeof f);
+            sig = mix(sig, &l->guard, sizeof l->guard);
+            float *a = &ctl_anim[pn][i];
+            int glides = l->kind == LEV_TOGGLE || l->kind == LEV_KNOB || l->kind == LEV_CB;
+            if (!ctl_anim_set[pn][i] || !glides) { *a = l->val; ctl_anim_set[pn][i] = 1; }
+            float d = l->val - *a;
+            if (fabsf(d) > 0.004f) { *a += d * fminf(1.0f, dt * 24.0f); moving = 1; }
+            else *a = l->val;
+        }
+    }
+    if (!moving && sig == ctl_sig && CB.count > 0) return 0;
+    ctl_sig = sig;
+
+    B = &CB;
+    CB.count = 0;
     for (int pn = 0; pn < NPANELS; pn++)
     for (int i = 0; i < cp_items[pn].nlev; i++) {
         const Lever *l = &cp_items[pn].lev[i];
@@ -510,30 +686,48 @@ static void build_dynamic(void)
         V3 upv = v3_norm(v3_sub(p->tl, p->bl));
         V3 uv = v3_norm(v3_sub(p->tr, p->tl));
         V3 base = panel_pt(l->panel, l->x, l->y);
-        Color c = { l->r, l->g, l->b, 255 };
-        if (l->kind == LEV_TOGGLE) {
-            V3 d = v3_norm(v3_add(n, v3_scale(upv, tan(30 * DEG) * l->val)));
-            V3 tip = v3_add(base, v3_scale(d, 0.016));
-            tube(v3_add(base, v3_scale(n, 0.001)), v3_add(base, v3_scale(n, 0.004)), 0.0042, 0.0040, 6, (Color){ 140, 142, 146, 255 }, M_METAL, 1);
-            tube(base, v3_add(base, v3_scale(d, 0.011)), 0.0019, 0.0016, 6, c, M_METAL, 0);
-            tube(v3_add(base, v3_scale(d, 0.011)), tip, 0.0024, 0.0024, 6, c, M_METAL, 1);
-            if (l->guard)
-                for (int s = -1; s <= 1; s += 2) {
-                    V3 g = v3_add(base, v3_scale(uv, s * 0.0058));
-                    obox(v3_add(g, v3_scale(n, 0.009)), uv, upv, n, 0.0007, 0.007, 0.009, (Color){ 175, 176, 180, 255 }, M_METAL);
-                }
-        } else if (l->kind == LEV_KNOB) {
-            double r = l->size * 0.001;
-            V3 top = v3_add(base, v3_scale(n, 0.010));
-            tube(base, top, r, r * 0.92, 16, c, M_BLACK, 1);
-            tube(top, v3_add(top, v3_scale(n, 0.004)), r * 0.55, r * 0.5, 12, c, M_BLACK, 1);
-            V3 dir = v3_add(v3_scale(uv, sin(l->val)), v3_scale(upv, cos(l->val)));
-            V3 side = v3_cross(n, dir);
-            obox(v3_add(top, v3_add(v3_scale(dir, r * 0.55), v3_scale(n, 0.0006))), dir, side, n, r * 0.45, 0.0006, 0.0006,
-                 (Color){ 240, 240, 236, 255 }, M_PAINT);
-            obox(v3_add(base, v3_add(v3_scale(dir, r * 0.95), v3_scale(n, 0.007))), dir, side, n, r * 0.15, 0.0012, 0.003,
-                 (Color){ 30, 30, 32, 255 }, M_BLACK);
+        double a = ctl_anim[pn][i];
+        switch (l->kind) {
+        case LEV_TOGGLE: model_toggle(l, base, n, upv, uv, a); break;
+        case LEV_KNOB: model_knob(l, base, n, upv, uv, a); break;
+        case LEV_THUMB: model_thumb(l, base, n, upv, uv); break;
+        case LEV_BUTTON: model_cap(l, base, n, upv, uv, 1); break;
+        case LEV_KEY: model_cap(l, base, n, upv, uv, 0); break;
+        case LEV_CB: model_breaker(l, base, n, a); break;
         }
+    }
+    B = &SB;
+    return 1;
+}
+
+// --- Dynamic geometry: hand controllers ------------------------------------------------
+
+static double hatch_open, kneel;   // forward hatch 0..1; crewman's move to it 0..2 (see eva.h)
+void cockpit_set_egress(double hatch, double k) { hatch_open = hatch; kneel = k; }
+
+static void build_dynamic(void)
+{
+    B = &DB;
+    DB.count = 0;
+    {
+        // Forward hatch door: hinged on the LM Pilot's side, swings in and across.
+        double a = hatch_open * 100 * DEG;
+        V3 hinge = v3((HATCH_X0 + HATCH_X1) / 2, HATCH_HW, 0.985);
+        V3 xh = v3(1, 0, 0), wd = v3(0, -cos(a), -sin(a)), in = v3_cross(xh, wd);
+        V3 ctr = v3_add(hinge, v3_scale(wd, HATCH_HW));
+        Color door = { 150, 158, 170, 255 };
+        obox(ctr, xh, wd, in, (HATCH_X1 - HATCH_X0) / 2, HATCH_HW, 0.012, door, M_PAINT);
+        for (int k = -1; k <= 1; k++)   // stiffening ribs on the inner face
+            obox(v3_add(ctr, v3_add(v3_scale(wd, k * 0.24), v3_scale(in, 0.018))), xh, wd, in, 0.14, 0.012, 0.006, door, M_PAINT);
+        obox(v3_add(ctr, v3_add(v3_scale(xh, 0.115), v3_scale(in, 0.018))), xh, wd, in, 0.012, 0.34, 0.006, door, M_PAINT);
+        obox(v3_add(ctr, v3_add(v3_scale(xh, -0.115), v3_scale(in, 0.018))), xh, wd, in, 0.012, 0.34, 0.006, door, M_PAINT);
+        // Latch handle and its placard.
+        V3 h0 = v3_add(ctr, v3_add(v3_scale(wd, 0.20), v3_scale(in, 0.045))), h1 = v3_add(h0, v3_scale(wd, 0.16));
+        tube(h0, h1, 0.011, 0.011, 8, K_METAL, M_METAL, 1);
+        tube(v3_add(h0, v3_scale(in, -0.03)), h0, 0.008, 0.008, 6, K_METAL, M_METAL, 0);
+        tube(v3_add(h1, v3_scale(in, -0.03)), h1, 0.008, 0.008, 6, K_METAL, M_METAL, 0);
+        obox(v3_add(ctr, v3_add(v3_scale(wd, -0.16), v3_add(v3_scale(xh, 0.04), v3_scale(in, 0.0135)))), xh, wd, in, 0.045, 0.085, 0.001,
+             K_BLACK, M_BLACK);
     }
     // CDR attitude controller assembly (pistol grip), deflected by the RHC.
     for (int seat = 0; seat < 2; seat++) {
@@ -607,7 +801,6 @@ static void build_dynamic(void)
     "}\n"
 
 static const char *ck_vs =
-    "#version 330\n"
     "in vec3 vertexPosition; in vec3 vertexNormal; in vec4 vertexColor;\n"
     "uniform mat4 mvp; uniform mat4 matModel;\n"
     "out vec3 bodyPos; out vec3 bodyN; out vec4 vcol; out vec3 camPos;\n"
@@ -615,7 +808,6 @@ static const char *ck_vs =
     "  camPos = (matModel * vec4(vertexPosition, 1.0)).xyz; gl_Position = mvp * vec4(vertexPosition, 1.0); }\n";
 
 static const char *ck_fs =
-    "#version 330\n"
     "in vec3 bodyPos; in vec3 bodyN; in vec4 vcol; in vec3 camPos;\n"
     CK_LIGHT_GLSL
     "uniform sampler2D cabinMap; uniform sampler2D wallMap;\n"
@@ -637,8 +829,8 @@ static const char *ck_fs =
     "  vec3 N = normalize(bodyN); vec3 V = normalize(eyeB - bodyPos);\n"
     "  if (dot(N, V) < 0.0) N = -N;\n"
     "  vec3 alb = vcol.rgb;\n"
-    "  if (mat == 5) { finalColor = vec4(alb * (0.3 + 3.0 * glare) * exposure, 1.0); return; }\n"
-    "  if (mat == 6) { finalColor = vec4(vec3(0.03) * exposure, 0.85); return; }\n"
+    "  if (mat == 5) { finalColor = sceneOut(alb * (0.3 + 3.0 * glare) * exposure, 1.0); return; }\n"
+    "  if (mat == 6) { finalColor = sceneOut(vec3(0.03) * exposure, 0.85); return; }\n"
     "  float specK = mat == 3 ? 0.55 : mat == 1 ? 0.06 : mat == 4 ? 0.05 : 0.03;\n"
     "  float shin = mat == 3 ? 80.0 : 14.0;\n"
     "  // Painted surfaces and the pressure shell take their relief, wear and sheen from the baked maps.\n"
@@ -651,16 +843,15 @@ static const char *ck_fs =
     "  if (mat == 7) {\n"
     "    float smudge = vnoise(bodyPos.yz * 60.0) * 0.6 + vnoise(bodyPos.yz * 230.0) * 0.4;\n"
     "    float a = 0.012 + glare * (0.03 + 0.18 * smudge);\n"
-    "    finalColor = vec4(vec3(0.9, 0.92, 0.95) * (0.02 + glare * 1.5) * exposure, a);\n"
+    "    finalColor = sceneOut(vec3(0.9, 0.92, 0.95) * (0.02 + glare * 1.5) * exposure, a);\n"
     "    return;\n"
     "  }\n"
-    "  finalColor = vec4(col * exposure, 1.0);\n"
+    "  finalColor = sceneOut(col * exposure, 1.0);\n"
     "}\n";
 
 // Panel canvas (pcanvas.c): every quad evaluates its own edge, so shapes and
 // lettering are antialiased analytically at any distance.
 static const char *pn_vs =
-    "#version 330\n"
     "in vec3 vertexPosition; in vec2 vertexTexCoord; in vec3 vertexNormal; in vec4 vertexColor; in vec4 vertexTangent; in vec2 vertexTexCoord2;\n"
     "uniform mat4 mvp; uniform mat4 matModel;\n"
     "out vec3 bodyPos; out vec2 uv; out vec3 glow; out vec4 vcol; out vec4 par; out vec2 uv2; out vec3 camPos;\n"
@@ -668,7 +859,6 @@ static const char *pn_vs =
     "  camPos = (matModel * vec4(vertexPosition, 1.0)).xyz; gl_Position = mvp * vec4(vertexPosition, 1.0); }\n";
 
 static const char *pn_fs =
-    "#version 330\n"
     "in vec3 bodyPos; in vec2 uv; in vec3 glow; in vec4 vcol; in vec4 par; in vec2 uv2; in vec3 camPos;\n"
     CK_LIGHT_GLSL
     "uniform sampler2D texture0; uniform sampler2D texture1;\n"   // SDF font, picture (FDAI ball)
@@ -696,13 +886,13 @@ static const char *pn_fs =
     "  vec3 N = planeN; vec3 V = normalize(eyeB - bodyPos);\n"
     "  if (dot(N, V) < 0.0) N = -N;\n"
     "  vec3 col = cabinLight(bodyPos, N, V, alb, 0.06, 14.0) + emis * emitGain;\n"
-    "  finalColor = vec4(col * exposure, cov);\n"
+    "  finalColor = sceneOut(col * exposure, cov);\n"
     "}\n";
 
 static Shader ck_sh, pn_sh;
 static Material ck_mat, ck_depth_mat, pn_mat;
-static Mesh mesh_static, mesh_dyn, mesh_glass;
-static int dyn_cap;
+static Mesh mesh_static, mesh_dyn, mesh_glass, mesh_ctl;
+static int dyn_cap, ctl_cap;
 
 #define SHADOW2 2048
 static unsigned int sh2_fbo, sh2_tex;
@@ -755,6 +945,9 @@ void cockpit_init(void)
     B = &SB;
     dyn_cap = 60000;
     mesh_dyn = upload(&DB, 1, dyn_cap);
+    ctl_cap = 320000;
+    mesh_ctl = upload(&CB, 1, ctl_cap);
+    mesh_ctl.vertexCount = 0;
     build_lpd_numerals();
 
     sh2_fbo = rlLoadFramebuffer();
@@ -765,7 +958,7 @@ void cockpit_init(void)
     rlDisableFramebuffer();
     Texture2D shadow = { sh2_tex, SHADOW2, SHADOW2, 1, PIXELFORMAT_UNCOMPRESSED_GRAYSCALE };
 
-    ck_sh = LoadShaderFromMemory(ck_vs, ck_fs);
+    ck_sh = render_load_shader(ck_vs, ck_fs);
     ck_sh.locs[SHADER_LOC_MAP_ROUGHNESS] = GetShaderLocation(ck_sh, "cabinMap");
     ck_sh.locs[SHADER_LOC_MAP_OCCLUSION] = GetShaderLocation(ck_sh, "wallMap");
     ck_mat = LoadMaterialDefault();
@@ -774,7 +967,7 @@ void cockpit_init(void)
     ck_mat.maps[MATERIAL_MAP_ROUGHNESS].texture = assets_texture("cabin");
     ck_mat.maps[MATERIAL_MAP_OCCLUSION].texture = assets_texture("cabin_wall");
 
-    pn_sh = LoadShaderFromMemory(pn_vs, pn_fs);
+    pn_sh = render_load_shader(pn_vs, pn_fs);
     pn_mat = LoadMaterialDefault();
     pn_mat.shader = pn_sh;
     pn_mat.maps[MATERIAL_MAP_ALBEDO].texture = pc_font_texture();
@@ -812,7 +1005,7 @@ static void record_panels(void)
     static unsigned frame_no;
     int quads = 0;
     for (int i = 0; i < NPANELS; i++) {
-        int fast = i == P1 || i == P2 || i == P4;
+        int fast = i == P1 || i == P2 || i == P4 || (cp_live_panels >> i & 1);
         if (!fast && !cp_dirty && pc_layer_ready(i) && (frame_no + (unsigned)i) % 6 != 0) continue;
         const PanelDef *p = &cp_panels[i];
         pc_begin(i, p->tl, v3_scale(v3_sub(p->tr, p->tl), 1.0 / p->w_mm), v3_scale(v3_sub(p->bl, p->tl), 1.0 / p->h_mm),
@@ -833,10 +1026,20 @@ void cockpit_prepare(M3 R, V3 sun_site, V3 up_site, float dt)
     sun_b = v3_norm(m3_apply(Rt, sun_site));
     up_b = v3_norm(m3_apply(Rt, up_site));
 
-    (void)dt;
     record_panels();
 
-    // Levers etc. for this frame.
+    // Modelled controls (rebuilt only when something moved), then the hand controllers.
+    if (build_controls(dt)) {
+        int nc = CB.count < ctl_cap ? CB.count : ctl_cap;
+        UpdateMeshBuffer(mesh_ctl, 0, CB.p, nc * 3 * sizeof(float), 0);
+        UpdateMeshBuffer(mesh_ctl, 1, CB.t, nc * 2 * sizeof(float), 0);
+        UpdateMeshBuffer(mesh_ctl, 2, CB.n, nc * 3 * sizeof(float), 0);
+        UpdateMeshBuffer(mesh_ctl, 3, CB.c, nc * 4, 0);
+        mesh_ctl.vertexCount = nc;
+        mesh_ctl.triangleCount = nc / 3;
+        static int said;
+        if (!said) { said = 1; TraceLog(LOG_INFO, "cockpit: %d triangles of modelled controls", nc / 3); }
+    }
     build_dynamic();
     int n = DB.count < dyn_cap ? DB.count : dyn_cap;
     UpdateMeshBuffer(mesh_dyn, 0, DB.p, n * 3 * sizeof(float), 0);
@@ -874,25 +1077,44 @@ void cockpit_prepare(M3 R, V3 sun_site, V3 up_site, float dt)
 
 static int seat;            // 0 CDR, 1 LMP
 static double head_yaw = 0.0, head_pitch = -36 * DEG, fov = 80 * DEG, lean = 0;
+static double duck, duck_to;   // stepping back and down, to see panel 3 under the overhang of panels 1/2
 static const Hot *hover;
 static float hover_u, hover_v;
 static Vector2 mouse_pos;
 static int view_w = 1, view_h = 1;
+static V3 eye_off;          // headset: the eye being drawn, relative to the seat's eye point (body frame)
+static double pick_ray(V3 e, V3 d);
 
 static V3 eye_body(void)
 {
     V3 e = seat ? EYE_LMP : EYE_CDR;
-    // Leaning toward the window (and down a little).
+    // Leaning toward the window (and down a little); or a step back with the head lowered.
+    e = v3_add(e, v3(-0.24 * duck, 0, -0.25 * duck));
+    if (kneel > 0) {
+        // Going out: down on the knees facing the hatch, then head-first into the opening.
+        V3 k1 = v3(1.86, 0.0, -0.25), k2 = v3(1.58, 0.0, 0.82);
+        double a = fmin(kneel, 1.0), b = fmax(kneel - 1.0, 0.0);
+        e = v3_add(v3_scale(e, 1 - a), v3_scale(k1, a));
+        return v3_add(v3_scale(e, 1 - b), v3_scale(k2, b));
+    }
     return v3_add(e, v3_add(v3_scale(N_IN, -lean * 0.14), v3(-lean * 0.05, 0, 0)));
 }
 
 static V3 look_dir_body(void)
 {
     double y = head_yaw + (seat ? 6 * DEG : -6 * DEG);   // the window centre is slightly outboard
-    return v3_norm(v3(sin(head_pitch), cos(head_pitch) * sin(y), cos(head_pitch) * cos(y)));
+    V3 d = v3_norm(v3(sin(head_pitch), cos(head_pitch) * sin(y), cos(head_pitch) * cos(y)));
+    if (kneel > 0) {
+        V3 to_hatch = v3_norm(v3_sub(v3((HATCH_X0 + HATCH_X1) / 2, 0, 1.6), eye_body()));
+        double a = fmin(kneel, 1.0);
+        d = v3_norm(v3_add(v3_scale(d, 1 - a), v3_scale(to_hatch, a)));
+    }
+    return d;
 }
 
 void cockpit_set_seat(int lmp) { seat = lmp ? 1 : 0; }
+// Headset: the seat's view looks straight ahead along the cabin, level; the head does the rest.
+void cockpit_vr_level(void) { head_yaw = seat ? -6 * DEG : 6 * DEG; head_pitch = 0; lean = 0; }
 void cockpit_set_view(double yaw_deg, double pitch_deg) { head_yaw = yaw_deg * DEG; head_pitch = pitch_deg * DEG; }
 void cockpit_set_fov(double fov_deg) { fov = fov_deg * DEG; }
 
@@ -936,11 +1158,19 @@ void cockpit_input(int w, int h)
         if (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) lean = fmax(0, fmin(1, lean + wh * 0.15));
         else fov = fmax(18 * DEG, fmin(95 * DEG, fov * pow(0.9, wh)));
     }
-    if (IsKeyPressed(KEY_HOME)) { head_yaw = 0; head_pitch = -36 * DEG; fov = 80 * DEG; lean = 0; }
-    if (IsKeyPressed(KEY_END)) { head_yaw = seat ? -38 * DEG : 38 * DEG; head_pitch = -62 * DEG; fov = 60 * DEG; }
+    if (IsKeyPressed(KEY_HOME)) { head_yaw = 0; head_pitch = -36 * DEG; fov = 80 * DEG; lean = 0; duck_to = 0; }
+    if (IsKeyPressed(KEY_END)) {
+        // Lower panels: step back so that panel 3 shows from under panels 1 and 2. Again: back to standing.
+        duck_to = duck_to > 0.5 && head_pitch < -50 * DEG ? 0 : 1;
+        head_yaw = seat ? -30 * DEG : 30 * DEG; head_pitch = -58 * DEG; fov = 62 * DEG; lean = 0;
+    }
+    static int duck_env = -1;
+    if (duck_env < 0) { duck_env = getenv("AGC_DUCK") != NULL; if (duck_env) duck = duck_to = 1; }   // debugging
+    duck += (duck_to - duck) * fmin(1.0, GetFrameTime() * 9.0);
     if (IsKeyPressed(KEY_F9)) seat = !seat;
     if (IsKeyPressed(KEY_L)) lean = lean > 0.5 ? 0 : 1;
 
+#ifndef AGC_VR
     // Mouse picking against the panels.
     mouse_pos = GetMousePosition();
     hover = NULL;
@@ -951,6 +1181,26 @@ void cockpit_input(int w, int h)
     double th = tan(fov / 2), aspect = (double)w / h;
     double sx = (2.0 * mouse_pos.x / w - 1) * th * aspect, sy = (1 - 2.0 * mouse_pos.y / h) * th;
     V3 d = v3_norm(v3_add(f, v3_add(v3_scale(r, sx), v3_scale(u, sy))));
+    pick_ray(e, d);
+    if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) cp_click(hover, hover_u, hover_v);
+#endif
+}
+
+// Headset: the hand controller points at the panels instead of the mouse.
+// origin and dir in the body frame; returns the distance to the panel hit (0 = none).
+double cockpit_pointer(V3 origin_b, V3 dir_b, int pressed)
+{
+    hover = NULL;
+    double dist = pick_ray(origin_b, v3_norm(dir_b));
+    if (hover && pressed) cp_click(hover, hover_u, hover_v);
+    return dist;
+}
+
+void cockpit_set_eye_offset(V3 off_b) { eye_off = off_b; }
+
+// The control under a ray (body frame): sets hover; returns the distance to the panel, 0 = no panel.
+static double pick_ray(V3 e, V3 d)
+{
     double best = 1e9;
     int bp = -1;
     float bu = 0, bv = 0;
@@ -973,7 +1223,7 @@ void cockpit_input(int w, int h)
         bu = (float)(a * p->w_mm);
         bv = (float)(b * p->h_mm);
     }
-    if (bp < 0) return;
+    if (bp < 0) return 0;
     for (int i = 0; i < cp_items[bp].nhot; i++) {
         const Hot *hh = &cp_items[bp].hot[i];
         if (CheckCollisionPointRec((Vector2){ bu, bv }, hh->r)) {
@@ -983,12 +1233,12 @@ void cockpit_input(int w, int h)
             break;
         }
     }
-    if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) cp_click(hover, hover_u, hover_v);
+    return best;
 }
 
 ViewCam cockpit_camera(V3 lm_pos, M3 R)
 {
-    ViewCam c;
+    ViewCam c = { 0 };
     V3 f = look_dir_body();
     V3 r = v3_norm(v3_cross(f, v3(1, 0, 0)));
     V3 u = v3_cross(r, f);
@@ -1010,7 +1260,7 @@ static void light_uniforms(Shader sh, const float *wc, const float *wn, const fl
     SetShaderValueV(sh, GetShaderLocation(sh, "winL"), wl, SHADER_UNIFORM_VEC3, 3);
     SetShaderValueV(sh, GetShaderLocation(sh, "lampP"), lp, SHADER_UNIFORM_VEC3, 3);
     SetShaderValueV(sh, GetShaderLocation(sh, "lampC"), lc, SHADER_UNIFORM_VEC3, 3);
-    V3 e = eye_body();
+    V3 e = v3_add(eye_body(), eye_off);
     float sun[3] = { (float)sun_b.x, (float)sun_b.y, (float)sun_b.z }, eye[3] = { (float)e.x, (float)e.y, (float)e.z };
     float sc[3] = { (float)SH2_C.x, (float)SH2_C.y, (float)SH2_C.z };
     float one = 1.0f, expo = render_exposure(), gain = 0.9f;
@@ -1092,6 +1342,7 @@ void cockpit_draw(M3 R, V3 lm_rel, int w, int h)
     rlDisableBackfaceCulling();
     DrawMesh(mesh_static, ck_mat, M);
     if (mesh_dyn.vertexCount > 0) DrawMesh(mesh_dyn, ck_mat, M);
+    if (mesh_ctl.vertexCount > 0) DrawMesh(mesh_ctl, ck_mat, M);
     rlDrawRenderBatchActive();
     // Panel artwork: coplanar quads in painter's order, tested against the
     // cabin's depth but not written to it.
@@ -1108,9 +1359,11 @@ void cockpit_draw(M3 R, V3 lm_rel, int w, int h)
 
 void cockpit_overlay(int w, int h)
 {
-    (void)h;
-    float s = GetScreenHeight() / 1080.0f;
+    float s = h / 1080.0f;
     if (s < 0.7f) s = 0.7f;
+#ifdef AGC_VR
+    mouse_pos = (Vector2){ w * 0.5f - 160 * s, h * 0.70f };   // the tooltip sits low in the floating display
+#endif
     if (hover) {
         const char *t = cp_tooltip(hover, hover_u, hover_v);
         Vector2 m = MeasureTextEx(font_ui, t, 19 * s, 0.4f);
@@ -1119,8 +1372,74 @@ void cockpit_overlay(int w, int h)
         DrawRectangleRounded((Rectangle){ x - 8, y - 5, m.x + 16, m.y + 10 }, 0.3f, 6, (Color){ 10, 12, 14, 220 });
         DrawTextEx(font_ui, t, (Vector2){ x, y }, 19 * s, 0.4f, (Color){ 235, 238, 240, 255 });
     }
+    // Hints: when the marked control is out of view, an arrow at the screen
+    // edge says which way to look.
+    int hp;
+    float hx, hy;
+    const char *ht;
+    if (cp_hint_point(&hp, &hx, &hy, &ht)) {
+        V3 e = eye_body(), f = look_dir_body();
+        V3 r = v3_norm(v3_cross(f, v3(1, 0, 0)));
+        V3 u = v3_cross(r, f);
+        V3 d = v3_sub(panel_pt(hp, hx, hy), e);
+        double z = v3_dot(d, f), th = tan(fov / 2), aspect = (double)w / h;
+        double px = v3_dot(d, r), py = v3_dot(d, u);
+        double sx = z > 1e-6 ? px / (z * th * aspect) : 9, sy = z > 1e-6 ? py / (z * th) : 9;
+        // In view but behind another panel (panel 3's top rows hide under panels 1 and 2).
+        int hidden = 0;
+        V3 tgt = v3_add(e, d);
+        for (int i = 0; i < NPANELS && !hidden; i++) {
+            if (i == hp) continue;
+            const PanelDef *q = &cp_panels[i];
+            V3 n = panel_normal(i);
+            double den = v3_dot(d, n);
+            if (fabs(den) < 1e-9) continue;
+            double t = v3_dot(v3_sub(q->tl, e), n) / den;
+            if (t <= 0.01 || t >= 0.99) continue;
+            V3 o = v3_sub(v3_add(e, v3_scale(d, t)), q->tl), eu = v3_sub(q->tr, q->tl), ev = v3_sub(q->bl, q->tl);
+            double uu = v3_dot(eu, eu), vv = v3_dot(ev, ev), uvd = v3_dot(eu, ev), det = uu * vv - uvd * uvd;
+            double a = (v3_dot(o, eu) * vv - v3_dot(o, ev) * uvd) / det, b2 = (v3_dot(o, ev) * uu - v3_dot(o, eu) * uvd) / det;
+            hidden = a >= 0 && a <= 1 && b2 >= 0 && b2 <= 1;
+        }
+        (void)tgt;
+        if (hidden && fabs(sx) <= 0.9 && fabs(sy) <= 0.9) {
+            static char hb[160];
+            snprintf(hb, sizeof hb, "%s   (hidden under the main panel: press End to step back)", ht);
+            Vector2 m = MeasureTextEx(font_ui, hb, 18 * s, 0.4f);
+            float cx = (float)((sx * 0.5 + 0.5) * w), cy = (float)((0.5 - sy * 0.5) * h);
+            float tx = cx - m.x / 2, ty = cy - 40 * s;
+            if (tx < 8) tx = 8;
+            if (tx + m.x + 8 > w) tx = w - m.x - 8;
+            float p = 0.5f + 0.5f * sinf((float)GetTime() * 6.0f);
+            DrawRing((Vector2){ cx, cy }, 12 * s + 4 * p, 15 * s + 4 * p, 0, 360, 32, (Color){ 90, 255, 150, (unsigned char)(150 + 100 * p) });
+            DrawRectangleRounded((Rectangle){ tx - 8, ty - 5, m.x + 16, m.y + 10 }, 0.3f, 6, (Color){ 5, 24, 14, 225 });
+            DrawTextEx(font_ui, hb, (Vector2){ tx, ty }, 18 * s, 0.4f, (Color){ 150, 255, 190, 255 });
+        }
+        if (fabs(sx) > 0.9 || fabs(sy) > 0.9) {
+            double len = sqrt(px * px + py * py);
+            double dx = len > 1e-9 ? px / len : 0, dy = len > 1e-9 ? -py / len : 1;   // screen y runs down
+            double mx = w / 2.0 - 90 * s, my = h / 2.0 - 90 * s;
+            double k = fmin(fabs(dx) > 1e-9 ? mx / fabs(dx) : 1e9, fabs(dy) > 1e-9 ? my / fabs(dy) : 1e9);
+            Vector2 c = { (float)(w / 2.0 + dx * k), (float)(h / 2.0 + dy * k) };
+            float p = 0.5f + 0.5f * sinf((float)GetTime() * 6.0f), a = 34 * s;
+            Color g = { 90, 255, 150, (unsigned char)(170 + 85 * p) };
+            Vector2 tip = { c.x + (float)dx * a * (1 + 0.3f * p), c.y + (float)dy * a * (1 + 0.3f * p) };
+            Vector2 l1 = { c.x - (float)dy * a * 0.7f, c.y + (float)dx * a * 0.7f };
+            Vector2 l2 = { c.x + (float)dy * a * 0.7f, c.y - (float)dx * a * 0.7f };
+            DrawTriangle(tip, l2, l1, g);
+            DrawTriangle(tip, l1, l2, g);
+            Vector2 m = MeasureTextEx(font_ui, ht, 18 * s, 0.4f);
+            float tx = c.x - (float)dx * (a + 10 * s) - m.x / 2, ty = c.y - (float)dy * (a + 16 * s) - m.y / 2;
+            if (tx < 8) tx = 8;
+            if (tx + m.x + 8 > w) tx = w - m.x - 8;
+            DrawRectangleRounded((Rectangle){ tx - 8, ty - 5, m.x + 16, m.y + 10 }, 0.3f, 6, (Color){ 5, 24, 14, 225 });
+            DrawTextEx(font_ui, ht, (Vector2){ tx, ty }, 18 * s, 0.4f, (Color){ 150, 255, 190, 255 });
+        }
+    }
+#ifndef AGC_VR
     char b[160];
-    snprintf(b, sizeof b, "%s STATION   right-drag look   wheel zoom   shift+wheel / L lean   Home window   End panels   F9 swap seat   click switches",
+    snprintf(b, sizeof b, "%s STATION   right-drag look   wheel zoom   shift+wheel / L lean   Home window   End lower panels (steps back)   F9 swap seat   click switches",
              seat ? "LMP" : "CDR");
-    DrawTextEx(font_ui, b, (Vector2){ 18 * s, (float)GetScreenHeight() - 30 * s }, 16 * s, 0.3f, (Color){ 150, 156, 164, 200 });
+    DrawTextEx(font_ui, b, (Vector2){ 18 * s, (float)h - 30 * s }, 16 * s, 0.3f, (Color){ 150, 156, 164, 200 });
+#endif
 }

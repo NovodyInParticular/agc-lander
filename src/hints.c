@@ -10,7 +10,9 @@
 #include "raylib.h"
 
 #include "agc_host.h"
+#include "cockpit.h"
 #include "crew.h"
+#include "eva.h"
 #include "hints.h"
 #include "hud.h"
 #include "lm.h"
@@ -28,6 +30,10 @@ static void cfg_path(char *buf, size_t n)
 #ifdef _WIN32
     const char *base = getenv("APPDATA");
     snprintf(buf, n, "%s\\agc-lander.conf", base ? base : ".");
+#elif defined(__ANDROID__)
+    extern const char *agc_android_data_dir(void);
+    const char *base = agc_android_data_dir();
+    snprintf(buf, n, "%s/agc-lander.conf", base ? base : ".");
 #else
     const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
     if (xdg && xdg[0]) snprintf(buf, n, "%s/agc-lander.conf", xdg);
@@ -146,6 +152,12 @@ static void compute(Hint *h)
     if (lm.land_result == LAND_CRASH) return;   // the results panel takes over
     if (lm.touchdown) {
         if (lm.dps_on) { add(h, "You're on the ground: press SPACE to shut the engine off"); h->urgent = 1; }
+        else if (eva_phase() == EVA_INSIDE && eva_available())
+            add(h, "You are on the Moon. Press X to open the hatch and go for a walk");
+        else if (eva_phase() == EVA_SURFACE) {
+            add(h, "Walk with W A S D (Shift to lope), Space to jump, F to plant the flag.");
+            add(h, "To go back in, walk to the foot of the ladder and press X");
+        }
         return;
     }
     if (lm.probe_contact && lm.dps_on) {
@@ -214,12 +226,96 @@ static void compute(Hint *h)
     }
 }
 
+// ---------------------------------------------------------------------------
+// The control to operate next (same decisions as compute(), reduced to one
+// switch, button or DSKY key).
+
+static int key_target(HintTarget *t, int key, const char *text)
+{
+    t->kind = HT_DSKY_KEY;
+    t->arg = key;
+    t->text = text;
+    return 1;
+}
+
+static int target(HintTarget *t, int kind, const char *text)
+{
+    t->kind = kind;
+    t->arg = 0;
+    t->text = text;
+    return 1;
+}
+
+int hints_target(HintTarget *t)
+{
+    t->kind = HT_NONE;
+    t->arg = 0;
+    t->text = "";
+    // Debugging: AGC_HINT=arm|auto|stop|alarm|rodup|roddown, or a DSKY key letter, forces a target.
+    static const char *force;
+    static int force_read;
+    if (!force_read) { force = getenv("AGC_HINT"); force_read = 1; }
+    if (force) {
+        if (!strcmp(force, "arm")) return target(t, HT_ENG_ARM, "FLIP DOWN: DES");
+        if (!strcmp(force, "auto")) return target(t, HT_PGNS_AUTO, "FLIP UP: AUTO");
+        if (!strcmp(force, "stop")) return target(t, HT_ENGINE_STOP, "PUSH: ENGINE STOP");
+        if (!strcmp(force, "alarm")) return target(t, HT_MASTER_ALARM, "PUSH: SILENCE ALARM");
+        if (!strcmp(force, "rodup")) return target(t, HT_ROD_UP, "CLICK UP: SLOWER");
+        if (!strcmp(force, "roddown")) return target(t, HT_ROD_DOWN, "CLICK DOWN: FASTER");
+        return key_target(t, force[0], "PRESS THIS KEY");
+    }
+    if (!hints_on || lm.land_result == LAND_CRASH) return 0;
+    if (lm.touchdown) return lm.dps_on ? target(t, HT_ENGINE_STOP, "PUSH: ENGINE STOP") : 0;
+    if (lm.probe_contact && lm.dps_on) return target(t, HT_ENGINE_STOP, "PUSH NOW: ENGINE STOP");
+
+    if (!crew.auto_crew) {
+        const DskyState *d = agc_host_dsky();
+        switch (crew.hint) {
+        case HINT_FINE_ALIGN: return key_target(t, 'E', "PRESS ENTR");
+        case HINT_MANEUVER:
+            if (lm_get_attitude_mode() != 2) return target(t, HT_PGNS_AUTO, "FLIP UP: AUTO");
+            return key_target(t, 'P', "PRESS PRO");
+        case HINT_MANEUVER_DONE: return key_target(t, 'E', "PRESS ENTR");
+        case HINT_ARM: return target(t, HT_ENG_ARM, "FLIP DOWN: DES");
+        case HINT_ENABLE_IGN:
+            if (!lm.engine_armed) return target(t, HT_ENG_ARM, "FLIP DOWN: DES");
+            return key_target(t, 'P', "PRESS PRO");
+        case HINT_V57: {
+            // Follow the verb being keyed in: VERB blanks the digits, then 5, 7, ENTR.
+            char a = agc_digit_char(d->verb[0]), b = agc_digit_char(d->verb[1]);
+            if (a == '5' && b == '7') return key_target(t, 'E', "THEN ENTR");
+            if (a == '5' && b == ' ') return key_target(t, '7', "THEN 7");
+            if (a == ' ' && b == ' ') return key_target(t, '5', "THEN 5");
+            return key_target(t, 'V', "PRESS VERB");
+        }
+        case HINT_ALARM:
+            if (cp_master_alarm()) return target(t, HT_MASTER_ALARM, "PUSH: SILENCE ALARM");
+            return key_target(t, 'R', "PRESS RSET");
+        }
+    }
+    if (cp_master_alarm()) return target(t, HT_MASTER_ALARM, "PUSH: SILENCE ALARM");
+
+    // Hand-flying: the rate-of-descent switch, when the sink rate is off.
+    if ((prog_is(66) || (lm.dps_on && lm.altitude < 150 && lm_get_attitude_mode() != 2)) && lm.altitude >= 4) {
+        double tgt = fmax(0.6, fmin(4.5, lm.altitude / 12.0)), down = -lm.hdot;
+        if (down > tgt + 0.8) return target(t, HT_ROD_UP, "CLICK UP: SLOWER");
+        if (down < tgt * 0.4 - 0.15) return target(t, HT_ROD_DOWN, "CLICK DOWN: FASTER");
+    }
+    return 0;
+}
+
+static int in_cockpit;
+void hints_set_cockpit(int c) { in_cockpit = c; }
+
 void hints_draw(int w, int h, int dsky_w)
 {
     if (!hints_on) return;
     Hint hint;
     compute(&hint);
     if (hint.n == 0) return;
+    HintTarget ht;
+    if (in_cockpit && hints_target(&ht) && hint.n < MAXL)
+        add(&hint, "In the cabin: the control to use is ringed in green");
 
     float scale = h / 1080.0f;
     if (scale < 0.7f) scale = 0.7f;

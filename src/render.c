@@ -19,7 +19,9 @@
 // ---------------------------------------------------------------------------
 // Shared GLSL.
 
-#define GLSL_HEADER "#version 330\n"
+// Every shader gets its version line, precision and the output function at load
+// time (render_load_shader), so one source serves desktop GL 3.3 and GLES 3.0.
+#define GLSL_HEADER ""
 
 #define LOGZ_VS \
     "uniform float logFar;\n" \
@@ -47,20 +49,91 @@
 
 static const char *terrain_vs = GLSL_HEADER LOGZ_VS
     "in vec3 vertexPosition; in vec3 vertexNormal; in vec4 vertexColor;\n"
-    "uniform mat4 mvp; uniform mat4 matModel;\n"
-    "out vec3 fragPos; out vec3 fragNormal; out vec4 fragColor;\n"
+    "in vec4 vertexTangent; in vec2 vertexTexCoord; in vec2 vertexTexCoord2;\n"   // morph target (parent chunk's surface)
+    "uniform mat4 mvp; uniform mat4 matModel; uniform vec3 morph;\n"             // morph: start, end distance; fade-in 0..1
+    "uniform vec4 chunk;\n"                                                      // x: vertex spacing (m)
+    "out vec3 fragPos; out vec3 fragNormal; out vec4 fragColor; out vec2 planeRel; out float morphK;\n"
     "void main(){\n"
-    "  vec4 wp = matModel * vec4(vertexPosition, 1.0);\n"
-    "  fragPos = wp.xyz; fragNormal = vertexNormal; fragColor = vertexColor;\n"
-    "  gl_Position = mvp * vec4(vertexPosition, 1.0);\n"
+    "  // Position in the terrain plane relative to the chunk corner, from the\n"
+    "  // vertex number (33 x 33 grid, then four skirt edges).\n"
+    "  int id = gl_VertexID; ivec2 ij;\n"
+    "  if (id < 1089) ij = ivec2(id % 33, id / 33);\n"
+    "  else { int e = (id - 1089) / 33, t = (id - 1089) % 33;\n"
+    "    ij = e == 0 ? ivec2(t, 0) : e == 1 ? ivec2(32, t) : e == 2 ? ivec2(32 - t, 32) : ivec2(0, 32 - t); }\n"
+    "  planeRel = vec2(ij) * chunk.x;\n"
+    "  // Level-of-detail morph: far vertices, and those of a chunk that has just\n"
+    "  // appeared, sit on the coarser parent surface, so nothing ever pops.\n"
+    "  float dv = length((matModel * vec4(vertexPosition, 1.0)).xyz);\n"
+    "  float m = max(smoothstep(morph.x, morph.y, dv), 1.0 - morph.z);\n"
+    "  morphK = m;\n"
+    "  vec3 pos = vertexPosition + vertexTangent.xyz * m;\n"
+    "  vec3 cn = vec3(vertexTexCoord.x, sqrt(max(1.0 - dot(vertexTexCoord, vertexTexCoord), 0.0)), vertexTexCoord.y);\n"
+    "  vec4 wp = matModel * vec4(pos, 1.0);\n"
+    "  fragPos = wp.xyz; fragNormal = normalize(mix(vertexNormal, cn, m));\n"
+    "  fragColor = mix(vertexColor, vec4(vertexTexCoord2.x, vertexTangent.w, vertexTexCoord2.y, 1.0), m);\n"
+    "  gl_Position = mvp * vec4(pos, 1.0);\n"
     "  fragLogZ = 1.0 + gl_Position.w;\n"
     "}\n";
 
 static const char *terrain_fs = GLSL_HEADER LOGZ_FS NOISE_GLSL
-    "in vec3 fragPos; in vec3 fragNormal; in vec4 fragColor;\n"
+    "in vec3 fragPos; in vec3 fragNormal; in vec4 fragColor; in vec2 planeRel; in float morphK;\n"
     "uniform vec3 sunDir; uniform vec3 camMod; uniform float exposure;\n"
+    "uniform vec4 chunk; uniform ivec2 cellBase[6]; uniform vec2 cellFrac[6]; uniform int dbg;\n"
+    "// Crater octaves the mesh has not taken over yet: same cells, hash and\n"
+    "// profile as terrain.c (octaves[1..6]), evaluated per pixel.\n"
+    "const float OCT_CELL[6] = float[6](6000.0, 1500.0, 400.0, 100.0, 25.0, 6.0);\n"
+    "const float OCT_PROB[6] = float[6](0.45, 0.55, 0.60, 0.65, 0.65, 0.55);\n"
+    "const float OCT_GK[6] = float[6](0.15, 0.15, 0.15, 0.15, 0.15, 0.38);\n"
+    "uint chash(ivec2 c, uint seed){ uint h = uint(c.x) * 0x8da6b343u ^ uint(c.y) * 0xd8163841u ^ seed * 0xcb1ab31fu;\n"
+    "  h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15; return h; }\n"
+    "float cu01(uint h){ return float(h & 0xffffffu) / 16777216.0; }\n"
+    "void craters(float fw, vec2 su, float ss, out vec2 slope, out float shadow, out float fresh){\n"
+    "  slope = vec2(0.0); shadow = 1.0; fresh = 0.0;\n"
+    "  if (dbg == 6) return;\n"
+    "  for (int i = 0; i < 6; i++) {\n"
+    "    float cell = OCT_CELL[i], lim = cell * OCT_GK[i];\n"
+    "    float inGeo = mix(step(1.5 * chunk.x, lim), step(3.0 * chunk.x, lim), morphK);\n"
+    "    float pix = smoothstep(2.5, 7.0, cell / fw);\n"
+    "    float w = (1.0 - inGeo) * pix;\n"
+    "    // A crater the mesh has only just taken over is still too coarse for a\n"
+    "    // clean shadow edge: keep drawing its shadow here until the mesh is fine.\n"
+    "    float ws = max(w, pix * (1.0 - smoothstep(12.0, 48.0, cell / (chunk.x * (1.0 + morphK)))));\n"
+    "    if (ws < 0.004) continue;\n"
+    "    uint seed = uint(12 + i);\n"
+    "    vec2 p = cellFrac[i] + planeRel / cell;\n"
+    "    vec2 fl = floor(p), f = p - fl;\n"
+    "    ivec2 c0 = cellBase[i] + ivec2(fl);\n"
+    "    ivec2 o = ivec2(f.x < 0.5 ? -1 : 0, f.y < 0.5 ? -1 : 0);\n"   // the 2 x 2 cells that can reach this point
+    "    for (int k = 0; k < 4; k++) {\n"
+    "      ivec2 dc = o + ivec2(k & 1, k >> 1); ivec2 c = c0 + dc;\n"
+    "      if (cu01(chash(c, seed)) > OCT_PROB[i]) continue;\n"
+    "      uint h2 = chash(c, seed + 101u), h3 = chash(c, seed + 202u);\n"
+    "      vec2 ctr = vec2(dc) + vec2(0.15 + 0.7 * cu01(h2), 0.15 + 0.7 * cu01(h2 >> 7 | h2 << 25));\n"
+    "      float rr = 0.08 + 0.30 * cu01(h3) * cu01(h3 >> 9 | h3 << 23);\n"
+    "      vec2 d = f - ctr; float dl = length(d), r = dl / rr;\n"
+    "      if (r > 1.9) continue;\n"
+    "      float fr = cu01(chash(c, seed + 303u)); fr = fr * fr * fr;\n"
+    "      float depth = rr * (0.10 + 0.30 * fr), rim = depth * (0.18 + 0.12 * fr);\n"
+    "      vec2 dir = d / max(dl, 1e-6); float g;\n"
+    "      if (r < 1.0) {\n"
+    "        float r2 = r * r;\n"
+    "        g = 2.0 * depth * r + 6.0 * rim * r2 * r2 * r;\n"
+    "        if (-depth * (1.0 - r2) + rim * r2 * r2 * r2 < -0.82 * depth) g *= 0.15;\n"   // flat floor
+    "        // Shadow thrown across the bowl by its own sunward wall (parabolic bowl, exact).\n"
+    "        float pu = dot(d, su);\n"
+    "        float tstar = ss * rr * rr / depth - 2.0 * pu;\n"
+    "        float texit = -pu + sqrt(max(pu * pu + rr * rr - dl * dl, 0.0));\n"
+    "        float sw = max(1.5 * fw / cell, 0.07 * rr);\n"
+    "        shadow *= mix(1.0, smoothstep(-sw, sw, tstar - texit), ws);\n"
+    "      } else { float e = 1.0 / (1.0 + 5.0 * (r - 1.0)); e *= e; g = -15.0 * rim * e * e; }\n"
+    "      slope -= dir * (g / rr) * w;\n"
+    "      float halo = r < 1.0 ? 1.0 : (1.9 - r) / 0.9;\n"
+    "      fresh = max(fresh, fr * halo * w * (rr * cell < 400.0 ? 1.0 : 0.4));\n"
+    "    }\n"
+    "  }\n"
+    "}\n"
     "uniform mat4 shadowVP; uniform sampler2D shadowMap; uniform vec3 shadowCenter; uniform float shadowOn;\n"
-    "uniform vec3 dustCenter; uniform float dustAmount; uniform int dbg;\n"
+    "uniform vec3 dustCenter; uniform float dustAmount;\n"
     "uniform sampler2D soilMap;\n"
     "out vec4 finalColor;\n"
     "float lmShadow(vec3 p){\n"
@@ -88,20 +161,32 @@ static const char *terrain_fs = GLSL_HEADER LOGZ_FS NOISE_GLSL
     "  vec4 s2 = texture(soilMap, r2 * dp / 29.0);\n"
     "  vec4 s3 = texture(soilMap, r3 * dp / 310.0);\n"
     "  vec2 sg = (s1.rg * 2.0 - 1.0) * 0.30 * near + ((s2.rg * 2.0 - 1.0) * r2) * 0.26 * mid + ((s3.rg * 2.0 - 1.0) * r3) * 0.16;\n"
-    "  N = normalize(N + vec3(sg.x, 0.0, sg.y));\n"
+    "  vec3 Ng = N;\n"
+    "  float fw = max(length(dFdx(planeRel)), length(dFdy(planeRel)));\n"
+    "  vec2 sunH = sunDir.xz; float sunHl = max(length(sunH), 1e-3);\n"
+    "  vec2 cslope; float cshadow, cfresh;\n"
+    "  craters(fw, sunH / sunHl, sunDir.y / sunHl, cslope, cshadow, cfresh);\n"
+    "  N = normalize(N + vec3(sg.x + cslope.x, 0.0, sg.y + cslope.y));\n"
     "  float albedo = fragColor.r * 1.0;\n"   // stored as albedo*1000/255
-    "  albedo *= 0.255;\n"
+    "  albedo = albedo * 0.255 + 0.07 * cfresh;\n"
     "  float fresh = fragColor.b;\n"
     "  // Albedo mottling: broad dark and bright patches, then the soil's own tone.\n"
     "  albedo *= 0.84 + 0.32 * fbm(dp * 0.013);\n"
     "  albedo *= mix(1.0, s3.a * 2.0, 0.55) * mix(1.0, s2.a * 2.0, 0.55 * mid) * mix(1.0, s1.a * 2.0, 0.85 * near);\n"
     "  // Lommel-Seeliger with an opposition surge (the lunar 'flat' look).\n"
-    "  float mu0 = max(dot(N, sunDir), 0.0);\n"
+    "  // The grain is far smaller than a pixel almost everywhere, so a facet turned\n"
+    "  // away from the low Sun must fade out, not snap to black: soft-clip the\n"
+    "  // detail term and tie it to the true slope so the two never disagree.\n"
+    "  float mug = max(dot(Ng, sunDir), 0.0);\n"
+    "  float mud = dot(N, sunDir);\n"
+    "  float kk = 0.045 + 0.045 * smoothstep(8.0, 120.0, dist);\n"
+    "  float mu0 = kk * log(1.0 + exp(min(mud / kk, 30.0)));\n"
+
     "  float mu = max(dot(N, V), 0.02);\n"
     "  float g = acos(clamp(dot(sunDir, V), -1.0, 1.0));\n"
     "  float surge = 1.0 + 0.9 * exp(-g / 0.06) + 0.35 * exp(-g / 0.5);\n"
     "  float ls = mu0 / (mu0 + mu) * 2.0;\n"
-    "  float sh = smoothstep(0.0, 1.0, fragColor.g) * lmShadow(fragPos);\n"
+    "  float sh = smoothstep(0.0, 1.0, fragColor.g) * lmShadow(fragPos) * cshadow;\n"
     "  vec3 sunCol = vec3(1.0, 0.985, 0.96);\n"
     "  vec3 regolith = vec3(1.0, 0.93, 0.84);\n"
     "  vec3 col = sunCol * regolith * albedo * ls * surge * sh * 2.6;\n"
@@ -116,7 +201,7 @@ static const char *terrain_fs = GLSL_HEADER LOGZ_FS NOISE_GLSL
     "  if (dbg == 2) col = N * 0.5 + 0.5;\n"
     "  if (dbg == 3) col = vec3(ls, mu0, mu);\n"
     "  if (dbg == 4 || dbg == 5) col = vec3(1.0, 0.0, 0.0);\n"
-    "  finalColor = vec4(col * exposure, 1.0);\n"
+    "  finalColor = sceneOut(col * exposure, 1.0);\n"
     "}\n";
 
 // ---------------------------------------------------------------------------
@@ -182,33 +267,42 @@ static const char *lm_fs = GLSL_HEADER LOGZ_FS
     "  vec3 N = normalize(fragNormal);\n"
     "  vec3 V = normalize(-fragPos);\n"
     "  if (!gl_FrontFacing) N = -N;\n"
-    "  if (mat == 7) { finalColor = vec4(base * 6.0 * exposure, 1.0); return; }\n"  // emissive
-    "  float metal = 0.0, rough = 0.6;\n"
+    "  if (mat == 7) { finalColor = sceneOut(base * 6.0 * exposure, 1.0); return; }\n"  // emissive
+    "  float metal = 0.0, rough = 0.6, bumpK = 1.0;\n"
     "  vec3 on = normalize(objNormal), bumpO = vec3(0.0); vec4 sm = vec4(0.5);\n"
-    "  if (mat == 1) { sm = triMap(texFoil, objPos / 1.10, on, bumpO); metal = 1.0; rough = 0.36; }\n"            // gold / amber kapton foil
+    "  if (mat == 1) { sm = triMap(texFoil, objPos / 1.10, on, bumpO); metal = 1.0; rough = 0.34; bumpK = 1.7; }\n"   // gold / amber kapton foil
     "  else if (mat == 2) { sm = triMap(texPanel, objPos / 1.26, on, bumpO); metal = 1.0; rough = 0.35; }\n"     // aluminium / inconel
     "  else if (mat == 3) { sm = triMap(texBlanket, objPos / 1.20, on, bumpO); rough = 0.8; }\n"                 // black-coated blanket
     "  else if (mat == 4) { sm = triMap(texPanel, objPos / 1.26, on, bumpO); rough = 0.5; }\n"                   // white paint
-    "  else if (mat == 5) { sm = triMap(texBlanket, objPos / 1.20, on, bumpO); metal = 1.0; rough = 0.44; }\n"   // silver mylar blanket
+    "  else if (mat == 5) { sm = triMap(texBlanket, objPos / 1.20, on, bumpO); metal = 1.0; rough = 0.46; bumpK = 2.4; }\n"   // silver mylar blanket
     "  else if (mat == 6) { rough = 0.15; }\n"                                                                   // window glass (dark)
     "  else if (mat == 8) { sm = triMap(texRock, objPos / 1.50, on, bumpO); rough = 0.92; }\n"                   // lunar rock
     "  else if (mat == 9) { rough = 0.95; }\n"                                                                   // plain matte (painted-on shadows)
+    "  else if (mat == 10) { sm = triMap(texPanel, objPos / 1.26, on, bumpO); metal = 0.5; rough = 0.60; bumpK = 1.6; }\n"   // dull anodised skin, oil-canned
     "  base *= sm.a * 2.0;\n"
     "  rough = clamp(rough + (sm.b - 0.5), 0.08, 1.0);\n"
-    "  N = normalize(N + mat3(matModel) * bumpO);\n"
+    "  N = normalize(N + mat3(matModel) * bumpO * bumpK);\n"
+    "  // Specular anti-aliasing: where the bumped normal changes faster than the\n"
+    "  // pixel grid can show, widen the highlight instead of letting it sparkle.\n"
+    "  vec3 ndx = dFdx(N), ndy = dFdy(N);\n"
+    "  float nvar = min(dot(ndx, ndx) + dot(ndy, ndy), 0.18);\n"
     "  vec3 L = sunDir;\n"
     "  vec3 H = normalize(L + V);\n"
     "  float NL = max(dot(N, L), 0.0), NV = max(dot(N, V), 1e-3), NH = max(dot(N, H), 0.0), VH = max(dot(V, H), 0.0);\n"
-    "  float a = rough * rough, a2 = a * a;\n"
+    "  float a2 = min(rough * rough * rough * rough + nvar, 1.0);\n"
+    "  rough = sqrt(sqrt(a2));\n"
     "  float dn = NH * NH * (a2 - 1.0) + 1.0; float D = a2 / (3.14159 * dn * dn);\n"
     "  float k = (rough + 1.0) * (rough + 1.0) / 8.0;\n"
     "  float G = NL / (NL * (1.0 - k) + k) * NV / (NV * (1.0 - k) + k);\n"
     "  vec3 F0 = mix(vec3(0.04), base, metal);\n"
     "  vec3 F = F0 + (1.0 - F0) * pow(1.0 - VH, 5.0);\n"
-    "  vec3 spec = D * G * F / max(4.0 * NL * NV, 1e-3);\n"
+    "  vec3 spec = min(D * G * F / max(4.0 * NL * NV, 1e-3), vec3(24.0));\n"
     "  vec3 diff = (1.0 - F) * (1.0 - metal) * base / 3.14159;\n"
     "  float sh = selfShadow(fragPos, N) * sunGain;\n"
-    "  vec3 col = (diff + spec) * NL * sh * 9.0;\n"
+    "  // Sunlight on the vehicle is held a little under the true ratio to the\n"
+    "  // regolith so bright skins keep their panel detail instead of clipping.\n"
+    "  float sunK = (mat == 8 || mat == 9) ? 9.0 : 6.5;\n"
+    "  vec3 col = (diff + spec) * NL * sh * sunK;\n"
     "  for (int i = 0; i < 4; i++) {\n"   // local lamps (point lights, camera-relative)
     "    vec3 lv = lampPos[i] - fragPos; float d2 = dot(lv, lv); vec3 l = lv * inversesqrt(d2);\n"
     "    float nl = max(dot(N, l), 0.0); vec3 h2 = normalize(l + V);\n"
@@ -219,7 +313,7 @@ static const char *lm_fs = GLSL_HEADER LOGZ_FS
     "  vec3 Fe = F0 + (max(vec3(1.0 - rough), F0) - F0) * pow(1.0 - NV, 5.0);\n"
     "  col += envLight(R, rough) * Fe * mix(0.6, 1.0, metal);\n"
     "  col += (1.0 - metal) * base * envLight(N, 1.0) * 0.5;\n"
-    "  finalColor = vec4(col * exposure, 1.0);\n"
+    "  finalColor = sceneOut(col * exposure, 1.0);\n"
     "}\n";
 
 // ---------------------------------------------------------------------------
@@ -242,10 +336,10 @@ static const char *fx_fs = GLSL_HEADER LOGZ_FS NOISE_GLSL
     "  else if (kind == 1) { float n = fbm(vec2(uv.x * 6.0, uv.y * 2.0 - time * 9.0)); a = (1.0 - uv.y) * smoothstep(1.0, 0.2, abs(p.x)) * (0.5 + n); }\n"  // plume
     "  else if (kind == 2) { float n = fbm(vec2(atan(p.y, p.x) * 6.0, r * 3.0 - time * 2.5)); a = smoothstep(1.0, 0.55, r) * smoothstep(0.15, 0.5, r) * (0.3 + 1.2 * n); }\n"  // dust sheet
     "  else if (kind == 4) { float e = max(abs(p.x + p.y * 0.4), abs(p.y)) + 0.25 * fbm(uv * 5.0 + col.rg * 9.0);\n"   // crash debris shard (alpha blended)
-    "         if (e > 0.85) discard; finalColor = vec4(col.rgb * exposure * gain * (0.75 + 0.25 * p.y), col.a); return; }\n"
+    "         if (e > 0.85) discard; finalColor = sceneOut(col.rgb * exposure * gain * (0.75 + 0.25 * p.y), col.a); return; }\n"
     "  else { float ax = abs(p.x); a = smoothstep(1.0, 0.0, ax) * smoothstep(0.0, 0.25, uv.y) * smoothstep(1.0, 0.6, uv.y); \n"   // dust streak (alpha blended)
-    "         finalColor = vec4(col.rgb * exposure * gain, a * col.a); return; }\n"
-    "  finalColor = vec4(col.rgb * a * col.a * exposure * gain, 1.0);\n"
+    "         finalColor = sceneOut(col.rgb * exposure * gain, a * col.a); return; }\n"
+    "  finalColor = sceneOut(col.rgb * a * col.a * exposure * gain, 1.0);\n"
     "}\n";
 
 // ---------------------------------------------------------------------------
@@ -257,7 +351,7 @@ static const char *sky_vs = GLSL_HEADER
     "void main(){ uv = vertexTexCoord; gl_Position = vec4(vertexPosition.xy, 0.0, 1.0); }\n";
 
 static const char *sky_fs = GLSL_HEADER NOISE_GLSL
-    "in vec2 uv; uniform vec3 camFwd; uniform vec3 camRight; uniform vec3 camUp; uniform vec2 tanHalf;\n"
+    "in vec2 uv; uniform vec3 camFwd; uniform vec3 camRight; uniform vec3 camUp; uniform vec2 tanHalf; uniform vec2 tanOff;\n"
     "uniform vec3 sunDir; uniform vec3 earthDir; uniform vec3 earthSun; uniform float exposure; uniform float starGain;\n"
     "uniform float earthAngRad;\n"
     "out vec4 finalColor;\n"
@@ -275,7 +369,7 @@ static const char *sky_fs = GLSL_HEADER NOISE_GLSL
     "}\n"
     "void main(){\n"
     "  vec2 s = uv * 2.0 - 1.0;\n"
-    "  vec3 dir = normalize(camFwd + camRight * s.x * tanHalf.x + camUp * s.y * tanHalf.y);\n"
+    "  vec3 dir = normalize(camFwd + camRight * (s.x * tanHalf.x + tanOff.x) + camUp * (s.y * tanHalf.y + tanOff.y));\n"
     "  vec3 col = vec3(0.0);\n"
     "  // Stars: hashed points on a fine direction grid.\n"
     "  vec3 a = abs(dir); vec2 st; float face;\n"
@@ -297,7 +391,12 @@ static const char *sky_fs = GLSL_HEADER NOISE_GLSL
     "  float ang = acos(clamp(cs, -1.0, 1.0));\n"
     "  col += vec3(1.0, 0.97, 0.92) * (smoothstep(0.0049, 0.0044, ang) * 4000.0);\n"
     "  col += vec3(1.0, 0.95, 0.85) * (0.05 / (ang * ang * 400.0 + 0.002)) * 0.02;\n"
-    "  col += vec3(1.0, 0.95, 0.9) * exp(-ang * 9.0) * 0.6;\n"
+    "  col += vec3(1.0, 0.95, 0.9) * (exp(-ang * 26.0) * 0.9 + exp(-ang * 7.0) * 0.07);\n"
+    "  // Faint six-point diffraction star, as a lens would draw it.\n"
+    "  vec3 sr = normalize(cross(sunDir, vec3(0.0, 1.0, 0.0) + vec3(1e-4))), su = cross(sr, sunDir);\n"
+    "  float sa = atan(dot(dir, su), dot(dir, sr));\n"
+    "  float spike = pow(abs(cos(sa * 3.0)), 60.0) + 0.5 * pow(abs(sin(sa * 3.0)), 90.0);\n"
+    "  col += vec3(1.0, 0.96, 0.9) * spike * exp(-ang * 20.0) * 0.16 * step(0.0, cs);\n"
     "  // Earth: ray-sphere at its apparent angular radius.\n"
     "  float ce = dot(dir, earthDir);\n"
     "  float sinR = sin(earthAngRad);\n"
@@ -321,7 +420,7 @@ static const char *sky_fs = GLSL_HEADER NOISE_GLSL
     "      col += vec3(0.3, 0.5, 1.0) * glow * 0.8 * smoothstep(-0.3, 0.5, dot(normalize(right*q.x+upv*q.y), earthSun));\n"
     "    }\n"
     "  }\n"
-    "  finalColor = vec4(col * exposure, 1.0);\n"
+    "  finalColor = sceneOut(col * exposure, 1.0);\n"
     "}\n";
 
 // ---------------------------------------------------------------------------
@@ -339,7 +438,7 @@ static const char *down_fs = GLSL_HEADER
     "         + texture(src, uv + texel * vec2(-1,1)).rgb + texture(src, uv + texel * vec2(1,1)).rgb;\n"
     "  c = c * 0.25 + texture(src, uv).rgb * 0.0;\n"
     "  if (threshold > 0.0) { float l = max(max(c.r, c.g), c.b); c *= max(l - threshold, 0.0) / max(l, 1e-4); }\n"
-    "  c = min(c, vec3(4000.0));\n"
+    "  c = min(c, vec3(260.0));\n"
     "  o = vec4(c, 1.0);\n"
     "}\n";
 
@@ -356,7 +455,7 @@ static const char *up_fs = GLSL_HEADER
 
 static const char *final_fs = GLSL_HEADER NOISE_GLSL
     "in vec2 uv; uniform sampler2D scene; uniform sampler2D bloom; uniform float bloomGain;\n"
-    "uniform float film; uniform float time; uniform vec2 resolution;\n"
+    "uniform float film;\n"
     "out vec4 o;\n"
     "vec3 aces(vec3 x){ const float a=2.51, b=0.03, c=2.43, d=0.59, e=0.14; return clamp((x*(a*x+b))/(x*(c*x+d)+e), 0.0, 1.0); }\n"
     "void main(){\n"
@@ -373,12 +472,63 @@ static const char *final_fs = GLSL_HEADER NOISE_GLSL
     "  }\n"
     "  c = aces(c);\n"
     "  c = pow(c, vec3(1.0 / 2.2));\n"
+    "  o = vec4(c, dot(c, vec3(0.299, 0.587, 0.114)));\n"
+    "}\n";
+
+// Edge smoothing (FXAA 3.11 quality, luma in alpha), then film grain and a
+// half-bit dither so the dark sky never bands.
+static const char *fxaa_fs = GLSL_HEADER NOISE_GLSL
+    "in vec2 uv; uniform sampler2D src; uniform vec2 texel; uniform float film; uniform float time; uniform vec2 resolution;\n"
+    "out vec4 o;\n"
+    "float L(vec2 p){ return texture(src, p).a; }\n"
+    "void main(){\n"
+    "  vec4 cm = texture(src, uv);\n"
+    "  float lM = cm.a, lN = L(uv + vec2(0.0, texel.y)), lS = L(uv - vec2(0.0, texel.y)), lE = L(uv + vec2(texel.x, 0.0)), lW = L(uv - vec2(texel.x, 0.0));\n"
+    "  float lmin = min(lM, min(min(lN, lS), min(lE, lW))), lmax = max(lM, max(max(lN, lS), max(lE, lW)));\n"
+    "  float range = lmax - lmin;\n"
+    "  vec3 c = cm.rgb;\n"
+    "  if (range > max(0.0312, lmax * 0.125)) {\n"
+    "    float lNW = L(uv + texel * vec2(-1.0, 1.0)), lNE = L(uv + texel), lSW = L(uv - texel), lSE = L(uv + texel * vec2(1.0, -1.0));\n"
+    "    float eH = abs(lNW + lSW - 2.0 * lW) + 2.0 * abs(lN + lS - 2.0 * lM) + abs(lNE + lSE - 2.0 * lE);\n"
+    "    float eV = abs(lNW + lNE - 2.0 * lN) + 2.0 * abs(lW + lE - 2.0 * lM) + abs(lSW + lSE - 2.0 * lS);\n"
+    "    bool horz = eV >= eH;\n"   // edge runs horizontally: step across it vertically
+    "    float l1 = horz ? lS : lW, l2 = horz ? lN : lE;\n"
+    "    float g1 = l1 - lM, g2 = l2 - lM;\n"
+    "    bool steep1 = abs(g1) >= abs(g2);\n"
+    "    float gscale = 0.25 * max(abs(g1), abs(g2));\n"
+    "    float stepLen = horz ? texel.y : texel.x;\n"
+    "    float lavg;\n"
+    "    if (steep1) { stepLen = -stepLen; lavg = 0.5 * (l1 + lM); } else { lavg = 0.5 * (l2 + lM); }\n"
+    "    vec2 p = uv;\n"
+    "    if (horz) p.y += stepLen * 0.5; else p.x += stepLen * 0.5;\n"
+    "    vec2 off = horz ? vec2(texel.x, 0.0) : vec2(0.0, texel.y);\n"
+    "    vec2 p1 = p - off, p2 = p + off;\n"
+    "    float e1 = L(p1) - lavg, e2 = L(p2) - lavg;\n"
+    "    bool d1 = abs(e1) >= gscale, d2 = abs(e2) >= gscale;\n"
+    "    for (int i = 0; i < 10 && !(d1 && d2); i++) {\n"
+    "      float q = i < 4 ? 1.0 : (i < 7 ? 2.0 : 4.0);\n"
+    "      if (!d1) { p1 -= off * q; e1 = L(p1) - lavg; d1 = abs(e1) >= gscale; }\n"
+    "      if (!d2) { p2 += off * q; e2 = L(p2) - lavg; d2 = abs(e2) >= gscale; }\n"
+    "    }\n"
+    "    float dist1 = horz ? uv.x - p1.x : uv.y - p1.y, dist2 = horz ? p2.x - uv.x : p2.y - uv.y;\n"
+    "    bool near1 = dist1 < dist2;\n"
+    "    float dmin = min(dist1, dist2), span = dist1 + dist2;\n"
+    "    bool good = ((near1 ? e1 : e2) < 0.0) != (lM < lavg);\n"
+    "    float edgeOff = good ? 0.5 - dmin / span : 0.0;\n"
+    "    float lall = (2.0 * (lN + lS + lE + lW) + lNW + lNE + lSW + lSE) / 12.0;\n"
+    "    float sub = clamp(abs(lall - lM) / range, 0.0, 1.0); sub = sub * sub * (3.0 - 2.0 * sub); sub = sub * sub * 0.75;\n"
+    "    float fo = max(edgeOff, sub);\n"
+    "    vec2 fp = uv;\n"
+    "    if (horz) fp.y += fo * stepLen; else fp.x += fo * stepLen;\n"
+    "    c = texture(src, fp).rgb;\n"
+    "  }\n"
     "  if (film > 0.0) {\n"
     "    float gr = hash12(uv * resolution + fract(time * 23.7) * 1000.0) - 0.5;\n"
     "    c += gr * 0.08 * film;\n"
     "    float lum = dot(c, vec3(0.3, 0.59, 0.11));\n"
     "    c = mix(c, vec3(lum) * vec3(1.02, 0.98, 0.9), 0.35 * film);\n"
     "  }\n"
+    "  c += (hash12(uv * resolution + 17.0) - 0.5) / 255.0;\n"
     "  o = vec4(c, 1.0);\n"
     "}\n";
 
@@ -389,15 +539,15 @@ static const char *depth_vs = GLSL_HEADER
 
 // ---------------------------------------------------------------------------
 
-static Shader sh_terrain, sh_lm, sh_fx, sh_sky, sh_down, sh_up, sh_final, sh_depth;
+static Shader sh_terrain, sh_lm, sh_fx, sh_sky, sh_down, sh_up, sh_final, sh_fxaa, sh_depth;
 static Texture2D tex_foil, tex_panel, tex_blanket, tex_rock, tex_soil;
 static float exposure = 1.0f;
 
 typedef struct { unsigned int fbo; Texture2D tex; unsigned int depth; int w, h; } Target;
 static Target hdr;
+static Target ldr;   // tonemapped image, luma in alpha (input of the edge-smoothing pass)
 #define NBLOOM 6
 static Target bloom[NBLOOM];
-static int cur_w, cur_h;
 static float film_amount;
 static int out_w = 0, out_h = 0;   // final output size (screen or screenshot target)
 static unsigned int out_fbo = 0;
@@ -416,6 +566,57 @@ static unsigned int shadow_fbo, shadow_tex;
 static Matrix shadow_vp;
 static V3 shadow_center;
 static int shadow_valid;
+
+// Output mode of the scene shaders: 0 = HDR target + bloom/tonemap/FXAA passes (PC);
+// 1 = straight into a linear target that the display encodes (sRGB swapchain, Quest);
+// 2 = straight into a plain 8-bit target (gamma applied here).
+static int direct_out;
+static unsigned int direct_fbo;
+static int direct_x, direct_y;
+static int cur_w, cur_h;
+void render_set_direct(int mode) { direct_out = mode; }
+int render_direct(void) { return direct_out; }
+void render_set_direct_target(unsigned int fbo, int x, int y) { direct_fbo = fbo; direct_x = x; direct_y = y; }
+void render_set_shadow_center(V3 c);
+
+Shader render_load_shader(const char *vs, const char *fs)
+{
+#ifdef AGC_GLES
+    static const char *ver = "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n";
+#else
+    static const char *ver = "#version 330\n";
+#endif
+    static const char *out_fn =
+        "vec3 agcAces(vec3 x){ return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0); }\n"
+        "vec4 sceneOut(vec3 c, float a){\n"
+        "#if DIRECT_OUT == 1\n"
+        "  return vec4(agcAces(c), a);\n"
+        "#elif DIRECT_OUT == 2\n"
+        "  return vec4(pow(agcAces(c), vec3(1.0 / 2.2)), a);\n"
+        "#else\n"
+        "  return vec4(c, a);\n"
+        "#endif\n"
+        "}\n";
+    size_t nv = strlen(vs) + 512, nf = strlen(fs) + strlen(out_fn) + 512;
+    char *v = malloc(nv), *f = malloc(nf);
+    snprintf(v, nv, "%s#define DIRECT_OUT %d\n%s", ver, direct_out, vs);
+    snprintf(f, nf, "%s#define DIRECT_OUT %d\n%s%s", ver, direct_out, out_fn, fs);
+    Shader sh = LoadShaderFromMemory(v, f);
+    const char *dump = getenv("AGC_SHADER_DUMP");   // debugging: write every shader out for an offline validator
+    if (dump) {
+        static int n;
+        char path[600];
+        for (int k = 0; k < 2; k++) {
+            snprintf(path, sizeof path, "%s/s%02d.%s", dump, n, k ? "frag" : "vert");
+            FILE *fp = fopen(path, "w");
+            if (fp) { fputs(k ? f : v, fp); fclose(fp); }
+        }
+        n++;
+    }
+    free(v);
+    free(f);
+    return sh;
+}
 
 static Target make_target(int w, int h, int with_depth)
 {
@@ -453,6 +654,8 @@ static void ensure_targets(int w, int h)
 {
     if (w == cur_w && h == cur_h) return;
     free_target(&hdr);
+    free_target(&ldr);
+    ldr = make_target(w, h, 0);
     for (int i = 0; i < NBLOOM; i++) free_target(&bloom[i]);
     hdr = make_target(w, h, 1);
     int bw = w / 2, bh = h / 2;
@@ -473,14 +676,15 @@ static void set_logfar(Shader s)
 
 void render_init(void)
 {
-    sh_terrain = LoadShaderFromMemory(terrain_vs, terrain_fs);
-    sh_lm = LoadShaderFromMemory(lm_vs, lm_fs);
-    sh_fx = LoadShaderFromMemory(fx_vs, fx_fs);
-    sh_sky = LoadShaderFromMemory(sky_vs, sky_fs);
-    sh_down = LoadShaderFromMemory(post_vs, down_fs);
-    sh_up = LoadShaderFromMemory(post_vs, up_fs);
-    sh_final = LoadShaderFromMemory(post_vs, final_fs);
-    sh_depth = LoadShaderFromMemory(depth_vs, depth_fs);
+    sh_terrain = render_load_shader(terrain_vs, terrain_fs);
+    sh_lm = render_load_shader(lm_vs, lm_fs);
+    sh_fx = render_load_shader(fx_vs, fx_fs);
+    sh_sky = render_load_shader(sky_vs, sky_fs);
+    sh_down = render_load_shader(post_vs, down_fs);
+    sh_up = render_load_shader(post_vs, up_fs);
+    sh_final = render_load_shader(post_vs, final_fs);
+    sh_fxaa = render_load_shader(post_vs, fxaa_fs);
+    sh_depth = render_load_shader(depth_vs, depth_fs);
     sh_lm.locs[SHADER_LOC_MATRIX_NORMAL] = GetShaderLocation(sh_lm, "matNormal");
     // Surface maps ride in the material map slots 0..3 (the shadow map uses unit 5).
     sh_lm.locs[SHADER_LOC_MAP_ALBEDO] = GetShaderLocation(sh_lm, "texFoil");
@@ -508,7 +712,9 @@ void render_init(void)
 void render_shutdown(void)
 {
     free_target(&hdr);
+    free_target(&ldr);
     for (int i = 0; i < NBLOOM; i++) free_target(&bloom[i]);
+    UnloadShader(sh_fxaa);
     UnloadShader(sh_terrain); UnloadShader(sh_lm); UnloadShader(sh_fx); UnloadShader(sh_sky);
     UnloadShader(sh_down); UnloadShader(sh_up); UnloadShader(sh_final); UnloadShader(sh_depth);
     rlUnloadFramebuffer(shadow_fbo);
@@ -603,12 +809,23 @@ static void bind_shadow(Shader s)
 static ViewCam cur_cam;
 static Camera3D rl_cam;
 
+void render_set_shadow_center(V3 c) { shadow_center = c; }
+
 void render_begin_scene(const ViewCam *cam, int w, int h)
 {
-    ensure_targets(w, h);
     cur_cam = *cam;
-    rlEnableFramebuffer(hdr.fbo);
-    rlViewport(0, 0, w, h);
+    if (direct_out) {
+        rlDrawRenderBatchActive();
+        cur_w = w;
+        cur_h = h;
+        if (direct_fbo) rlEnableFramebuffer(direct_fbo);
+        else rlDisableFramebuffer();
+        rlViewport(direct_x, direct_y, w, h);
+    } else {
+        ensure_targets(w, h);
+        rlEnableFramebuffer(hdr.fbo);
+        rlViewport(0, 0, w, h);
+    }
     rlClearColor(0, 0, 0, 255);
     rlClearScreenBuffers();
 
@@ -633,7 +850,8 @@ static void scene_3d_begin(int w, int h, double NEAR)
     rlLoadIdentity();
     double aspect = (double)w / h;
     double top = NEAR * tan(rl_cam.fovy * 0.5 * DEG2RAD);
-    rlFrustum(-top * aspect, top * aspect, -top, top, NEAR, FAR_PLANE);
+    if (cur_cam.asym) rlFrustum(NEAR * cur_cam.tan_l, NEAR * cur_cam.tan_r, NEAR * cur_cam.tan_d, NEAR * cur_cam.tan_u, NEAR, FAR_PLANE);
+    else rlFrustum(-top * aspect, top * aspect, -top, top, NEAR, FAR_PLANE);
     rlMatrixMode(RL_MODELVIEW);
     rlLoadIdentity();
     Matrix view = MatrixLookAt(rl_cam.position, rl_cam.target, rl_cam.up);
@@ -703,12 +921,17 @@ void render_sky(const ViewCam *cam, V3 sun, V3 earth, V3 earth_sun)
     V3 right = v3_norm(v3_cross(cam->fwd, cam->upv));
     V3 upv = v3_cross(right, cam->fwd);
     double th = tan(cam->fov_y / 2);
-    float tanhalf[2] = { (float)(th * cur_w / cur_h), (float)th };
+    float tanhalf[2] = { (float)(th * cur_w / cur_h), (float)th }, tanoff[2] = { 0, 0 };
+    if (cam->asym) {
+        tanhalf[0] = (float)((cam->tan_r - cam->tan_l) / 2); tanhalf[1] = (float)((cam->tan_u - cam->tan_d) / 2);
+        tanoff[0] = (float)((cam->tan_r + cam->tan_l) / 2); tanoff[1] = (float)((cam->tan_u + cam->tan_d) / 2);
+    }
     BeginShaderMode(sh_sky);
     set3(sh_sky, "camFwd", cam->fwd);
     set3(sh_sky, "camRight", right);
     set3(sh_sky, "camUp", upv);
     SetShaderValue(sh_sky, GetShaderLocation(sh_sky, "tanHalf"), tanhalf, SHADER_UNIFORM_VEC2);
+    SetShaderValue(sh_sky, GetShaderLocation(sh_sky, "tanOff"), tanoff, SHADER_UNIFORM_VEC2);
     set3(sh_sky, "sunDir", sun);
     set3(sh_sky, "earthDir", earth);
     set3(sh_sky, "earthSun", earth_sun);
@@ -727,6 +950,11 @@ void render_sky(const ViewCam *cam, V3 sun, V3 earth, V3 earth_sun)
 void render_end_scene(void)
 {
     rlDrawRenderBatchActive();
+    if (direct_out) {
+        // The scene went straight to its target, already tonemapped: nothing to composite.
+        rlDisableDepthTest();
+        return;
+    }
     rlDisableFramebuffer();
 
     // Bloom: bright-pass downsample chain, then upsample-accumulate.
@@ -761,18 +989,32 @@ void render_end_scene(void)
         rlDisableFramebuffer();
     }
 
-    // Composite into the scene area of the output (bottom-left origin).
-    bind_output();
-    int ow = out_w ? out_w : GetRenderWidth(), oh = out_h ? out_h : GetRenderHeight();
-    rlViewport(0, oh - cur_h, cur_w, cur_h);
+    // Composite + tonemap into the LDR target.
+    rlEnableFramebuffer(ldr.fbo);
+    rlViewport(0, 0, cur_w, cur_h);
+    rlDisableColorBlend();   // alpha carries luma here, it must not blend
     BeginShaderMode(sh_final);
     SetShaderValueTexture(sh_final, GetShaderLocation(sh_final, "scene"), hdr.tex);
     SetShaderValueTexture(sh_final, GetShaderLocation(sh_final, "bloom"), bloom[0].tex);
     set1(sh_final, "bloomGain", bloom_gain);
     set1(sh_final, "film", film_amount);
-    set1(sh_final, "time", (float)GetTime());
+    fullscreen();
+    EndShaderMode();
+    rlDisableFramebuffer();
+    rlEnableColorBlend();
+
+    // Edge smoothing into the scene area of the output (bottom-left origin).
+    bind_output();
+    int ow = out_w ? out_w : GetRenderWidth(), oh = out_h ? out_h : GetRenderHeight();
+    rlViewport(0, oh - cur_h, cur_w, cur_h);
+    BeginShaderMode(sh_fxaa);
+    SetShaderValueTexture(sh_fxaa, GetShaderLocation(sh_fxaa, "src"), ldr.tex);
+    float texel_out[2] = { 1.0f / cur_w, 1.0f / cur_h };
+    SetShaderValue(sh_fxaa, GetShaderLocation(sh_fxaa, "texel"), texel_out, SHADER_UNIFORM_VEC2);
+    set1(sh_fxaa, "film", film_amount);
+    set1(sh_fxaa, "time", (float)GetTime());
     float res[2] = { (float)cur_w, (float)cur_h };
-    SetShaderValue(sh_final, GetShaderLocation(sh_final, "resolution"), res, SHADER_UNIFORM_VEC2);
+    SetShaderValue(sh_fxaa, GetShaderLocation(sh_fxaa, "resolution"), res, SHADER_UNIFORM_VEC2);
     fullscreen();
     EndShaderMode();
     // Restore the 2D state raylib expects for the HUD.

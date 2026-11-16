@@ -11,6 +11,8 @@
 #include "raymath.h"
 #include "rlgl.h"
 
+#include "input.h"
+
 #include "hud.h"
 #include "moon.h"
 #include "render.h"
@@ -301,7 +303,6 @@ static void build_base(void)
 // --- Globe -------------------------------------------------------------------------------
 
 static const char *globe_vs =
-    "#version 330\n"
     "in vec3 vertexPosition;\n"
     "uniform mat4 mvp; uniform mat4 matModel; uniform float logFar;\n"
     "out vec3 fixedDir; out vec3 camRel; out float fragLogZ;\n"
@@ -309,7 +310,6 @@ static const char *globe_vs =
     "  gl_Position = mvp * vec4(vertexPosition, 1.0); fragLogZ = 1.0 + gl_Position.w; }\n";
 
 static const char *globe_fs =
-    "#version 330\n"
     "in vec3 fixedDir; in vec3 camRel; in float fragLogZ;\n"
     "uniform float logFar; uniform mat4 fixedFromSite; uniform vec3 sunF; uniform vec3 earthF; uniform vec3 baseF;\n"
     "uniform float exposure; uniform float baseR; uniform vec3 lampP[4]; uniform vec3 lampC[4];\n"
@@ -384,7 +384,7 @@ static const char *globe_fs =
     "    vec3 ln = mat3(fixedFromSite) * (l * inversesqrt(d2));\n"
     "    col += alb * lampC[i] * max(dot(N, ln), 0.0) / (d2 + 1.0);\n"
     "  }\n"
-    "  finalColor = vec4(col * tint * exposure, 1.0);\n"
+    "  finalColor = sceneOut(col * tint * exposure, 1.0);\n"
     "}\n";
 
 static Shader globe_sh;
@@ -451,7 +451,7 @@ void extras_init(void)
     build_base();
     base_mesh = mb_upload();
     globe_mesh = make_sphere(G_NLON, G_NLAT);   // 16-bit indices: (256 * 129) vertices fit
-    globe_sh = LoadShaderFromMemory(globe_vs, globe_fs);
+    globe_sh = render_load_shader(globe_vs, globe_fs);
     float lf = render_log_far();
     SetShaderValue(globe_sh, GetShaderLocation(globe_sh, "logFar"), &lf, SHADER_UNIFORM_FLOAT);
     float one[3] = { 1, 1, 1 };
@@ -870,7 +870,7 @@ ViewCam globe_camera(V3 lm_site)
     V3 dir_f = v3_norm(v3_sub(v3_scale(fwd_h, cos(look_down)), v3_scale(up_f, sin(look_down))));
     V3 pos_f = v3_scale(up_f, R + g_alt);
     // Step back along the view so the target stays under the screen centre.
-    ViewCam c;
+    ViewCam c = { 0 };
     V3 centre = terrain_fixed_to_site(v3(0, 0, 0));
     c.pos = v3_add(centre, m3_apply(S, pos_f));
     c.fwd = v3_norm(m3_apply(S, dir_f));

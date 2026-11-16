@@ -21,13 +21,15 @@ extern PanelDef cp_panels[NPANELS];
 
 // Things the panel code registers while drawing, consumed by
 // cockpit.c for 3D levers/knobs and mouse picking.
-enum { LEV_TOGGLE, LEV_KNOB, LEV_THUMB };
+enum { LEV_TOGGLE, LEV_KNOB, LEV_THUMB, LEV_BUTTON, LEV_KEY, LEV_CB };
 typedef struct {
     int panel, kind;
-    float x, y;         // mm on the panel
-    float val;          // toggle: -1..1 (down..up); knob: angle (rad); thumb: 0..1
+    float x, y;         // mm on the panel (centre)
+    float val;          // toggle: -1..1 (down..up); knob: angle (rad); thumb: position;
+                        // button / key: cap height (mm); breaker: 1 = popped
     float size;         // mm (knob radius / lever length)
-    int guard;          // toggle has a guard
+    float w, h;         // button / key: cap size (mm)
+    int guard;          // toggle: wicket guards; button: guard frame
     unsigned char r, g, b;
 } Lever;
 
@@ -40,7 +42,7 @@ typedef struct {
 } Hot;
 
 // Per panel, so that panels can be redrawn at different rates.
-#define CP_MAXLEV 96
+#define CP_MAXLEV 320
 #define CP_MAXHOT 280
 typedef struct {
     Lever lev[CP_MAXLEV];
@@ -64,6 +66,16 @@ void cp_panels_update(float dt);
 void cp_click(const Hot *h, float u, float v);
 // Tooltip text for a hotspot (static buffer).
 const char *cp_tooltip(const Hot *h, float u, float v);
+
+// Bit i set: panel i shows something animated (a hint marker) and wants
+// re-recording every frame.
+extern unsigned cp_live_panels;
+
+// The control the hints point at, for the off-screen pointer: 1 if there is one.
+int cp_hint_point(int *panel, float *x_mm, float *y_mm, const char **text);
+
+// Cabin fans running (0..1.6), for the sound.
+float cp_fan_level(void);
 
 // Lighting levels set from the panel knobs (0..1).
 float cp_flood_level(void);

@@ -689,7 +689,8 @@ void PollInputEvents(void)
 
     // Poll Events (registered events) until we reach TIMEOUT which indicates there are no events left to poll
     // NOTE: Activity is paused if not enabled (platform.appEnabled)
-    while ((pollResult = ALooper_pollOnce(platform.appEnabled? 0 : -1, NULL, &pollEvents, (void**)&platform.source)) > ALOOPER_POLL_TIMEOUT)
+    // AGC Lander: with FLAG_WINDOW_ALWAYS_RUN the poll never blocks (a headset session must keep answering while paused).
+    while ((pollResult = ALooper_pollOnce((platform.appEnabled || (CORE.Window.flags & FLAG_WINDOW_ALWAYS_RUN))? 0 : -1, NULL, &pollEvents, (void**)&platform.source)) > ALOOPER_POLL_TIMEOUT)
     {
         // Process this event
         if (platform.source != NULL) platform.source->process(platform.app, platform.source);
@@ -854,7 +855,8 @@ static int InitGraphicsDevice(void)
 
     const EGLint contextAttribs[] =
     {
-        EGL_CONTEXT_CLIENT_VERSION, 2,
+        // AGC Lander: an OpenGL ES 3 build must ask for an ES 3 context.
+        EGL_CONTEXT_CLIENT_VERSION, (rlGetVersion() == RL_OPENGL_ES_30)? 3 : 2,
         EGL_NONE
     };
 
