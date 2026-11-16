@@ -10,9 +10,11 @@
 #include "agc_host.h"
 #include "crew.h"
 #include "lm.h"
+#include "milestones.h"
 #include "scenario.h"
 #include "sim.h"
 #include "snapshot.h"
+#include "terrain.h"
 
 static void type(const char *s)
 {
@@ -185,6 +187,34 @@ static void save_state_test(void)
     round_trip("mid-P63");
 }
 
+// The embedded milestones (make snapshots) must load in this build - a
+// snapshot made before the state layout changed is refused - and a world
+// restored from one must fly on: from 150 m the automatic crew lands.
+static void milestone_test(void)
+{
+    printf("embedded milestones (data/snapshots.c):\n");
+    char err[200], what[160];
+    for (int m = 0; m < MS_COUNT; m++) {
+        crew_reset();
+        int rc = milestone_load(m, err, sizeof err);
+        if (rc) printf("    %s: %s\n", milestone_name(m), err);
+        else printf("    %-9s t=%.1f  alt %.0f m  DPS %s  ENG ARM %d\n", milestone_name(m), lm.t, lm.altitude, lm.dps_on ? "on" : "off", lm.engine_armed);
+        snprintf(what, sizeof what, "milestone %s loads in this build", milestone_name(m));
+        check(rc == 0, what);
+    }
+    check(track_count() > 1000, "the canonical track is embedded");
+    if (milestone_load(MS_150M, err, sizeof err)) return;
+    terrain_shape_init(scenario_info.rls);
+    lm.surface = terrain_surface_cb;
+    crew.auto_crew = 1;
+    double t0 = lm.t;
+    while (!lm.touchdown && lm.t - t0 < 300) sim_advance(1.0);
+    sim_advance(5.0);
+    printf("    from 150 m: touchdown %d after %.0f s, result %d, %.2f m/s\n", lm.touchdown, lm.touchdown_t - t0, lm.land_result, -lm.touchdown_speed);
+    check(lm.touchdown && lm.land_result == 1, "from the 150 m milestone the automatic crew lands");
+    lm.surface = NULL;
+}
+
 int main(void)
 {
     if (agc_host_init() != 0) {
@@ -223,6 +253,7 @@ int main(void)
     check(!d->restart && !d->prog_lamp, "RSET clears RESTART and PROG lamps");
 
     save_state_test();
+    milestone_test();
 
     printf("%s (%d failure%s)\n", fails ? "FAILED" : "ALL PASSED", fails, fails == 1 ? "" : "s");
     return fails ? 1 : 0;

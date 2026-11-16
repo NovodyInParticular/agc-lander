@@ -18,6 +18,11 @@
 //   dock:METRES    lined-up start at that range (no offsets)
 //   dockpilot:SECS fly the docking with the hand controllers (THC pulses, RHC)
 //   rhc:p,y,r      hold the attitude controller (as before); thc:x,y,z hold the translation controller
+//   terrain        fly over the game's terrain instead of a smooth sphere (after pdi / liftoff)
+//   snapgen:DIR    the canonical descent: milestone save states + track into DIR (make snapshots)
+//   snapsave:FILE  save state now; snapload:FILE restore one (also a milestone name: snapload:HIGH GATE)
+//   nextevent      is the flight on the canonical track, and which event can it advance to?
+//   advance        advance to the next event if offered (prints ADVANCE <name> or ADVANCE none)
 
 #include <math.h>
 #include <stdio.h>
@@ -32,6 +37,9 @@
 #include "crew.h"
 #include "csm.h"
 #include "ascent.h"
+#include "milestones.h"
+#include "snapshot.h"
+#include "terrain.h"
 
 #define DEG (PI_D / 180.0)
 
@@ -209,6 +217,127 @@ static void watch(double secs, double every)
     }
 }
 
+static int write_file(const char *path, const uint8_t *b, size_t n)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f || fwrite(b, 1, n, f) != n) { fprintf(stderr, "cannot write %s\n", path); if (f) fclose(f); return -1; }
+    return fclose(f);
+}
+
+// The canonical descent for the save states (make snapshots). The game's
+// start (start_world, the automatic crew, the terrain under the radar), with
+// milestones saved at the moment their condition first holds and a sample of
+// the flight every second.
+static const char *snap_file[MS_COUNT] = { "tig30", "radar", "highgate", "150m" };
+
+static int snapgen(const char *dir)
+{
+    agc_host_init();
+    lm.surface = NULL;
+    lm_reset();
+    lm_attach_agc();
+    crew_reset();
+    ascent_reset();
+    scenario_pre_pdi();
+    terrain_shape_init(scenario_info.rls);
+    lm.surface = terrain_surface_cb;
+    crew.auto_crew = 1;
+
+    int have[MS_COUNT] = { 0 }, fails = 0;
+    double t_ms[MS_COUNT] = { 0 }, last_action = -1e9, action_before[MS_COUNT];
+    int ntrk = 0, cap = 4096;
+    TrackSample *trk = malloc(cap * sizeof *trk);
+    track_sample_now(&trk[ntrk++], 0);
+    double t0 = lm.t, t_down = 0;
+    int acts = crew_action_count(), acted = 0;
+    char path[512];
+    for (long step = 1; lm.t - t0 < 2400; step++) {
+        int fire[MS_COUNT] = { 0 };
+        lm_run(0.1);
+        // Before the crew reacts: moments when the player has something to do.
+        TrackSample now;
+        track_sample_now(&now, 0);
+        fire[MS_RADAR] = now.prog == 63 && lm.lr_range_good && lm.dps_on;
+        for (int pass = 0; pass < 2; pass++) {
+            if (pass == 1) {
+                crew_step();
+                ascent_step(0.1);
+                int a = crew_action_count();
+                if (a != acts) {
+                    acts = a;
+                    acted = 1;
+                    last_action = lm.t;
+                    printf("SNAPGEN   crew acts t=%.1f (TIG%+.1f s)  %s\n", lm.t, lm.t - 369645, crew.callout_time == lm.t ? crew.callout : "");
+                }
+                // After the slice, as the old fast-forward checked.
+                fire[MS_TIG30] = lm.t > 369615;
+                fire[MS_HIGHGATE] = lm.dps_on && lm.altitude < 2600;
+                fire[MS_150M] = lm.dps_on && lm.altitude < 150;
+            }
+            for (int m = 0; m < MS_COUNT; m++) {
+                if (have[m] || !fire[m]) continue;
+                uint8_t *b;
+                size_t n = snapshot_save(&b, milestone_name(m), m);
+                snprintf(path, sizeof path, "%s/%s.snap", dir, snap_file[m]);
+                if (!n || write_file(path, b, n)) return 1;
+                free(b);
+                have[m] = 1;
+                t_ms[m] = lm.t;
+                action_before[m] = last_action;
+                printf("SNAPGEN %-9s t=%.1f (TIG%+.1f s)  alt %7.0f m  P%02d V%02dN%02d  %zu bytes\n", milestone_name(m), lm.t,
+                       lm.t - 369645, lm.altitude, now.prog, now.verb, now.noun, n);
+            }
+        }
+        if (step % 10 == 0) {
+            if (ntrk == cap) trk = realloc(trk, (cap *= 2) * sizeof *trk);
+            track_sample_now(&trk[ntrk++], acted);
+            acted = 0;
+        }
+        if (lm.touchdown && !t_down) t_down = lm.t;
+        if (t_down && lm.t - t_down > 5) break;
+    }
+    for (int m = 0; m < MS_COUNT; m++)
+        if (!have[m]) { fprintf(stderr, "SNAPGEN: milestone %s never reached\n", milestone_name(m)); fails++; }
+    // Advance targets must have a quiet lead-in (the track marks actions only to the second).
+    int targets[] = { MS_TIG30, MS_RADAR, MS_HIGHGATE };
+    for (int k = 0; k < 3; k++) {
+        int m = targets[k];
+        if (have[m] && t_ms[m] - action_before[m] < 2.0) {
+            fprintf(stderr, "SNAPGEN: the crew acted %.1f s before %s\n", t_ms[m] - action_before[m], milestone_name(m));
+            fails++;
+        }
+    }
+    uint8_t *b;
+    size_t n = track_encode(trk, ntrk, &b);
+    snprintf(path, sizeof path, "%s/track.bin", dir);
+    if (!n || write_file(path, b, n)) return 1;
+    printf("SNAPGEN track %d samples (%.0f s), %zu bytes; touchdown t=%.1f (TIG%+.1f s), %s\n", ntrk, trk[ntrk - 1].t - trk[0].t, n,
+           t_down, t_down - 369645, lm.land_result == 1 ? "good" : lm.land_result == 2 ? "hard" : "crash");
+    free(b);
+    free(trk);
+    return fails;
+}
+
+static int load_state(const char *arg)
+{
+    char err[200];
+    for (int m = 0; m < MS_COUNT; m++)
+        if (!strcmp(arg, milestone_name(m))) {
+            if (milestone_load(m, err, sizeof err)) { fprintf(stderr, "snapload: %s\n", err); return 1; }
+            // Milestones were flown over the terrain: their altitudes are above it.
+            terrain_shape_init(scenario_info.rls);
+            lm.surface = terrain_surface_cb;
+            return 0;
+        }
+    FILE *f = fopen(arg, "rb");
+    if (!f) { fprintf(stderr, "snapload: cannot open %s\n", arg); return 1; }
+    static uint8_t buf[1 << 20];
+    size_t n = fread(buf, 1, sizeof buf, f);
+    fclose(f);
+    if (snapshot_load(buf, n, NULL, err, sizeof err)) { fprintf(stderr, "snapload: %s\n", err); return 1; }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (agc_host_init()) return 1;
@@ -340,6 +469,26 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(a, "orbit")) orbit_report();
         else if (!strncmp(a, "ascent:", 7)) ascent_watch(atof(a + 7));
+        else if (!strcmp(a, "terrain")) { terrain_shape_init(scenario_info.rls); lm.surface = terrain_surface_cb; }
+        else if (!strncmp(a, "snapgen:", 8)) { if (snapgen(a + 8)) return 1; }
+        else if (!strncmp(a, "snapsave:", 9)) {
+            uint8_t *b;
+            size_t n = snapshot_save(&b, "lab", -1);
+            if (!n || write_file(a + 9, b, n)) return 1;
+            free(b);
+        }
+        else if (!strncmp(a, "snapload:", 9)) { if (load_state(a + 9)) return 1; }
+        else if (!strcmp(a, "nextevent")) {
+            char why[160];
+            int on = milestone_on_track(why, sizeof why), ms = milestone_next_event();
+            printf("NEXTEVENT t=%.1f (TIG%+.1f s) %s; next event: %s\n", lm.t, lm.t - 369645, why, ms < 0 ? "none" : milestone_name(ms));
+            (void)on;
+        }
+        else if (!strcmp(a, "advance")) {
+            double t = lm.t;
+            int ms = milestone_advance();
+            printf("ADVANCE %s (t %.1f -> %.1f)\n", ms < 0 ? "none" : milestone_name(ms), t, lm.t);
+        }
         else fprintf(stderr, "unknown command: %s\n", a);
     }
     return 0;

@@ -13,7 +13,13 @@
 #include "vmath.h"
 
 // site_fixed: landing site, moon-fixed (from RLS). radius = its radius.
+// terrain_init also starts the renderer (chunk threads); terrain_shape_init
+// sets up only the ground's shape (headless: lab, save-state generator).
 void terrain_init(V3 site_fixed);
+void terrain_shape_init(V3 site_fixed);
+
+// Lm.surface hook: the radius below a lat/lon (ctx unused).
+double terrain_surface_cb(void *ctx, double lat, double lon);
 void terrain_shutdown(void);
 
 // Height above the reference sphere at plane coordinates. min_feature (m)

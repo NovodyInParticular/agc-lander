@@ -18,7 +18,7 @@ TEX_NAMES := lm_panel lm_foil lm_blanket rock cabin cabin_wall regolith
 AGC_CORE := $(VAGC)/yaAGC/agc_engine.c $(VAGC)/yaAGC/agc_engine_init.c $(VAGC)/yaAGC/agc_utilities.c
 HOST     := src/agc_host.c src/agc_mem.c src/moon.c src/lm.c src/csm.c src/coop.c src/net.c $(ROPE_C) $(SYMS_C)
 # The GL-free simulation around the AGC: scenarios, crew, mission, stepping, save states.
-SIM      := src/scenario.c src/crew.c src/ascent.c src/sim.c src/snapshot.c data/a11_pdi_lgc.c data/a11_liftoff_lgc.c
+SIM      := src/scenario.c src/crew.c src/ascent.c src/sim.c src/snapshot.c src/terrain_shape.c src/milestones.c data/a11_pdi_lgc.c data/a11_liftoff_lgc.c data/snapshots.c
 GAME     := src/main.c src/dsky.c src/hints.c src/terrain.c src/render.c src/lmmodel.c src/hud.c src/cockpit.c src/cockpit_panels.c src/pcanvas.c src/sky_extras.c src/controls.c src/rocks.c src/assets.c src/sound.c src/eva.c src/ascent_ui.c src/csmmodel.c $(SIM) $(FONTS_C)
 
 # Vendor core: build quietly, it predates modern warning sets.
@@ -29,7 +29,7 @@ LINUX_CC   := gcc
 WIN_CC     := x86_64-w64-mingw32-gcc
 WIN_AR     := x86_64-w64-mingw32-ar
 
-.PHONY: all linux windows test test-wine rope clean distclean install uninstall dist textures
+.PHONY: all linux windows test test-wine rope clean distclean install uninstall dist textures snapshots
 
 all: linux
 
@@ -117,6 +117,20 @@ test: build/linux/agc-selftest build/linux/agc-lab
 	./tools/test_ascent.sh build/linux/agc-lab
 	./tools/test_docking.sh build/linux/agc-lab
 	./tools/test_mission.sh build/linux/agc-lab
+	./tools/test_advance.sh build/linux/agc-lab
+
+# ---- Save states of the canonical descent (src/milestones.h), embedded in every
+# build as data/snapshots.c. Re-run after changing the simulation; a build whose
+# state layout no longer matches refuses them, and agc-selftest fails.
+SNAP_DIR   := build/snapshots
+SNAP_FILES := tig30:ms_tig30 radar:ms_radar highgate:ms_highgate 150m:ms_150m
+snapshots: build/linux/agc-lab tools/embed_bin.py
+	@rm -rf $(SNAP_DIR) && mkdir -p $(SNAP_DIR)
+	./build/linux/agc-lab snapgen:$(SNAP_DIR)
+	python3 -I tools/embed_bin.py --multi data/snapshots.c \
+		$(foreach f,$(SNAP_FILES),$(SNAP_DIR)/$(word 1,$(subst :, ,$(f))).snap $(word 2,$(subst :, ,$(f)))) \
+		$(SNAP_DIR)/track.bin ms_track
+	$(MAKE) linux
 
 # ---- Windows (single static .exe).
 build/win/core.a: $(AGC_CORE)

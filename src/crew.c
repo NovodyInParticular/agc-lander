@@ -23,6 +23,9 @@ static double next_action;   // the automatic crew's next allowed action (sim ti
 
 int crew_typing(void) { return keypos < keylen || pro_held; }
 
+static int actions;   // statistics only (not part of the simulation)
+int crew_action_count(void) { return actions; }
+
 void crew_reset(void)
 {
     int a = crew.auto_crew, l = crew.auto_land;
@@ -228,19 +231,22 @@ void crew_step(void)
     } else {
         acted = 0;
     }
-    if (acted) next_action = lm.t + 3.0;
+    if (acted) next_action = lm.t + 3.0, actions++;
     if (!lm.engine_armed && (vn(6, 62) || vn(99, 62))) {
         lm_set_engine_arm(1);
+        actions++;
         if (!armed_said) { crew_say("Descent engine armed"); armed_said = 1; }
     }
     if (!v57_done && prog(63) && lm.lr_range_good && lm.altitude < 12000 && lm.dps_on) {
         crew_type("V57E");
         next_action = lm.t + 3.0;
+        actions++;
         crew_say("V57: \"...permit landing radar updates\"");
         v57_done = 1;
     }
     if (!stopped && lm.probe_contact && lm.dps_on) {
         lm_engine_stop();
+        actions++;
         stopped = 1;
         crew_say("\"Contact light.\"  \"OK, engine stop.\"");
     }

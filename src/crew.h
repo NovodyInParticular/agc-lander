@@ -30,6 +30,9 @@ void crew_step(void);
 void crew_type(const char *keys);
 // The crew is part-way through a DSKY entry (keys left to press or PRO held).
 int crew_typing(void);
+// How many actions the automatic crew has taken (keys, switches); the save-state
+// generator marks the canonical track with it.
+int crew_action_count(void);
 
 void crew_say(const char *text);
 
