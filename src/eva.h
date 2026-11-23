@@ -27,6 +27,8 @@ int eva_all_inside(void);
 
 // Landed in one piece and the engine is off: the hatch may be opened.
 int eva_available(void);
+// The flag stands on the surface.
+int eva_flag_planted(void);
 
 // The hatch key: opens the hatch from inside; outside, climbs back in at the ladder.
 void eva_key(void);

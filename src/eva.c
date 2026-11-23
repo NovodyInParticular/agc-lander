@@ -108,6 +108,8 @@ void eva_set_role(int who) { me = who; }
 int eva_phase(void) { return me >= 0 ? cw[me].phase : EVA_INSIDE; }
 int eva_all_inside(void) { return cw[0].phase == EVA_INSIDE && cw[1].phase == EVA_INSIDE; }
 
+int eva_flag_planted(void) { return flag_on; }
+
 int eva_available(void)
 {
     // On the pad before lift-off too: P12 just waits at V99 until the crew is back.

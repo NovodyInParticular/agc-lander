@@ -385,6 +385,7 @@ static int toggle(float x, float y, const char *id, const char *title, const cha
     if (id == ID_ENGARM && hint_tgt.kind == HT_ENG_ARM) hint_at(x, y, 13.0f, 0, -1);
     else if (id == ID_ENGARM && hint_tgt.kind == HT_ENG_ARM_ASC) hint_at(x, y, 13.0f, 0, +1);
     else if (id == ID_PGNS && hint_tgt.kind == HT_PGNS_AUTO) hint_at(x, y, 13.0f, 0, +1);
+    else if (id == ID_PGNS && hint_tgt.kind == HT_PGNS_ATTHOLD) hint_at(x, y, 13.0f, 0, -1);
     else if (id == ID_ROD && hint_tgt.kind == HT_ROD_UP) hint_at(x, y, 13.0f, 0, +1);
     else if (id == ID_ROD && hint_tgt.kind == HT_ROD_DOWN) hint_at(x, y, 13.0f, 0, -1);
     return s;

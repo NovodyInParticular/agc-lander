@@ -107,6 +107,10 @@ static void key_pump(double dt)
     }
 }
 
+// V57 has been keyed (by anyone): Luminary's LRINH flag, FLGWRD11 bit 8, set by
+// its LRON routine - "landing radar updates permitted by astronaut".
+static int lr_permitted(void) { return agc_get_bit("FLGWRD11", 8); }
+
 static int vn(int v, int n)
 {
     const DskyState *d = agc_host_dsky();
@@ -144,7 +148,7 @@ void crew_step(void)
         crew.hint = HINT_ENABLE_IGN, snprintf(crew.prompt, sizeof crew.prompt, "V99 N62: ENGINE ON ENABLE. Press PRO to permit ignition");
     else if (vn(6, 62) && !lm.engine_armed)
         crew.hint = HINT_ARM, snprintf(crew.prompt, sizeof crew.prompt, "Arm the descent engine (F7) before TIG");
-    else if (prog(63) && lm.lr_range_good && !v57_done && lm.dps_on)
+    else if (prog(63) && lm.lr_range_good && !v57_done && !lr_permitted() && lm.dps_on)
         crew.hint = HINT_V57, snprintf(crew.prompt, sizeof crew.prompt, "Landing radar has lock: key V57E to permit LR updates");
     else if (flashing && prog(12) && vn(99, 74) && !lm.abort_stage)
         crew.hint = HINT_ASC_STAGE, snprintf(crew.prompt, sizeof crew.prompt, "V99 N74: lift-off. ABORT STAGE first (separates the stages)");

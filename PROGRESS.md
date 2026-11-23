@@ -350,6 +350,24 @@ skipping time. Commits ca7e66f, 3268d90, 8769df0 and the scenarios commit after 
 - Possible next: an ascent milestone (insertion) so J can skip the 7-minute P12 burn; more
   scenarios from the same machinery.
 
+## Hint walkthrough: checklists and key caps (2026-11-23, branch quest-vr)
+- hints.c builds a checklist per phase: title, up to ~6 steps, each ticked (done), current
+  (pulsing arrow, bold) or still to do. Steps are ticked off from the live state, so the
+  list is right after a save-state load too. Checklists: pre-burn (6 steps), V57 key by key
+  (VERB, 5, 7, ENTR), program alarms, lift-off (ABORT STAGE, ENG ARM ASC, PRO), take over
+  and land (PGNS ATT HOLD, ROD, lean), moonwalk (flag via eva_flag_planted()).
+- Key caps on the right of each step say what to press: keyboard keys on the PC
+  ([F7], [P], [V] [5] [7] [ENTER], [UP] [DOWN], [W] [A] [S] [D]); in the headset the
+  controller buttons instead (TRIGGER, B, L STICK) and the matching button on the
+  controller model glows. When the auto crew is flying, no step is "current".
+- New hint target HT_PGNS_ATTHOLD rings the PGNS mode switch (pointing down) in the cabin.
+- Fix: the V57 hint now clears as soon as Luminary's LRINH flag (FLGWRD11 bit 8, set by
+  LRON) is set, so keying V57 yourself ends it (before it only watched the crew's v57_done).
+- Checked with --shot in scenarios 0, 3, 4, 5, 6 (chase and CDR views); make test passes,
+  snapshots unchanged.
+- Seen, not acted on: from the CDR seat in P63 the window shows the surface far below as a
+  soft grey blur (both at 105,000 ft and 27,000 ft).
+
 ## Next
 - GitHub: public repo + v0.1.0 release (2026-11-02). GPLv2 (Virtual AGC, NASSP data).
 
