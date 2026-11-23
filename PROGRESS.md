@@ -276,6 +276,35 @@ User asked: flip W on PC and headset, and fix every gap in the game itself.
   AGC_EVA_IN=SECONDS (press X), AGC_EVA_LOG=1 (phases), AGC_EVA_FLAG=east,south (plant near the LM),
   AGC_FOCUS_DS=1 (chase camera on the descent stage), AGC_SHADOW_ONLY=asc|desc, AGC_ABORT_AT=SECONDS.
 
+## Holes in the LM, new skin maps (2026-11-23, branch quest-vr)
+User's screenshots: black speckle on the aft equipment bay, flat grey "tiles", a hollow top.
+- ROOT CAUSE: the LM is drawn with back faces culled, but many faces were wound inward, so
+  from outside they were holes. prism() (and so every box()) built both end caps inward
+  for counter-clockwise outlines; the crew compartment's main faces and both side walls
+  were inward too. From above you looked into the ascent stage (the "U shape and two
+  cylinders" screenshot); the black deck was the underside of a band 22 cm down; through
+  the holes the crew compartment's black rear wall and the aft bay's front face (both at
+  z = -1.32, exactly coplanar) fought pixel by pixel: the black speckle.
+  Fixed: prism() orders any outline counter-clockwise and winds sides and caps outward;
+  box() sorts its corners; cabin faces and side walls re-wound; docking window glass faces
+  up; RCS nozzles got an inner wall + throat (open cones showed through); leg outrigger
+  boxes were zero-thick and inside-out on the -y/-z legs; MESA plate moved inboard of the
+  chamfer. tools/winding_check.py (with AGC_DUMP_LM) went from 371 visible inward
+  triangles to 18 slivers. Rule: any new LM geometry must be wound outward - run it.
+- lm_panel rebaked: irregular panels in staggered rows (2.52 m tile, no grid), per-panel
+  tone, roughness and a slight tilt, screw rows along every edge. lm_foil rebaked: big
+  irregular sheets of crumpled foil built from creased facets at three sizes (some sheets
+  stretched into long wrinkles), sheet edges instead of a tape grid. The black tape strips
+  over the descent stage are gone. Kapton colours copper-orange as in AS11-40-5927.
+- Shader: anodised skin (material 10) metallic 0.85 / rough 0.40; foil rough 0.24; new
+  material 13 black H-film blanket (descent top deck and its band); shadow lookups use the
+  smooth surface normal; the reflected sky/ground horizon is softened by the normal's
+  per-pixel change.
+- Debug switches: AGC_DUMP_LM=FILE (every triangle as text), AGC_LM_NOCULL=1 (draw back
+  faces too), AGC_DBG_MAT=1|x|y|z (flat colour per material, or 2 cm position bands).
+- Perf finding (not acted on yet): at 2560x1440 HIGH GATE the world pass is ~21 ms on the
+  2070 Super; gl_FragDepth (log depth) costs ~13 ms of it (AGC_Q_VZ=1 -> 8.7 ms).
+
 ## No fast-forward, no time warp: save states (2026-11-16, branch quest-vr)
 Goal from the user: every scenario starts at once, the full mission feels shorter without
 skipping time. Commits ca7e66f, 3268d90, 8769df0 and the scenarios commit after them.

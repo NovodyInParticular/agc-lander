@@ -5,6 +5,7 @@
 // +X up (thrust axis), +Y right, +Z forward. Footpad plane at X = -2.75.
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -21,11 +22,11 @@
 
 // Materials (vertex alpha): 1 gold foil, 2 metal, 3 black paint, 4 white paint,
 // 5 mylar blanket, 6 glass, 7 emissive.
-enum { M_GOLD = 1, M_METAL, M_BLACK, M_WHITE, M_MYLAR, M_GLASS, M_EMIT, M_ANOD = 10 };
+enum { M_GOLD = 1, M_METAL, M_BLACK, M_WHITE, M_MYLAR, M_GLASS, M_EMIT, M_ANOD = 10, M_BLKBLANKET = 13 };
 
 typedef struct { unsigned char r, g, b, m; } Mat;
-static const Mat MT_GOLD = { 220, 160, 60, M_GOLD };
-static const Mat MT_AMBER = { 190, 110, 40, M_GOLD };
+static const Mat MT_GOLD = { 238, 138, 44, M_GOLD };     // Kapton over aluminium: copper-orange in the Apollo photos
+static const Mat MT_AMBER = { 212, 96, 28, M_GOLD };
 static const Mat MT_SILVER = { 200, 200, 205, M_METAL };
 static const Mat MT_GREY = { 150, 150, 152, M_METAL };
 static const Mat MT_DARKMETAL = { 70, 66, 62, M_METAL };
@@ -34,6 +35,7 @@ static const Mat MT_WHITE = { 160, 160, 155, M_WHITE };   // aged thermal paint:
 static const Mat MT_MYLAR = { 168, 168, 174, M_MYLAR };
 static const Mat MT_GLASS = { 20, 25, 35, M_GLASS };
 static const Mat MT_DPSIN = { 40, 34, 30, M_METAL };
+static const Mat MT_BLKBLANKET = { 14, 14, 16, M_BLKBLANKET };   // black H-film thermal blanket
 
 // --- Mesh builder -------------------------------------------------------------
 
@@ -84,16 +86,35 @@ static void quad(Vector3 a, Vector3 b, Vector3 c, Vector3 d, Mat m)
 static Vector3 V(float x, float y, float z) { return (Vector3){ x, y, z }; }
 
 // Convex polygon prism along body X from x0 to x1; pts in (y, z).
+// Outline (y, z) extruded from x0 to x1. Every face is wound outward whichever way
+// the outline runs: the LM is drawn with back faces culled, so a face wound inward
+// is a hole seen from outside (the interior shows through, and coplanar inner faces flicker).
 static void prism(const float (*pts)[2], int n, float x0, float x1, Mat side, Mat cap_bottom, Mat cap_top)
 {
+    if (x1 < x0) {
+        float t = x0; x0 = x1; x1 = t;
+        Mat tm = cap_bottom; cap_bottom = cap_top; cap_top = tm;
+    }
+    float area2 = 0;
     for (int i = 0; i < n; i++) {
         int j = (i + 1) % n;
-        quad(V(x0, pts[i][0], pts[i][1]), V(x0, pts[j][0], pts[j][1]),
-             V(x1, pts[j][0], pts[j][1]), V(x1, pts[i][0], pts[i][1]), side);
+        area2 += pts[i][0] * pts[j][1] - pts[j][0] * pts[i][1];
+    }
+    float q[16][2];
+    if (n > 16) n = 16;
+    for (int i = 0; i < n; i++) {   // counter-clockwise in (y, z): its normal by the right-hand rule is +x
+        int k = area2 >= 0 ? i : n - 1 - i;
+        q[i][0] = pts[k][0];
+        q[i][1] = pts[k][1];
+    }
+    for (int i = 0; i < n; i++) {
+        int j = (i + 1) % n;
+        quad(V(x0, q[i][0], q[i][1]), V(x0, q[j][0], q[j][1]),
+             V(x1, q[j][0], q[j][1]), V(x1, q[i][0], q[i][1]), side);
     }
     for (int i = 1; i + 1 < n; i++) {
-        tri(V(x1, pts[0][0], pts[0][1]), V(x1, pts[i + 1][0], pts[i + 1][1]), V(x1, pts[i][0], pts[i][1]), cap_top);
-        tri(V(x0, pts[0][0], pts[0][1]), V(x0, pts[i][0], pts[i][1]), V(x0, pts[i + 1][0], pts[i + 1][1]), cap_bottom);
+        tri(V(x1, q[0][0], q[0][1]), V(x1, q[i][0], q[i][1]), V(x1, q[i + 1][0], q[i + 1][1]), cap_top);      // faces +x
+        tri(V(x0, q[0][0], q[0][1]), V(x0, q[i + 1][0], q[i + 1][1]), V(x0, q[i][0], q[i][1]), cap_bottom);   // faces -x
     }
 }
 
@@ -142,8 +163,11 @@ static void dish(Vector3 c, Vector3 dir, float r, float depth, Mat front, Mat ba
         }
 }
 
-static void box(Vector3 lo, Vector3 hi, Mat m)
+static void box(Vector3 p, Vector3 q, Mat m)
 {
+    // Any two opposite corners: sorted here, so a box can never come out inside-out
+    // (its faces would be culled from outside and show the interior).
+    Vector3 lo = V(fminf(p.x, q.x), fminf(p.y, q.y), fminf(p.z, q.z)), hi = V(fmaxf(p.x, q.x), fmaxf(p.y, q.y), fmaxf(p.z, q.z));
     float pts[4][2] = { { lo.y, lo.z }, { hi.y, lo.z }, { hi.y, hi.z }, { lo.y, hi.z } };
     prism(pts, 4, lo.x, hi.x, m, m, m);
 }
@@ -157,11 +181,11 @@ static void build_descent_stage(void)
     float oct[8][2] = { { -s + c, -s }, { s - c, -s }, { s, -s + c }, { s, s - c },
                         { s - c, s }, { -s + c, s }, { -s, s - c }, { -s, -s + c } };
     float x0 = H0 + 1.55f, x1 = H0 + 3.15f;
-    prism(oct, 8, x0, x1, MT_GOLD, MT_AMBER, MT_BLACK);
-    // Black thermal band near the top and a darker lower skirt.
+    prism(oct, 8, x0, x1, MT_GOLD, MT_AMBER, MT_BLKBLANKET);
+    // Black thermal blanket band near the top and a darker lower skirt.
     float oct2[8][2];
     for (int i = 0; i < 8; i++) { oct2[i][0] = oct[i][0] * 1.006f; oct2[i][1] = oct[i][1] * 1.006f; }
-    prism(oct2, 8, x1 - 0.22f, x1 - 0.05f, MT_BLACK, MT_BLACK, MT_BLACK);
+    prism(oct2, 8, x1 - 0.22f, x1 - 0.05f, MT_BLKBLANKET, MT_BLKBLANKET, MT_BLKBLANKET);
     prism(oct2, 8, x0, x0 + 0.12f, MT_MYLAR, MT_MYLAR, MT_MYLAR);
     // Quadrant bay panels with crinkled foil insets.
     for (int q = 0; q < 4; q++) {
@@ -211,9 +235,13 @@ static void build_descent_stage(void)
         Vector3 knee = Vector3Add(V(H0 + 0.42f, 0, 0), Vector3Scale(r, 4.30f));
         tube(top, knee, 0.085f, 0.075f, 12, MT_GOLD, 1);
         tube(Vector3Add(top, Vector3Scale(r, 0.02f)), Vector3Lerp(top, knee, 0.55f), 0.11f, 0.10f, 12, MT_AMBER, 0);
-        // Outrigger box where the strut meets the stage.
-        box(Vector3Add(V(x1 - 0.55f, 0, 0), Vector3Add(Vector3Scale(r, s - 0.05f), V(0, -0.15f * fabsf(sz) - 0.15f * fabsf(sy), -0.15f * fabsf(sz) - 0.15f * fabsf(sy)))),
-            Vector3Add(V(x1 - 0.15f, 0, 0), Vector3Add(Vector3Scale(r, s + 0.25f), V(0, 0.15f * fabsf(sz) + 0.15f * fabsf(sy), 0.15f * fabsf(sz) + 0.15f * fabsf(sy)))), MT_BLACK);
+        // Outrigger box where the strut meets the stage: 0.6 m out from the side
+        // (from s - 0.20 to s + 0.40 along r), 0.3 m wide, 0.4 m tall - the same on all four legs.
+        {
+            Vector3 oc = Vector3Add(V(x1 - 0.35f, 0, 0), Vector3Scale(r, s + 0.10f));
+            Vector3 half = V(0.20f, 0.30f * fabsf(sy) + 0.15f * fabsf(sz), 0.30f * fabsf(sz) + 0.15f * fabsf(sy));
+            box(Vector3Subtract(oc, half), Vector3Add(oc, half), MT_BLACK);
+        }
         // Secondary struts from the knee to the lower stage corners.
         for (int side = -1; side <= 1; side += 2) {
             Vector3 base = Vector3Add(V(x0 + 0.15f, 0, 0), Vector3Add(Vector3Scale(r, s - 0.1f), Vector3Scale(t, side * 1.05f)));
@@ -248,7 +276,7 @@ static void build_descent_stage(void)
     }
 }
 
-static const Mat MT_ANOD = { 88, 86, 82, M_ANOD };      // anodised micrometeoroid shield
+static const Mat MT_ANOD = { 150, 148, 156, M_ANOD };   // anodised micrometeoroid shield (bright, faintly violet in the photos)
 static const Mat MT_DARKGREY = { 22, 22, 24, M_BLACK };
 
 // Quad helper with the vertices given as (x, y, z) floats.
@@ -286,7 +314,7 @@ static void build_ascent_stage(void)
         int j = (i + 1) % 8;
         if (i == 7) continue;   // bottom closed by the mid section
         // Main face between profile points i and j.
-        Q((px[i], -hw[i], pz[i]), (px[i], hw[i], pz[i]), (px[j], hw[j], pz[j]), (px[j], -hw[j], pz[j]), face[i]);
+        Q((px[j], -hw[j], pz[j]), (px[j], hw[j], pz[j]), (px[i], hw[i], pz[i]), (px[i], -hw[i], pz[i]), face[i]);   // wound outward
     }
     // Side walls: fan from a centre point at each side.
     for (int side = -1; side <= 1; side += 2) {
@@ -295,7 +323,7 @@ static void build_ascent_stage(void)
             int j = (i + 1) % 8;
             Vector3 a = V(px[i], side * hw[i], pz[i]), b = V(px[j], side * hw[j], pz[j]), c = V(cxp, side * 1.12f, czp);
             Mat m = (i == 0 || i == 1) ? MT_BLACK : (i >= 5 ? MT_MYLAR : MT_ANOD);
-            if (side > 0) tri(a, c, b, m); else tri(a, b, c, m);
+            if (side > 0) tri(a, b, c, m); else tri(a, c, b, m);   // wound outward: the LM is drawn with back faces culled
         }
     }
 
@@ -323,7 +351,7 @@ static void build_ascent_stage(void)
     box(V(xb + 1.52f, -0.48f, 1.04f), V(xb + 1.58f, 0.48f, 1.11f), MT_BLACK);
     box(V(xb + 0.96f, -0.48f, 1.04f), V(xb + 1.00f, 0.48f, 1.11f), MT_BLACK);
     // Docking window (small, above the commander's side, on the top face).
-    Q((xb + 2.99f, -0.80f, -0.05f), (xb + 2.99f, -0.52f, -0.05f), (xb + 2.99f, -0.52f, -0.35f), (xb + 2.99f, -0.80f, -0.35f), MT_GLASS);
+    Q((xb + 2.99f, -0.80f, -0.35f), (xb + 2.99f, -0.52f, -0.35f), (xb + 2.99f, -0.52f, -0.05f), (xb + 2.99f, -0.80f, -0.05f), MT_GLASS);   // faces up (+x)
 
     // --- Aft equipment bay ----------------------------------------------------------
     box(V(xb + 0.55f, -1.15f, -2.35f), V(xb + 2.35f, 1.15f, -1.32f), MT_MYLAR);
@@ -380,6 +408,7 @@ static void build_ascent_stage(void)
             Vector3 a = Vector3Add(P, Vector3Scale(dirs[k], 0.17f));
             Vector3 b = Vector3Add(P, Vector3Scale(dirs[k], 0.42f));
             tube(a, b, 0.045f, 0.095f, 12, MT_DARKMETAL, 0);
+            tube(b, a, 0.088f, 0.040f, 12, MT_DPSIN, 1);   // inner wall and throat: an open nozzle never looks hollow
         }
     }
 }
@@ -405,33 +434,18 @@ static void plate(Vector3 c, Vector3 u, Vector3 v, Vector3 n, float w, float h, 
 
 static void build_details(void)
 {
-    const float s = 2.11f, c = 0.62f;
-    const float x0 = H0 + 1.55f, x1 = H0 + 3.15f, xm = (x0 + x1) / 2, hx = (x1 - x0);
-    float oct[8][2] = { { -s + c, -s }, { s - c, -s }, { s, -s + c }, { s, s - c },
-                        { s - c, s }, { -s + c, s }, { -s, s - c }, { -s, -s + c } };
+    const float s = 2.11f;
+    const float x0 = H0 + 1.55f, x1 = H0 + 3.15f, xm = (x0 + x1) / 2;
     Vector3 X = V(1, 0, 0);
 
     use_stage(0);
-    // Foil blanket seams (tape lines) on every descent-stage face.
-    for (int i = 0; i < 8; i++) {
-        int j = (i + 1) % 8;
-        Vector3 pa = V(0, oct[i][0], oct[i][1]), pb = V(0, oct[j][0], oct[j][1]);
-        Vector3 along = Vector3Normalize(Vector3Subtract(pb, pa));
-        Vector3 n = Vector3Normalize(V(0, along.z, -along.y));
-        if (Vector3DotProduct(n, Vector3Add(pa, pb)) < 0) n = Vector3Negate(n);
-        float len = Vector3Distance(pa, pb);
-        Vector3 mid = Vector3Add(Vector3Scale(Vector3Add(pa, pb), 0.5f), V(xm, 0, 0));
-        for (int k = 1; k < 3; k++)
-            plate(Vector3Add(mid, V(-hx / 2 + hx * k / 3, 0, 0)), along, X, n, len * 0.98f, 0.025f, 0.03f, MT_BLACK);
-        int nv = len > 2 ? 3 : 1;
-        for (int k = 1; k <= nv; k++)
-            plate(Vector3Add(mid, Vector3Scale(along, -len / 2 + len * k / (nv + 1))), along, X, n, 0.025f, hx * 0.8f, 0.03f, MT_BLACK);
-    }
+    // (The foil's sheet edges are in its surface map: no black tape grid, the real
+    // stage has none.)
 
     // MESA (equipment stowage) door left of the ladder, on the forward face.
     {
         Vector3 n = V(0, 0, 1), u = V(0, 1, 0);
-        Vector3 cc = V(xm - 0.05f, -1.15f, s);
+        Vector3 cc = V(xm - 0.05f, -0.95f, s);   // inboard of the chamfered corner (the face ends at y = -1.49)
         plate(cc, u, X, n, 1.05f, 1.15f, 0.035f, MT_MYLAR);
         for (int e = 0; e < 4; e++) {
             float ox = (e < 2 ? (e ? 0.575f : -0.575f) : 0), oy = (e >= 2 ? (e == 3 ? 0.525f : -0.525f) : 0);
@@ -716,6 +730,18 @@ void lmmodel_init(void)
     build_ascent_stage();
     build_details();
     use_stage(0);   // store the ascent builder back
+    const char *dump = getenv("AGC_DUMP_LM");   // debugging: every triangle (stage, material, colour, corners) as text
+    if (dump) {
+        FILE *f = fopen(dump, "w");
+        for (int st = 0; f && st < 2; st++)
+            for (int k = 0; k + 2 < stage_b[st].count; k += 3) {
+                const unsigned char *c = &stage_b[st].c[4 * k];
+                const float *v = &stage_b[st].v[3 * k];
+                fprintf(f, "%d %d %d %d %d %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f\n", st, c[3], c[0], c[1], c[2],
+                        v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8]);
+            }
+        if (f) fclose(f);
+    }
     desc_mesh = upload(&stage_b[0]);
     asc_mesh = upload(&stage_b[1]);
     Mesh m = { 0 };
@@ -764,8 +790,11 @@ static Matrix to_matrix(M3 r, V3 t)
 void lmmodel_draw(M3 site_from_body, V3 pos_cam_rel)
 {
     Matrix m = to_matrix(site_from_body, pos_cam_rel);
+    int nocull = getenv("AGC_LM_NOCULL") != NULL;   // debugging: draw back faces too (finds triangles wound the wrong way)
+    if (nocull) { rlDrawRenderBatchActive(); rlDisableBackfaceCulling(); }
     DrawMesh(desc_mesh, lm_mat, m);
     DrawMesh(asc_mesh, lm_mat, m);
+    if (nocull) { rlDrawRenderBatchActive(); rlEnableBackfaceCulling(); }
 }
 
 void lmmodel_draw_stage(int ascent, M3 site_from_body, V3 pos_cam_rel)

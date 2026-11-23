@@ -329,19 +329,31 @@ static const char *lm_fs = GLSL_HEADER LOGZ_FS
     "  vec3 N = normalize(fragNormal);\n"
     "  vec3 V = normalize(-fragPos);\n"
     "  if (!gl_FrontFacing) N = -N;\n"
+    "  vec3 Ngeo = N;\n"   // the smooth surface: shadow lookups use it, never the bumped normal (that gave speckled shadow acne)
+    "#ifdef DBG_MAT\n"   // debugging (AGC_DBG_MAT=1): flat false colour per material, striped every 25 cm along the stage axis
+    "  { vec3 pal[14] = vec3[14](vec3(1,1,1), vec3(1,0.6,0), vec3(0.5,0.5,0.5), vec3(0,0,1), vec3(1,1,0.6), vec3(0,1,1), vec3(1,0,1), vec3(1,1,1), vec3(0.4,0.2,0), vec3(0.3,0.3,0), vec3(0,1,0), vec3(1,0,0), vec3(0.6,0,1), vec3(0,0.4,0.2));\n"
+    "    vec3 c = pal[clamp(mat, 0, 13)] * (fract(objPos.x * 4.0) < 0.5 ? 1.0 : 0.7);\n"
+    "#if DBG_MAT > 1\n"   // AGC_DBG_MAT=x|y|z: 2 cm bands of eight colours along that object axis (where each pixel is)
+    "    vec3 band[8] = vec3[8](vec3(1,0,0), vec3(0,1,0), vec3(0,0,1), vec3(1,1,0), vec3(0,1,1), vec3(1,0,1), vec3(1,1,1), vec3(0.15));\n"
+    "    float coord = DBG_MAT == 2 ? objPos.x : DBG_MAT == 3 ? objPos.y : objPos.z;\n"
+    "    c = band[int(mod(floor(coord * 50.0 + 1000.0), 8.0))];\n"
+    "#endif\n"
+    "    finalColor = sceneOut(c * 0.6, 1.0); return; }\n"
+    "#endif\n"
     "  if (mat == 7) { finalColor = sceneOut(base * 6.0 * exposure, 1.0); return; }\n"  // emissive
     "  float metal = 0.0, rough = 0.6, bumpK = 1.0;\n"
     "  vec3 on = normalize(objNormal), bumpO = vec3(0.0); vec4 sm = vec4(0.5);\n"
-    "  if (mat == 1) { sm = triMap(texFoil, objPos / 1.10, on, bumpO); metal = 1.0; rough = 0.34; bumpK = 1.7; }\n"   // gold / amber kapton foil
-    "  else if (mat == 2) { sm = triMap(texPanel, objPos / 1.26, on, bumpO); metal = 1.0; rough = 0.35; }\n"     // aluminium / inconel
-    "  else if (mat == 3) { sm = triMap(texPanel, objPos / 1.26, on, bumpO); rough = 0.42; bumpK = 1.4; base = max(base, vec3(0.075, 0.075, 0.08)); }\n"   // black-painted panels: satin, seams and rivets catch the light
-    "  else if (mat == 4) { sm = triMap(texPanel, objPos / 1.26, on, bumpO); rough = 0.5; }\n"                   // white paint
+    "  if (mat == 1) { sm = triMap(texFoil, objPos / 2.20, on, bumpO); metal = 1.0; rough = 0.24; bumpK = 1.1; }\n"   // gold / amber kapton foil, crumpled facets
+    "  else if (mat == 2) { sm = triMap(texPanel, objPos / 2.52, on, bumpO); metal = 1.0; rough = 0.35; }\n"     // aluminium / inconel
+    "  else if (mat == 3) { sm = triMap(texPanel, objPos / 2.52, on, bumpO); rough = 0.42; bumpK = 1.4; base = max(base, vec3(0.075, 0.075, 0.08)); }\n"   // black-painted panels: satin, seams and rivets catch the light
+    "  else if (mat == 4) { sm = triMap(texPanel, objPos / 2.52, on, bumpO); rough = 0.5; }\n"                   // white paint
     "  else if (mat == 5) { sm = triMap(texBlanket, objPos / 1.20, on, bumpO); metal = 1.0; rough = 0.40; bumpK = 1.5; }\n"   // silver mylar blanket
     "  else if (mat == 6) { rough = 0.15; }\n"                                                                   // window glass (dark)
     "  else if (mat == 8) { sm = triMap(texRock, objPos / 1.50, on, bumpO); rough = 0.92; }\n"                   // lunar rock
     "  else if (mat == 9) { rough = 0.95; }\n"                                                                   // plain matte (painted-on shadows)
-    "  else if (mat == 10) { sm = triMap(texPanel, objPos / 1.26, on, bumpO); metal = 0.5; rough = 0.60; bumpK = 1.6; }\n"   // dull anodised skin, oil-canned
+    "  else if (mat == 10) { sm = triMap(texPanel, objPos / 2.52, on, bumpO); metal = 0.85; rough = 0.40; bumpK = 1.5; }\n"   // anodised micrometeoroid shield: metallic sheen, panels at slight angles
     "  else if (mat == 11) { metal = 1.0; rough = 0.10; }\n"                                                    // gold visor: a mirror
+    "  else if (mat == 13) { sm = triMap(texBlanket, objPos / 1.20, on, bumpO); rough = 0.30; bumpK = 1.9; }\n"   // black H-film blanket: dark, glossy crinkles
     "  else if (mat == 12) { sm = triMap(texBlanket, objPos / 0.45, on, bumpO); sm.a = mix(0.5, sm.a, 0.35); rough = 0.85; bumpK = 0.35; }\n"   // beta-cloth suit
     "  base *= sm.a * 2.0;\n"
     "  rough = clamp(rough + (sm.b - 0.5), 0.08, 1.0);\n"
@@ -350,6 +362,9 @@ static const char *lm_fs = GLSL_HEADER LOGZ_FS
     "  // pixel grid can show, widen the highlight instead of letting it sparkle.\n"
     "  vec3 ndx = dFdx(N), ndy = dFdy(N);\n"
     "  float nvar = min(dot(ndx, ndx) + dot(ndy, ndy), 0.18);\n"
+    "  // The same for the reflected sky/ground horizon: crinkles a few pixels wide\n"
+    "  // would each snap to black sky or bright ground (salt-and-pepper speckle).\n"
+    "  float envRough = min(1.0, sqrt(sqrt(min(rough * rough * rough * rough + nvar, 1.0))) + 2.5 * sqrt(dot(ndx, ndx) + dot(ndy, ndy)));\n"
     "  vec3 L = sunDir;\n"
     "  vec3 H = normalize(L + V);\n"
     "  float NL = max(dot(N, L), 0.0), NV = max(dot(N, V), 1e-3), NH = max(dot(N, H), 0.0), VH = max(dot(V, H), 0.0);\n"
@@ -362,7 +377,7 @@ static const char *lm_fs = GLSL_HEADER LOGZ_FS
     "  vec3 F = F0 + (1.0 - F0) * pow(1.0 - VH, 5.0);\n"
     "  vec3 spec = min(D * G * F / max(4.0 * NL * NV, 1e-3), vec3(24.0));\n"
     "  vec3 diff = (1.0 - F) * (1.0 - metal) * base / 3.14159;\n"
-    "  float sh = selfShadow(fragPos, N) * sunGain;\n"
+    "  float sh = selfShadow(fragPos, Ngeo) * sunGain;\n"
     "  // Sunlight on the vehicle is held a little under the true ratio to the\n"
     "  // regolith so bright skins keep their panel detail instead of clipping.\n"
     "  float sunK = (mat == 8 || mat == 9) ? 9.0 : 6.5;\n"
@@ -375,7 +390,7 @@ static const char *lm_fs = GLSL_HEADER LOGZ_FS
     "  // Reflected / bounced light from the lunar surface.\n"
     "  vec3 R = reflect(-V, N);\n"
     "  vec3 Fe = F0 + (max(vec3(1.0 - rough), F0) - F0) * pow(1.0 - NV, 5.0);\n"
-    "  col += envLight(R, rough) * Fe * mix(0.6, 1.0, metal);\n"
+    "  col += envLight(R, envRough) * Fe * mix(0.6, 1.0, metal);\n"
     "  col += (1.0 - metal) * base * envLight(N, 1.0) * 0.5;\n"    "  // Fill: light bounced between the vehicle's own parts and up off the sunlit\n"
     "  // ground nearby. Faint, but in shadow the panels keep their seams and rivets\n"
     "  // instead of turning into flat black holes.\n"
@@ -847,7 +862,7 @@ Shader render_load_shader(const char *vs, const char *fs)
     size_t nv = strlen(vs) + 1024, nf = strlen(fs) + strlen(out_fn) + 1024;
     char *v = malloc(nv), *f = malloc(nf);
     snprintf(v, nv, "%s#define DIRECT_OUT %d\n%s%s", ver, direct_out, defs, vs);
-    snprintf(f, nf, "%s#define DIRECT_OUT %d\n%s%s%s", ver, direct_out, defs, out_fn, fs);
+    snprintf(f, nf, "%s#define DIRECT_OUT %d\n%s%s%s%s", ver, direct_out, defs, getenv("AGC_DBG_MAT") ? (getenv("AGC_DBG_MAT")[0] == 'x' ? "#define DBG_MAT 2\n" : getenv("AGC_DBG_MAT")[0] == 'y' ? "#define DBG_MAT 3\n" : getenv("AGC_DBG_MAT")[0] == 'z' ? "#define DBG_MAT 4\n" : "#define DBG_MAT 1\n") : "", out_fn, fs);
     free(vs2);
     Shader sh = LoadShaderFromMemory(v, f);
     const char *dump = getenv("AGC_SHADER_DUMP");   // debugging: write every shader out for an offline validator

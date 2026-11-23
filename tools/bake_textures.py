@@ -71,11 +71,65 @@ def seam_distance(x, y, pitch):
     return (0.5 - np.maximum(fx, fy)) * pitch, (x / pitch) % 1.0 - 0.5, (y / pitch) % 1.0 - 0.5
 
 
-def pack(height_m, tile_m, rough, albedo, path):
+def partition(rng, total, lo, hi):
+    """Random lengths in [lo, hi] (roughly) that add up to total exactly."""
+    parts = []
+    while sum(parts) < total - lo * 0.5:
+        parts.append(rng.uniform(lo, hi))
+    parts = np.array(parts) * (total / sum(parts))
+    return np.concatenate([[0.0], np.cumsum(parts)])
+
+
+def panel_layout(n, tile, row_lo, row_hi, col_lo, col_hi, seed, split_p=0.0):
+    """Irregular, seamlessly tiling panels: rows of random height, each row cut into
+    panels of random width at its own random offset (no seam lines up from row to row),
+    some panels split once more across. Per pixel: panel id, position inside the panel
+    (u along x, v along y, metres from its corner) and the panel's size (w, h)."""
+    rng = np.random.default_rng(seed)
+    c = (np.arange(n) + 0.5) / n * tile
+    pid = np.zeros((n, n), dtype=np.int64)
+    u = np.zeros((n, n)); v = np.zeros((n, n)); w = np.zeros((n, n)); h = np.zeros((n, n))
+    rows = partition(rng, tile, row_lo, row_hi)
+    next_id = 0
+    for r in range(len(rows) - 1):
+        y0, y1 = rows[r], rows[r + 1]
+        ry = (c >= y0) & (c < y1)
+        cols = partition(rng, tile, col_lo, col_hi)
+        off = rng.uniform(0, tile)
+        xs = (c - off) % tile
+        ci = np.clip(np.searchsorted(cols, xs, side="right") - 1, 0, len(cols) - 2)
+        splits = np.where(rng.uniform(size=len(cols) - 1) < split_p, rng.uniform(0.35, 0.65, len(cols) - 1), 0.0)
+        for yi in np.nonzero(ry)[0]:
+            fy = (c[yi] - y0) / (y1 - y0)
+            sp = splits[ci]
+            upper = (sp > 0) & (fy >= sp)
+            lower = (sp > 0) & (fy < sp)
+            pid[yi] = next_id + ci * 2 + upper
+            u[yi] = xs - cols[ci]
+            w[yi] = cols[ci + 1] - cols[ci]
+            hh = np.full(n, y1 - y0)
+            vv = np.full(n, c[yi] - y0)
+            hh[lower] = sp[lower] * (y1 - y0)
+            hh[upper] = (1 - sp[upper]) * (y1 - y0)
+            vv[upper] = c[yi] - (y0 + sp[upper] * (y1 - y0))
+            v[yi] = vv
+            h[yi] = hh
+        next_id += 2 * (len(cols) - 1)
+    return pid, u, v, w, h, next_id
+
+
+def per_panel(pid, count, seed, lo, hi):
+    return np.random.default_rng(seed).uniform(lo, hi, count)[pid]
+
+
+def pack(height_m, tile_m, rough, albedo, path, tilt=None):
     n = height_m.shape[0]
     dx = tile_m / n
     gx = (np.roll(height_m, -1, 1) - np.roll(height_m, 1, 1)) / (2 * dx)
     gy = (np.roll(height_m, -1, 0) - np.roll(height_m, 1, 0)) / (2 * dx)
+    if tilt is not None:   # slope added directly (a panel set at a slight angle)
+        gx = gx + tilt[0]
+        gy = gy + tilt[1]
     inv = 1.0 / np.sqrt(gx * gx + gy * gy + 1.0)
     nx, ny = -gx * inv, -gy * inv
     img = np.stack([nx * 0.5 + 0.5, ny * 0.5 + 0.5, 0.5 + rough, albedo * 0.5], -1)
@@ -87,50 +141,109 @@ def pack(height_m, tile_m, rough, albedo, path):
 
 
 def bake_panel(path):
-    """Riveted aluminium skin: 3 x 3 panels of 0.42 m, oil-canned, seams, rivet rows."""
-    tile, pitch = 1.26, 0.42
+    """Riveted aluminium skin like the LM's: large panels of many sizes in staggered rows
+    (no regular grid), each oil-canned and set at its own slight angle so neighbours catch
+    the light differently, screw rows along every edge."""
+    tile = 2.52
     x, y = grid(N, tile)
-    d, fx, fy = seam_distance(x, y, pitch)
-    pillow = (1 - 4 * fx * fx) * (1 - 4 * fy * fy)
-    h = cells(x, y, pitch, 3, 11, -0.0030, 0.0030) * pillow
-    # Thin skins buckle: one or two shallow diagonal dents per panel.
-    ang = cells(x, y, pitch, 3, 12, 0, np.pi)
-    off = cells(x, y, pitch, 3, 13, -0.08, 0.08)
-    across = (fx * np.cos(ang) + fy * np.sin(ang)) * pitch - off
-    h += cells(x, y, pitch, 3, 14, -0.0016, 0.0016) * np.exp(-(across / 0.035) ** 2) * pillow
-    h += 0.0007 * band_noise(N, 2, 24, 1.6, 15) * pillow
-    h -= 0.0016 * smoothstep(0.007, 0.0, d)
-    # Rivets: rows 28 mm inside each seam, 60 mm apart.
-    rx = (x / 0.06) % 1.0 - 0.5
-    ry = (y / 0.06) % 1.0 - 0.5
-    rdist = np.sqrt(rx * rx + ry * ry) * 0.06
-    band = smoothstep(0.012, 0.005, np.abs(d - 0.030))
-    rivet = smoothstep(0.0065, 0.0025, rdist) * band
-    h += 0.0009 * rivet
-    h += 0.00004 * band_noise(N, 60, 500, 0.3, 16, aniso=(0.12, 1.0))   # brushed grain
-    albedo = cells(x, y, pitch, 3, 17, 0.90, 1.07)
-    albedo = albedo * (1 - 0.45 * smoothstep(0.009, 0.0, d))
-    albedo *= 1 + 0.035 * band_noise(N, 1, 12, 1.5, 18)
-    albedo *= 1 - 0.18 * smoothstep(0.011, 0.006, rdist) * band * (1 - smoothstep(0.0065, 0.0025, rdist))
-    rough = cells(x, y, pitch, 3, 19, -0.07, 0.07) + 0.04 * band_noise(N, 4, 60, 1.2, 20)
+    pid, u, v, w, hgt, count = panel_layout(N, tile, 0.42, 0.95, 0.35, 1.05, 61, split_p=0.25)
+    du = np.minimum(u, w - u)
+    dv = np.minimum(v, hgt - v)
+    d = np.minimum(du, dv)                                  # to the nearest panel edge, m
+    fu = u / w * 2 - 1
+    fv = v / hgt * 2 - 1
+    pillow = (1 - fu * fu) * (1 - fv * fv)
+    h = per_panel(pid, count, 62, -0.0026, 0.0026) * pillow
+    # Thin skins buckle: one shallow dent across each panel at its own angle.
+    ang = per_panel(pid, count, 63, 0, np.pi)
+    off = per_panel(pid, count, 64, -0.25, 0.25)
+    across = (fu * np.cos(ang) + fv * np.sin(ang)) * 0.5 - off * 0.5
+    h += per_panel(pid, count, 65, -0.0014, 0.0014) * np.exp(-(across / 0.10) ** 2) * pillow
+    h += 0.0006 * band_noise(N, 3, 30, 1.6, 66) * pillow
+    h -= 0.0016 * smoothstep(0.007, 0.0, d)                 # seam groove
+    # Screws: a row 22 mm inside every edge, 50 mm apart.
+    along = np.where(du < dv, v, u)
+    rd = np.sqrt((d - 0.022) ** 2 + ((along % 0.05) - 0.025) ** 2)
+    screw = smoothstep(0.0055, 0.0022, rd)
+    h += 0.0008 * screw
+    h += 0.00004 * band_noise(N, 60, 500, 0.3, 67, aniso=(0.12, 1.0))   # brushed grain
+    # Each panel at its own slight angle (up to ~3 deg), flat again at the seams.
+    interior = smoothstep(0.004, 0.030, d)
+    tilt = (per_panel(pid, count, 68, -0.05, 0.05) * interior, per_panel(pid, count, 69, -0.05, 0.05) * interior)
+    tone = per_panel(pid, count, 70, 0.86, 1.10)
+    tone = np.where(per_panel(pid, count, 71, 0, 1) < 0.12, tone * 0.78, tone)   # the odd darker replacement panel
+    albedo = tone * (1 - 0.45 * smoothstep(0.008, 0.0, d))
+    albedo *= 1 + 0.04 * band_noise(N, 1, 14, 1.5, 72)
+    albedo *= 1 - 0.20 * smoothstep(0.009, 0.0055, rd) * (1 - screw)
+    rough = per_panel(pid, count, 73, -0.12, 0.12) + 0.05 * band_noise(N, 4, 60, 1.2, 74)
     rough += 0.25 * smoothstep(0.008, 0.0, d)
-    pack(h, tile, rough, albedo, path)
+    pack(h, tile, rough, albedo, path, tilt)
+
+
+def facets(n, tile, gx_count, gy_count, seed):
+    """Periodic Voronoi cells (one jittered point per grid cell): per pixel the cell id and
+    the gap to the next cell's border (F2 - F1, m), for crumpled-foil facets."""
+    rng = np.random.default_rng(seed)
+    jit = rng.uniform(0.1, 0.9, (gy_count, gx_count, 2))
+    cw, ch = tile / gx_count, tile / gy_count
+    c = (np.arange(n) + 0.5) / n * tile
+    x, y = np.meshgrid(c, c)
+    ix = np.floor(x / cw).astype(int)
+    iy = np.floor(y / ch).astype(int)
+    best = np.full((n, n), np.inf); second = np.full((n, n), np.inf)
+    cid = np.zeros((n, n), dtype=np.int64)
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            jx, jy = ix + dx, iy + dy
+            wx, wy = jx % gx_count, jy % gy_count
+            px = (jx + jit[wy, wx, 0]) * cw
+            py = (jy + jit[wy, wx, 1]) * ch
+            dist = np.hypot(x - px, y - py)
+            closer = dist < best
+            second = np.where(closer, best, np.minimum(second, dist))
+            cid = np.where(closer, wy * gx_count + wx, cid)
+            best = np.where(closer, dist, best)
+    return cid, second - best
 
 
 def bake_foil(path):
-    """Crinkled Kapton foil: 2 x 2 sheets of 0.55 m joined with tape."""
-    tile, pitch = 1.10, 0.55
-    x, y = grid(N, tile)
-    d, _, _ = seam_distance(x, y, pitch)
-    crumple = billow(N, 5, 6, 31, gain=0.55)
-    broad = band_noise(N, 1, 6, 1.5, 32)
-    tape = smoothstep(0.030, 0.022, d)
-    h = (0.0085 * crumple + 0.004 * broad) * (1 - 0.8 * tape) + 0.0006 * tape
-    albedo = cells(x, y, pitch, 2, 33, 0.86, 1.08) * (0.86 + 0.26 * crumple)
-    albedo = albedo * (1 - tape) + 1.10 * tape
-    albedo *= 1 - 0.40 * smoothstep(0.004, 0.0, d)
-    rough = 0.16 * (crumple - 0.5) + 0.03 * band_noise(N, 8, 80, 1.0, 34) - 0.10 * tape
-    pack(h, tile, rough, albedo, path)
+    """Crinkled Kapton foil like the descent stage's: big irregular sheets of crumpled foil,
+    flat facets meeting at sharp creases, each facet tilted its own way (three sizes), so a
+    low Sun throws glints off some and the black sky turns others dark. Some sheets were
+    pulled tight: their facets stretch into long wrinkles. Sheets overlap at their edges
+    (a raised fold and a thin shadow line); no tape grid."""
+    tile = 2.20
+    pid, u, v, w, hgt, count = panel_layout(N, tile, 0.55, 1.10, 0.60, 1.30, 81, split_p=0.3)
+    d = np.minimum(np.minimum(u, w - u), np.minimum(v, hgt - v))
+    kind = per_panel(pid, count, 86, 0, 1)
+    tx = np.zeros((N, N)); ty = np.zeros((N, N)); crease = np.zeros((N, N)); tone = np.ones((N, N))
+    rng = np.random.default_rng(92)
+    # (cells across the tile in x, in y, slope amplitude): iso, pulled along x, pulled along y.
+    scales = [(18, 18, 0.34), (44, 44, 0.20), (110, 110, 0.09)]
+    variants = [[(gx, gy, a) for gx, gy, a in scales],
+                [(max(4, gx // 3), gy, a) for gx, gy, a in scales],
+                [(gx, max(4, gy // 3), a) for gx, gy, a in scales]]
+    pick = np.where(kind < 0.5, 0, np.where(kind < 0.75, 1, 2))
+    for vi, var in enumerate(variants):
+        m = pick == vi
+        for si, (gx, gy, a) in enumerate(var):
+            cid, gap = facets(N, tile, gx, gy, 100 + vi * 10 + si)
+            ang = rng.uniform(0, 2 * np.pi, gx * gy)[cid]
+            mag = a * np.sqrt(rng.uniform(0.05, 1.0, gx * gy))[cid]
+            tx[m] += (mag * np.cos(ang))[m]
+            ty[m] += (mag * np.sin(ang))[m]
+            cell = tile / max(gx, gy)
+            crease[m] = np.maximum(crease[m], (smoothstep(0.035 * cell, 0.0, gap) * (1.0 - si * 0.3))[m])
+            tone[m] *= rng.uniform(0.93, 1.07, gx * gy)[cid][m]
+    sheet = smoothstep(0.004, 0.030, d)                   # flatter where the sheet is taped down
+    amp = per_panel(pid, count, 87, 0.75, 1.15) * sheet
+    tilt = (tx * amp, ty * amp)
+    h = 0.004 * band_noise(N, 1, 5, 1.6, 88)
+    h += 0.0025 * smoothstep(0.018, 0.0, d)               # the overlapping sheet edge lifts
+    albedo = per_panel(pid, count, 89, 0.90, 1.06) * tone * (1 - 0.18 * crease)
+    albedo *= 1 - 0.45 * smoothstep(0.004, 0.0, d)        # thin shadow line under the edge
+    rough = 0.10 * crease + per_panel(pid, count, 90, -0.05, 0.05) + 0.03 * band_noise(N, 8, 80, 1.0, 91)
+    pack(h, tile, rough, albedo, path, tilt)
 
 
 def bake_blanket(path):
