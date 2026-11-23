@@ -19,7 +19,7 @@ AGC_CORE := $(VAGC)/yaAGC/agc_engine.c $(VAGC)/yaAGC/agc_engine_init.c $(VAGC)/y
 HOST     := src/agc_host.c src/agc_mem.c src/moon.c src/lm.c src/csm.c src/coop.c src/net.c $(ROPE_C) $(SYMS_C)
 # The GL-free simulation around the AGC: scenarios, crew, mission, stepping, save states.
 SIM      := src/scenario.c src/crew.c src/ascent.c src/sim.c src/snapshot.c src/terrain_shape.c src/milestones.c data/a11_pdi_lgc.c data/a11_liftoff_lgc.c data/snapshots.c
-GAME     := src/main.c src/dsky.c src/hints.c src/terrain.c src/render.c src/lmmodel.c src/hud.c src/cockpit.c src/cockpit_panels.c src/pcanvas.c src/sky_extras.c src/controls.c src/rocks.c src/assets.c src/sound.c src/eva.c src/ascent_ui.c src/csmmodel.c $(SIM) $(FONTS_C)
+GAME     := src/main.c src/dsky.c src/hints.c src/terrain.c src/render.c src/lmmodel.c src/hud.c src/cockpit.c src/cockpit_panels.c src/pcanvas.c src/sky_extras.c src/controls.c src/rocks.c src/assets.c src/sound.c src/eva.c src/astro.c src/footprints.c src/ascent_ui.c src/csmmodel.c $(SIM) $(FONTS_C)
 
 # Vendor core: build quietly, it predates modern warning sets.
 CORE_FLAGS := -O2 -w -I$(VAGC)/yaAGC
@@ -124,7 +124,7 @@ test: build/linux/agc-selftest build/linux/agc-lab
 # build as data/snapshots.c. Re-run after changing the simulation; a build whose
 # state layout no longer matches refuses them, and agc-selftest fails.
 SNAP_DIR   := build/snapshots
-SNAP_FILES := tig30:ms_tig30 radar:ms_radar highgate:ms_highgate 150m:ms_150m boulders:ms_boulders site2:ms_site2
+SNAP_FILES := tig30:ms_tig30 radar:ms_radar highgate:ms_highgate 150m:ms_150m boulders:ms_boulders site2:ms_site2 insertion:ms_insertion
 snapshots: build/linux/agc-lab tools/embed_bin.py
 	@rm -rf $(SNAP_DIR) && mkdir -p $(SNAP_DIR)
 	./build/linux/agc-lab snapgen:$(SNAP_DIR)

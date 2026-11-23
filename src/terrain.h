@@ -25,6 +25,9 @@ void terrain_shutdown(void);
 // Height above the reference sphere at plane coordinates. min_feature (m)
 // drops crater octaves smaller than that (for LOD); 0 = full detail.
 double terrain_height(double x, double z, double min_feature);
+// The surface as the finest terrain mesh draws it (for things that stand on
+// it in plain view: the moonwalkers, their footprints, the flag).
+double terrain_ground_height(double x, double z);
 
 // Albedo and "freshness" (0..1) at plane coordinates, for shading.
 void terrain_surface_props(double x, double z, double min_feature, float *albedo, float *fresh);

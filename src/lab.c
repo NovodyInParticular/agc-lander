@@ -233,7 +233,7 @@ static int write_file(const char *path, const uint8_t *b, size_t n)
 // start (start_world, the automatic crew, the terrain under the radar), with
 // milestones saved at the moment their condition first holds and a sample of
 // the flight every second.
-static const char *snap_file[MS_COUNT] = { "tig30", "radar", "highgate", "150m", "boulders", "site2" };
+static const char *snap_file[MS_COUNT] = { "tig30", "radar", "highgate", "150m", "boulders", "site2", "insertion" };
 
 // Move Luminary's landing site to a spot on the terrain plane, as Apollo 12's
 // Noun 69 landing site update did: P63's guidance target LAND (stable-member
@@ -364,6 +364,39 @@ static int snapgen_flight(const char *dir, int ms, double x, double z, double al
     return 0;
 }
 
+// The canonical ascent: the LUNAR LIFT-OFF scenario as the game starts it, the
+// automatic crew, saved just after P12 shuts the ascent engine down in orbit.
+static int snapgen_insertion(const char *dir)
+{
+    start_flight();
+    scenario_liftoff(0);
+    crew_reset();
+    crew.auto_crew = 1;
+    crew.landed = 1;
+    ascent_begin();
+    double t0 = lm.t, t_orbit = 0;
+    while (lm.t - t0 < 900) {
+        sim_advance(0.1);
+        if (!t_orbit && lm.liftoff && ascent_phase() >= MP_ORBIT) t_orbit = lm.t;
+        if (t_orbit && lm.t - t_orbit >= 2.0) {
+            uint8_t *b;
+            char path[512];
+            char label[40];   // the canonical lift-off time rides in the label (the game's J gate reads it)
+            snprintf(label, sizeof label, "INSERTION L%.1f", lm.liftoff_t);
+            size_t n = snapshot_save(&b, label, MS_INSERTION);
+            snprintf(path, sizeof path, "%s/%s.snap", dir, snap_file[MS_INSERTION]);
+            if (!n || write_file(path, b, n)) return 1;
+            free(b);
+            printf("SNAPGEN %-9s t=%.1f  lift-off %.1f  burn ended %.1f  %zu bytes\n", milestone_name(MS_INSERTION), lm.t, lm.liftoff_t,
+                   t_orbit, n);
+            orbit_report();
+            return 0;
+        }
+    }
+    fprintf(stderr, "SNAPGEN: the canonical ascent never reached orbit\n");
+    return 1;
+}
+
 static int snapgen(const char *dir)
 {
     agc_host_init();
@@ -454,6 +487,7 @@ static int snapgen(const char *dir)
     printf("SNAPGEN   canonical touchdown %.0f m east, %.0f m south of the target: the scenario flights aim that much short\n", miss_x, miss_z);
     if (snapgen_flight(dir, MS_BOULDERS, BOULDERS_X, BOULDERS_Z, 150, 100, 1)) return 1;
     if (snapgen_flight(dir, MS_SITE2, SITE2_X, SITE2_Z, 2600, 0, 0)) return 1;
+    if (snapgen_insertion(dir)) return 1;
     return 0;
 }
 

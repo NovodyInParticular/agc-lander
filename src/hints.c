@@ -143,10 +143,10 @@ static void flying_hints(Hint *h)
     V3 up_b = lm_inertial_to_body(up);   // +z: leaning back, -y: leaning right
 
     if (fabs(vf) > lim && fabs(vf) >= fabs(vr))
-        add(h, vf > 0 ? VRT("Drifting forward (%.0f ft/s): hold W briefly to lean back, then let go",
-                            "Drifting forward (%.0f ft/s): push the RIGHT stick forward briefly to lean back")
-                      : VRT("Drifting backward (%.0f ft/s): hold S briefly to lean forward, then let go",
-                            "Drifting backward (%.0f ft/s): pull the RIGHT stick back briefly to lean forward"),
+        add(h, vf > 0 ? VRT("Drifting forward (%.0f ft/s): hold S briefly to lean back, then let go",
+                            "Drifting forward (%.0f ft/s): pull the RIGHT stick back briefly to lean back")
+                      : VRT("Drifting backward (%.0f ft/s): hold W briefly to lean forward, then let go",
+                            "Drifting backward (%.0f ft/s): push the RIGHT stick forward briefly to lean forward"),
             fabs(vf) / FT), h->vrbtn = VB_RSTICK;
     else if (fabs(vr) > lim)
         add(h, vr > 0 ? VRT("Drifting right (%.0f ft/s): hold A briefly to lean left, then let go",
@@ -156,8 +156,8 @@ static void flying_hints(Hint *h)
             fabs(vr) / FT), h->vrbtn = VB_RSTICK;
     else if (tilt > 10 * DEG2RAD) {
         if (fabs(up_b.z) >= fabs(up_b.y))
-            add(h, up_b.z > 0 ? VRT("Leaning back %.0f deg: tap S to level out", "Leaning back %.0f deg: nudge the RIGHT stick back to level out")
-                               : VRT("Leaning forward %.0f deg: tap W to level out", "Leaning forward %.0f deg: nudge the RIGHT stick forward to level out"),
+            add(h, up_b.z > 0 ? VRT("Leaning back %.0f deg: tap W to level out", "Leaning back %.0f deg: nudge the RIGHT stick forward to level out")
+                               : VRT("Leaning forward %.0f deg: tap S to level out", "Leaning forward %.0f deg: nudge the RIGHT stick back to level out"),
                 tilt * RAD2DEG), h->vrbtn = VB_RSTICK;
         else
             add(h, up_b.y < 0 ? VRT("Leaning right %.0f deg: tap A to level out", "Leaning right %.0f deg: nudge the RIGHT stick left to level out")
@@ -234,7 +234,7 @@ static void ascent_hints(Hint *h)
     if (ph == MP_COUNTDOWN) {
         if (eva_phase() == EVA_SURFACE) {
             add(h, VRT("Walk with W A S D (Shift to lope), Space to jump, F to plant the flag.",
-                       "Walk with the LEFT stick (hold the left grip to lope), A to jump, left trigger plants the flag."));
+                       "Walk with the LEFT stick (left grip lopes), A jumps. Squeeze the RIGHT grip to take the flag, let go to plant it."));
             add(h, "The countdown waits for you: walk to the ladder and press X to climb back in");
             return;
         }
@@ -298,7 +298,7 @@ static void compute(Hint *h)
     if (lm.touchdown) {
         if (lm.dps_on) { add(h, VRT("You're on the ground: press SPACE to shut the engine off", "You're on the ground: press A (ENGINE STOP)")); h->urgent = 1; h->vrbtn = VB_A; }
         else if (eva_phase() == EVA_INSIDE && eva_available()) {
-            add(h, VRT("You are on the Moon. Press X to open the hatch and go for a walk,", "You are on the Moon. Press X (left controller) to open the hatch and walk outside"));
+            add(h, VRT("You are on the Moon. Press X to open the hatch and go for a walk,", "You are on the Moon. Grab the hatch handle by your knees, or press X, to go outside"));
 #ifndef AGC_VR
             add(h, "or L to skip ahead to lift-off (P12) and the trip back to Columbia");
 #endif
@@ -306,8 +306,8 @@ static void compute(Hint *h)
         }
         else if (eva_phase() == EVA_SURFACE) {
             add(h, VRT("Walk with W A S D (Shift to lope), Space to jump, F to plant the flag.",
-                       "Walk with the LEFT stick (hold the left grip to lope), A to jump, left trigger plants the flag."));
-            add(h, VRT("To go back in, walk to the foot of the ladder and press X", "To go back in, walk to the foot of the ladder and press X"));
+                       "Walk with the LEFT stick (left grip lopes), A jumps. Squeeze the RIGHT grip to take the flag, let go to plant it."));
+            add(h, VRT("To go back in, walk to the foot of the ladder and press X", "To go back in, grab the ladder (grip) or press X at its foot"));
         }
         return;
     }

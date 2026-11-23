@@ -134,18 +134,20 @@ def bake_foil(path):
 
 
 def bake_blanket(path):
-    """Quilted thermal blanket: 4 x 4 pillows of 0.30 m, stitched, wrinkled."""
+    """Thermal blanket over the ascent stage: aluminised Kapton sheets 0.30 m wide, barely
+    quilted, crinkled all over (a low Sun must glint off it, not cut it into pyramids)."""
     tile, pitch = 1.20, 0.30
     x, y = grid(N, tile)
     d, fx, fy = seam_distance(x, y, pitch)
     pillow = (1 - 4 * fx * fx) * (1 - 4 * fy * fy)
-    wrinkle = billow(N, 8, 5, 41, gain=0.6)
-    h = cells(x, y, pitch, 4, 42, 0.011, 0.018) * pillow
-    h += 0.0022 * wrinkle * (0.35 + 0.65 * (1 - pillow))   # puckers gather toward the stitching
-    h -= 0.004 * smoothstep(0.010, 0.0, d)
-    albedo = cells(x, y, pitch, 4, 43, 0.88, 1.08) * (0.94 + 0.12 * wrinkle)
-    albedo *= 1 - 0.40 * smoothstep(0.007, 0.0, d)
-    rough = cells(x, y, pitch, 4, 44, -0.06, 0.06) + 0.10 * (wrinkle - 0.5)
+    crinkle = billow(N, 14, 6, 41, gain=0.62)
+    fine = billow(N, 40, 4, 45, gain=0.55)
+    h = cells(x, y, pitch, 4, 42, 0.0012, 0.0026) * pillow
+    h += 0.0014 * crinkle + 0.00045 * fine
+    h -= 0.0012 * smoothstep(0.008, 0.0, d)
+    albedo = cells(x, y, pitch, 4, 43, 0.90, 1.06) * (0.90 + 0.18 * crinkle)
+    albedo *= 1 - 0.30 * smoothstep(0.006, 0.0, d)
+    rough = cells(x, y, pitch, 4, 44, -0.05, 0.05) + 0.14 * (crinkle - 0.5)
     pack(h, tile, rough, albedo, path)
 
 
@@ -179,30 +181,54 @@ def bake_cabin(path):
 
 
 def bake_cabin_wall(path):
-    """Cabin pressure shell: painted chem-milled skin, 0.30 m pockets between raised stiffener ribs,
-    a riveted joint every third rib."""
-    tile, pitch = 0.90, 0.30
+    """Cabin pressure shell, as in photographs of LM-2 and the LM cabin: flat painted aluminium
+    sheets with straight seams (0.45 x 0.30 m), a row of screw heads along every edge, one raised
+    structural frame and one stringer per 0.9 m tile with rivet rows either side. No padding."""
+    tile = 0.90
     x, y = grid(N, tile)
-    fx = np.abs((x / pitch) % 1.0 - 0.5)
-    fy = np.abs((y / pitch) % 1.0 - 0.5)
-    d = (0.5 - (fx ** 6 + fy ** 6) ** (1 / 6)) * pitch          # distance to the rib centre line, round corners
-    rib = smoothstep(0.024, 0.014, d)
     peel = band_noise(N, 90, 500, 0.6, 71)
     broad = band_noise(N, 1, 10, 1.6, 72)
     scuff = np.clip(band_noise(N, 3, 200, 1.1, 73, aniso=(0.08, 1.0)) - 1.6, 0, None)
     scuff += np.clip(band_noise(N, 3, 200, 1.1, 74, aniso=(1.0, 0.1)) - 1.8, 0, None)
-    # Rivet rows along the panel joints (the tile edges), 45 mm apart.
-    jd, _, _ = seam_distance(x, y, tile)
-    along = np.where(np.abs((x / tile) % 1.0 - 0.5) > np.abs((y / tile) % 1.0 - 0.5), y, x)
-    rdist = np.sqrt(((along / 0.045) % 1.0 - 0.5) ** 2 * 0.045 ** 2 + (jd - 0.007) ** 2)
-    rivet = smoothstep(0.0048, 0.0022, rdist)
-    h = 0.0034 * rib + 0.0008 * rivet + 0.00003 * peel + 0.0004 * broad * (1 - rib)
-    h -= 0.0006 * smoothstep(0.0015, 0.0, jd)
-    shade = smoothstep(0.014, 0.055, d)                          # paint looks darker tucked against the ribs
-    albedo = (1.0 + 0.05 * broad + 0.02 * peel - 0.10 * np.clip(scuff, 0, 1.5)) * (0.86 + 0.14 * shade + 0.10 * rib)
-    albedo *= 1 - 0.35 * smoothstep(0.0015, 0.0, jd)
-    albedo *= 1 - 0.15 * smoothstep(0.007, 0.004, rdist) * (1 - rivet)
-    rough = 0.05 * broad - 0.12 * np.clip(scuff, 0, 1) - 0.05 * rib
+    # Sheets: distance to the nearest seam along each axis.
+    px_, py_ = 0.45, 0.30
+    sx = np.abs((x / px_) % 1.0 - 0.5) * px_      # 0 at the middle of a sheet, px_/2 at its seam
+    sy = np.abs((y / py_) % 1.0 - 0.5) * py_
+    dsx, dsy = px_ / 2 - sx, py_ / 2 - sy
+    dseam = np.minimum(dsx, dsy)
+    sheet = cells(x, y, 0.15, 6, 75, -1.0, 1.0)   # per-sheet tone (cells of 0.15 m grouped below)
+    tone = cells(np.floor(x / px_) * 0.15 + 0.01, np.floor(y / py_) * 0.15 + 0.01, 0.15, 6, 76, 0.94, 1.05)
+    oil = (1 - (2 * sx / px_) ** 2) * (1 - (2 * sy / py_) ** 2)   # thin sheets bow a hair
+    h = 0.00025 * oil * sheet + 0.00003 * peel + 0.00015 * broad
+    h -= 0.0007 * smoothstep(0.0018, 0.0, dseam)                 # the joint
+    # Screw heads 12 mm in from each seam, 38 mm apart along it.
+    def fastener_rows(dist_to_line, along, inset, pitch, r_head):
+        a = ((along / pitch) % 1.0 - 0.5) * pitch
+        d = np.sqrt(a * a + (dist_to_line - inset) ** 2)
+        head = smoothstep(r_head, r_head * 0.45, d)
+        ring = smoothstep(r_head * 1.9, r_head * 1.25, d) * (1 - head)
+        return head, ring
+    hx, rx_ = fastener_rows(dsx, y, 0.012, 0.038, 0.0032)
+    hy, ry_ = fastener_rows(dsy, x, 0.012, 0.038, 0.0032)
+    head = np.maximum(hx, hy)
+    ring = np.maximum(rx_, ry_) * (1 - head)
+    h += 0.0006 * head - 0.0002 * ring
+    # Structural frame (vertical, at the tile edge) and stringer (horizontal, mid tile): raised flat strips.
+    fx = np.abs(((x + tile / 2) % tile) - tile / 2)               # distance from x = 0 (mod tile)
+    fy = np.abs(((y - tile / 2 + tile / 2) % tile) - tile / 2)     # distance from y = 0 (mod tile)
+    frame = smoothstep(0.019, 0.016, fx)
+    stringer = smoothstep(0.013, 0.010, fy) * (1 - frame)
+    h += 0.0035 * frame + 0.0025 * stringer
+    # Rivet rows on the strips, 9 mm in from their edges, 25 mm apart.
+    fh, _ = fastener_rows(fx, y, 0.0085, 0.025, 0.0026)
+    gh, _ = fastener_rows(fy, x, 0.0060, 0.025, 0.0024)
+    riv = np.maximum(fh * frame, gh * stringer)
+    h += 0.0005 * riv
+    albedo = (1.0 + 0.04 * broad + 0.02 * peel - 0.10 * np.clip(scuff, 0, 1.5)) * tone
+    albedo *= 1 - 0.40 * smoothstep(0.0015, 0.0, dseam) * (1 - frame) * (1 - stringer)
+    albedo *= 1 - 0.38 * ring - 0.12 * head                       # dark recesses round the screws
+    albedo *= 1 - 0.12 * smoothstep(0.022, 0.017, fx) * (1 - frame)   # the frame's shadow line
+    rough = 0.05 * broad - 0.12 * np.clip(scuff, 0, 1) - 0.10 * head - 0.04 * frame
     pack(h, tile, rough, albedo, path)
 
 

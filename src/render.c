@@ -35,6 +35,20 @@
     "void writeDepth(){ gl_FragDepth = log2(fragLogZ) * logFar * 0.5; }\n" \
     "#endif\n"
 
+// The crew's own shadow map (render_shadow2_*): a small, sharp map that follows
+// the astronauts, so their long low-Sun shadows land wherever they walk.
+#define CREW_SHADOW_GLSL \
+    "uniform mat4 shadow2VP; uniform sampler2D shadowMap2; uniform vec3 shadow2Center; uniform float shadow2On;\n" \
+    "float crewShadow(vec3 p){\n" \
+    "  if (shadow2On < 0.5) return 1.0;\n" \
+    "  vec4 sp = shadow2VP * vec4(p - shadow2Center, 1.0);\n" \
+    "  vec3 c = sp.xyz / sp.w * 0.5 + 0.5;\n" \
+    "  if (c.x < 0.0 || c.x > 1.0 || c.y < 0.0 || c.y > 1.0 || c.z > 1.0) return 1.0;\n" \
+    "  float s = 0.0; vec2 texel = 1.0 / vec2(textureSize(shadowMap2, 0));\n" \
+    "  for (int k=0;k<4;k++){ vec2 o = vec2(k & 1, k >> 1) * 2.0 - 1.0; float d = texture(shadowMap2, c.xy + o*texel*0.9).r; s += (c.z - 0.0012 > d) ? 0.0 : 1.0; }\n" \
+    "  return s / 4.0;\n" \
+    "}\n"
+
 #define NOISE_GLSL \
     "float hash12(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }\n" \
     "float hash13(vec3 p3){ p3 = fract(p3 * 0.1031); p3 += dot(p3, p3.zyx + 31.32); return fract((p3.x + p3.y) * p3.z); }\n" \
@@ -144,8 +158,11 @@ static const char *terrain_fs = GLSL_HEADER LOGZ_FS NOISE_GLSL
     "uniform mat4 shadowVP; uniform sampler2D shadowMap; uniform vec3 shadowCenter; uniform float shadowOn;\n"
     "uniform vec3 dustCenter; uniform float dustAmount;\n"
     "uniform sampler2D soilMap;\n"
+    CREW_SHADOW_GLSL
     "out vec4 finalColor;\n"
-    "float lmShadow(vec3 p){\n"
+    "float lmShadow1(vec3 p);\n"
+    "float lmShadow(vec3 p){ return min(lmShadow1(p), crewShadow(p)); }\n"
+    "float lmShadow1(vec3 p){\n"
     "  if (shadowOn < 0.5) return 1.0;\n"
     "  vec4 sp = shadowVP * vec4(p - shadowCenter, 1.0);\n"
     "  vec3 c = sp.xyz / sp.w * 0.5 + 0.5;\n"
@@ -270,18 +287,26 @@ static const char *lm_fs = GLSL_HEADER LOGZ_FS
     "uniform mat4 shadowVP; uniform sampler2D shadowMap; uniform vec3 shadowCenter; uniform float shadowOn;\n"
     "uniform vec3 upDir; uniform float nearCut; uniform float sunGain;\n"
     "uniform vec3 lampPos[4]; uniform vec3 lampCol[4];\n"
+    CREW_SHADOW_GLSL
     "out vec4 finalColor;\n"
-    "float selfShadow(vec3 p, vec3 n){\n"
+    "float selfShadow1(vec3 p, vec3 n);\n"
+    "float selfShadow(vec3 p, vec3 n){ return min(selfShadow1(p, n), crewShadow(p + n * 0.02)); }\n"
+    "float selfShadow1(vec3 p, vec3 n){\n"
     "  if (shadowOn < 0.5) return 1.0;\n"
-    "  vec4 sp = shadowVP * vec4(p - shadowCenter + n * 0.04, 1.0);\n"
+    "  // Slope-scaled: a face the low Sun only grazes spans many map texels in depth,\n"
+    "  // and without a larger offset it shadows itself (the black 'missing' roofs).\n"
+    "  float gr = 1.0 - clamp(dot(n, sunDir), 0.0, 1.0);\n"
+    "  vec4 sp = shadowVP * vec4(p - shadowCenter + n * (0.04 + 0.14 * gr * gr), 1.0);\n"
     "  vec3 c = sp.xyz / sp.w * 0.5 + 0.5;\n"
     "  if (c.x < 0.0 || c.x > 1.0 || c.y < 0.0 || c.y > 1.0) return 1.0;\n"
     "  float s = 0.0; vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0));\n"
     "#if Q_PCF == 9\n"
-    "  for (int x=-1;x<=1;x++) for(int y=-1;y<=1;y++){ float d = texture(shadowMap, c.xy + vec2(x,y)*texel).r; s += (c.z - 0.0015 > d) ? 0.0 : 1.0; }\n"
+    "  float bias = 0.0015 + 0.0035 * gr * gr;\n"
+    "  for (int x=-1;x<=1;x++) for(int y=-1;y<=1;y++){ float d = texture(shadowMap, c.xy + vec2(x,y)*texel).r; s += (c.z - bias > d) ? 0.0 : 1.0; }\n"
     "  return s / 9.0;\n"
     "#else\n"
-    "  for (int k=0;k<4;k++){ vec2 o = vec2(k & 1, k >> 1) * 2.0 - 1.0; float d = texture(shadowMap, c.xy + o*texel*0.75).r; s += (c.z - 0.0015 > d) ? 0.0 : 1.0; }\n"
+    "  float bias = 0.0015 + 0.0035 * gr * gr;\n"
+    "  for (int k=0;k<4;k++){ vec2 o = vec2(k & 1, k >> 1) * 2.0 - 1.0; float d = texture(shadowMap, c.xy + o*texel*0.75).r; s += (c.z - bias > d) ? 0.0 : 1.0; }\n"
     "  return s / 4.0;\n"
     "#endif\n"
     "}\n"
@@ -309,13 +334,15 @@ static const char *lm_fs = GLSL_HEADER LOGZ_FS
     "  vec3 on = normalize(objNormal), bumpO = vec3(0.0); vec4 sm = vec4(0.5);\n"
     "  if (mat == 1) { sm = triMap(texFoil, objPos / 1.10, on, bumpO); metal = 1.0; rough = 0.34; bumpK = 1.7; }\n"   // gold / amber kapton foil
     "  else if (mat == 2) { sm = triMap(texPanel, objPos / 1.26, on, bumpO); metal = 1.0; rough = 0.35; }\n"     // aluminium / inconel
-    "  else if (mat == 3) { sm = triMap(texBlanket, objPos / 1.20, on, bumpO); rough = 0.8; }\n"                 // black-coated blanket
+    "  else if (mat == 3) { sm = triMap(texPanel, objPos / 1.26, on, bumpO); rough = 0.42; bumpK = 1.4; base = max(base, vec3(0.075, 0.075, 0.08)); }\n"   // black-painted panels: satin, seams and rivets catch the light
     "  else if (mat == 4) { sm = triMap(texPanel, objPos / 1.26, on, bumpO); rough = 0.5; }\n"                   // white paint
-    "  else if (mat == 5) { sm = triMap(texBlanket, objPos / 1.20, on, bumpO); metal = 1.0; rough = 0.46; bumpK = 2.4; }\n"   // silver mylar blanket
+    "  else if (mat == 5) { sm = triMap(texBlanket, objPos / 1.20, on, bumpO); metal = 1.0; rough = 0.40; bumpK = 1.5; }\n"   // silver mylar blanket
     "  else if (mat == 6) { rough = 0.15; }\n"                                                                   // window glass (dark)
     "  else if (mat == 8) { sm = triMap(texRock, objPos / 1.50, on, bumpO); rough = 0.92; }\n"                   // lunar rock
     "  else if (mat == 9) { rough = 0.95; }\n"                                                                   // plain matte (painted-on shadows)
     "  else if (mat == 10) { sm = triMap(texPanel, objPos / 1.26, on, bumpO); metal = 0.5; rough = 0.60; bumpK = 1.6; }\n"   // dull anodised skin, oil-canned
+    "  else if (mat == 11) { metal = 1.0; rough = 0.10; }\n"                                                    // gold visor: a mirror
+    "  else if (mat == 12) { sm = triMap(texBlanket, objPos / 0.45, on, bumpO); sm.a = mix(0.5, sm.a, 0.35); rough = 0.85; bumpK = 0.35; }\n"   // beta-cloth suit
     "  base *= sm.a * 2.0;\n"
     "  rough = clamp(rough + (sm.b - 0.5), 0.08, 1.0);\n"
     "  N = normalize(N + mat3(matModel) * bumpO * bumpK);\n"
@@ -349,7 +376,10 @@ static const char *lm_fs = GLSL_HEADER LOGZ_FS
     "  vec3 R = reflect(-V, N);\n"
     "  vec3 Fe = F0 + (max(vec3(1.0 - rough), F0) - F0) * pow(1.0 - NV, 5.0);\n"
     "  col += envLight(R, rough) * Fe * mix(0.6, 1.0, metal);\n"
-    "  col += (1.0 - metal) * base * envLight(N, 1.0) * 0.5;\n"
+    "  col += (1.0 - metal) * base * envLight(N, 1.0) * 0.5;\n"    "  // Fill: light bounced between the vehicle's own parts and up off the sunlit\n"
+    "  // ground nearby. Faint, but in shadow the panels keep their seams and rivets\n"
+    "  // instead of turning into flat black holes.\n"
+    "  col += (base * (1.0 - metal * 0.6) * 0.075 + F0 * 0.04) * (0.6 + 0.4 * sm.a * 2.0);\n"
     "  finalColor = sceneOut(col * exposure, 1.0);\n"
     "}\n";
 
@@ -377,6 +407,80 @@ static const char *fx_fs = GLSL_HEADER LOGZ_FS NOISE_GLSL
     "  else { float ax = abs(p.x); a = smoothstep(1.0, 0.0, ax) * smoothstep(0.0, 0.25, uv.y) * smoothstep(1.0, 0.6, uv.y); \n"   // dust streak (alpha blended)
     "         finalColor = sceneOut(col.rgb * exposure * gain, a * col.a); return; }\n"
     "  finalColor = sceneOut(col.rgb * a * col.a * exposure * gain, 1.0);\n"
+    "}\n";
+
+// ---------------------------------------------------------------------------
+// Footprints: multiplicative decals laid on the ground. Each quad carries the
+// print's frame (normal = ground, tangent = the boot's forward); the fragment
+// shader models the boot-sole hollow and its tread as a height field, shades
+// it against the low Sun (with self-shadowing across the hollow) relative to
+// the flat ground, and multiplies the terrain already drawn by that ratio.
+
+static const char *decal_vs = GLSL_HEADER LOGZ_VS
+    "in vec3 vertexPosition; in vec3 vertexNormal; in vec4 vertexTangent; in vec2 vertexTexCoord; in vec4 vertexColor;\n"
+    "uniform mat4 mvp; uniform mat4 matModel;\n"
+    "out vec3 fragPos; out vec3 gN; out vec3 gT; out vec2 uv; out vec4 info;\n"
+    "void main(){\n"
+    "  vec4 wp = matModel * vec4(vertexPosition, 1.0); fragPos = wp.xyz;\n"
+    "  gN = vertexNormal; gT = vertexTangent.xyz; uv = vertexTexCoord; info = vertexColor;\n"
+    "  gl_Position = mvp * vec4(vertexPosition, 1.0);\n"
+    "  fragLogZ = 1.0 + gl_Position.w;\n"
+    "}\n";
+
+static const char *decal_fs = GLSL_HEADER LOGZ_FS
+    "in vec3 fragPos; in vec3 gN; in vec3 gT; in vec2 uv; in vec4 info;\n"
+    "uniform vec3 sunDir;\n"
+    "uniform mat4 shadowVP; uniform sampler2D shadowMap; uniform vec3 shadowCenter; uniform float shadowOn;\n"
+    CREW_SHADOW_GLSL
+    "out vec4 finalColor;\n"
+    "float lmShadow1(vec3 p){\n"
+    "  if (shadowOn < 0.5) return 1.0;\n"
+    "  vec4 sp = shadowVP * vec4(p - shadowCenter, 1.0);\n"
+    "  vec3 c = sp.xyz / sp.w * 0.5 + 0.5;\n"
+    "  if (c.x < 0.0 || c.x > 1.0 || c.y < 0.0 || c.y > 1.0 || c.z > 1.0) return 1.0;\n"
+    "  return (c.z - 0.002 > texture(shadowMap, c.xy).r) ? 0.0 : 1.0;\n"
+    "}\n"
+    "// Signed distance to the sole outline (metres; q: across, along, from its centre).\n"
+    "float sole(vec2 q){\n"
+    "  q.x -= 0.012 * q.y * q.y / 0.03;\n"   // the overshoe's sole curves a little
+    "  vec2 hs = vec2(q.y > 0.0 ? 0.068 : 0.058, 0.162); float r = 0.045;\n"
+    "  vec2 d = abs(q) - hs + r; return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - r;\n"
+    "}\n"
+    "// Height (1 = print depth): the hollow with its tread bars, soil pushed up round the edge.\n"
+    "float hgt(vec2 q, float bars){\n"
+    "  float sd = sole(q);\n"
+    "  float inside = 1.0 - smoothstep(-0.010, 0.004, sd);\n"
+    "  float ch = q.y * 34.0 + abs(q.x) * 14.0;\n"
+    "  float tread = bars * smoothstep(0.30, 0.70, abs(fract(ch) - 0.5) * 2.0);\n"
+    "  float rim = (1.0 - smoothstep(0.0, 0.035, abs(sd - 0.012))) * 0.22;\n"
+    "  return -inside * (0.78 + 0.22 * tread) + rim;\n"
+    "}\n"
+    "void main(){\n"
+    "  writeDepth();\n"
+    "  float depth = info.r * 0.035, fade = info.a;\n"
+    "  vec2 q = vec2(uv.x * 0.11, uv.y * 0.21);\n"
+    "  float bars = 1.0 - smoothstep(0.0, 0.5, fwidth(q.y) * 34.0);\n"   // tread bars fade out before they shimmer
+    "  float e = 0.003;\n"
+    "  float h0 = hgt(q, bars), hx = hgt(q + vec2(e, 0.0), bars), hy = hgt(q + vec2(0.0, e), bars);\n"
+    "  vec3 N = normalize(gN); vec3 T = normalize(gT - N * dot(gT, N)); vec3 R = cross(T, N);\n"
+    "  vec3 n = normalize(N - R * ((hx - h0) / e * depth) - T * ((hy - h0) / e * depth));\n"
+    "  float flat_ = max(dot(N, sunDir), 0.03);\n"
+    "  float lit = max(dot(n, sunDir), 0.0);\n"
+    "  // Across the hollow toward the Sun: does the far wall hide it?\n"
+    "  vec2 sd = vec2(dot(sunDir, R), dot(sunDir, T)); float sl = length(sd); float sh = 1.0;\n"
+    "  if (sl > 1e-3) {\n"
+    "    vec2 st = sd / sl; float rise = dot(sunDir, N) / sl;\n"
+    "    for (int i = 1; i <= 7; i++) { float dd = float(i) * 0.011; if (hgt(q + st * dd, bars) * depth > h0 * depth + rise * dd) { sh = 0.15; break; } }\n"
+    "  }\n"
+    "  float ratio = clamp(lit * sh / flat_, 0.0, 2.4);\n"
+    "  float alb = mix(1.0, 0.86, clamp(-h0, 0.0, 1.0));\n"   // packed soil is a shade darker
+    "  float sun = min(lmShadow1(fragPos), crewShadow(fragPos));\n"
+    "  float k = mix(1.0, alb * mix(1.0, ratio, sun), fade);\n"
+    "#if DIRECT_OUT == 2\n"
+    "  finalColor = vec4(vec3(pow(k, 1.0 / 2.2)), 1.0);\n"
+    "#else\n"
+    "  finalColor = vec4(vec3(k), 1.0);\n"
+    "#endif\n"
     "}\n";
 
 // ---------------------------------------------------------------------------
@@ -581,7 +685,7 @@ static const char *depth_vs = GLSL_HEADER
 
 // ---------------------------------------------------------------------------
 
-static Shader sh_terrain, sh_lm, sh_fx, sh_sky, sh_down, sh_up, sh_final, sh_fxaa, sh_depth;
+static Shader sh_terrain, sh_lm, sh_fx, sh_sky, sh_down, sh_up, sh_final, sh_fxaa, sh_depth, sh_decal;
 static Texture2D tex_foil, tex_panel, tex_blanket, tex_rock, tex_soil;
 static float exposure = 1.0f;
 
@@ -608,6 +712,12 @@ static unsigned int shadow_fbo, shadow_tex;
 static Matrix shadow_vp;
 static V3 shadow_center;
 static int shadow_valid;
+// The crew's shadow map.
+#define SHADOW2_SIZE (render_quality()->shadow / 2)
+static unsigned int shadow2_fbo, shadow2_tex;
+static Matrix shadow2_vp;
+static V3 shadow2_center;
+static int shadow2_on;
 
 // Output mode of the scene shaders: 0 = HDR target + bloom/tonemap/FXAA passes (PC);
 // 1 = straight into a linear target that the display encodes (sRGB swapchain, Quest);
@@ -823,6 +933,7 @@ void render_init(void)
     sh_final = render_load_shader(post_vs, final_fs);
     sh_fxaa = render_load_shader(post_vs, fxaa_fs);
     sh_depth = render_load_shader(depth_vs, depth_fs);
+    sh_decal = render_load_shader(decal_vs, decal_fs);
     sh_lm.locs[SHADER_LOC_MATRIX_NORMAL] = GetShaderLocation(sh_lm, "matNormal");
     // Surface maps ride in the material map slots 0..3 (the shadow map uses unit 5).
     sh_lm.locs[SHADER_LOC_MAP_ALBEDO] = GetShaderLocation(sh_lm, "texFoil");
@@ -838,12 +949,18 @@ void render_init(void)
     set_logfar(sh_terrain);
     set_logfar(sh_lm);
     set_logfar(sh_fx);
+    set_logfar(sh_decal);
 
     shadow_fbo = rlLoadFramebuffer();
     rlEnableFramebuffer(shadow_fbo);
     shadow_tex = rlLoadTextureDepth(SHADOW_SIZE, SHADOW_SIZE, false);
     rlFramebufferAttach(shadow_fbo, shadow_tex, RL_ATTACHMENT_DEPTH, RL_ATTACHMENT_TEXTURE2D, 0);
     if (!rlFramebufferComplete(shadow_fbo)) TraceLog(LOG_WARNING, "render: shadow FBO incomplete");
+    shadow2_fbo = rlLoadFramebuffer();
+    rlEnableFramebuffer(shadow2_fbo);
+    shadow2_tex = rlLoadTextureDepth(SHADOW2_SIZE, SHADOW2_SIZE, false);
+    rlFramebufferAttach(shadow2_fbo, shadow2_tex, RL_ATTACHMENT_DEPTH, RL_ATTACHMENT_TEXTURE2D, 0);
+    if (!rlFramebufferComplete(shadow2_fbo)) TraceLog(LOG_WARNING, "render: crew shadow FBO incomplete");
     rlDisableFramebuffer();
 }
 
@@ -854,9 +971,11 @@ void render_shutdown(void)
     for (int i = 0; i < NBLOOM; i++) free_target(&bloom[i]);
     UnloadShader(sh_fxaa);
     UnloadShader(sh_terrain); UnloadShader(sh_lm); UnloadShader(sh_fx); UnloadShader(sh_sky);
-    UnloadShader(sh_down); UnloadShader(sh_up); UnloadShader(sh_final); UnloadShader(sh_depth);
+    UnloadShader(sh_down); UnloadShader(sh_up); UnloadShader(sh_final); UnloadShader(sh_depth); UnloadShader(sh_decal);
     rlUnloadFramebuffer(shadow_fbo);
     rlUnloadTexture(shadow_tex);
+    rlUnloadFramebuffer(shadow2_fbo);
+    rlUnloadTexture(shadow2_tex);
 }
 
 Shader *render_terrain_shader(void) { return &sh_terrain; }
@@ -871,6 +990,7 @@ void render_lm_material(Material *m)
 }
 Shader *render_fx_shader(void) { return &sh_fx; }
 Shader *render_depth_shader(void) { return &sh_depth; }
+Shader *render_decal_shader(void) { return &sh_decal; }
 void render_set_exposure(float e) { exposure = e; }
 void render_set_film(float f) { film_amount = f; }
 
@@ -927,6 +1047,52 @@ void render_shadow_end(void)
     shadow_valid = 1;
 }
 
+void render_shadow2_begin(V3 center, V3 sun, float radius, float length)
+{
+    // As render_shadow_begin, with the depth range stretched to take in a shadow
+    // `length` metres long (a crewman's, with the Sun 11 degrees up: ~10 m).
+    shadow2_center = center;
+    float back = radius + 3.0f;
+    Vector3 eye = { (float)(sun.x * back), (float)(sun.y * back), (float)(sun.z * back) };
+    Vector3 upv = fabs(sun.y) > 0.95 ? (Vector3){ 1, 0, 0 } : (Vector3){ 0, 1, 0 };
+    Matrix view = MatrixLookAt(eye, (Vector3){ 0, 0, 0 }, upv);
+    Matrix proj = MatrixOrtho(-radius, radius, -radius, radius, 0.01, back + radius + length);
+    shadow2_vp = MatrixMultiply(view, proj);
+    rlDrawRenderBatchActive();
+    rlEnableFramebuffer(shadow2_fbo);
+    rlViewport(0, 0, SHADOW2_SIZE, SHADOW2_SIZE);
+    rlClearScreenBuffers();
+    rlEnableDepthTest();
+    rlSetMatrixProjection(proj);
+    rlSetMatrixModelview(view);
+    rlDisableColorBlend();
+}
+
+void render_shadow2_end(void)
+{
+    rlDrawRenderBatchActive();
+    bind_output();
+    rlEnableColorBlend();
+    shadow2_on = 1;
+}
+
+void render_shadow2_off(void) { shadow2_on = 0; }
+void render_set_shadow2_center(V3 c) { shadow2_center = c; }
+
+static void bind_shadow2(Shader s)
+{
+    SetShaderValueMatrix(s, GetShaderLocation(s, "shadow2VP"), shadow2_vp);
+    set3(s, "shadow2Center", shadow2_center);
+    set1(s, "shadow2On", shadow2_on ? 1.0f : 0.0f);
+    int sloc = GetShaderLocation(s, "shadowMap2");
+    rlEnableShader(s.id);
+    rlActiveTextureSlot(7);
+    rlEnableTexture(shadow2_tex);
+    int slot = 7;
+    rlSetUniform(sloc, &slot, SHADER_UNIFORM_INT, 1);
+    rlActiveTextureSlot(0);
+}
+
 static void bind_shadow(Shader s)
 {
     int loc = GetShaderLocation(s, "shadowVP");
@@ -940,6 +1106,7 @@ static void bind_shadow(Shader s)
     int slot = 5;
     rlSetUniform(sloc, &slot, SHADER_UNIFORM_INT, 1);
     rlActiveTextureSlot(0);
+    bind_shadow2(s);
 }
 
 // --- Scene ---------------------------------------------------------------------
@@ -1060,6 +1227,8 @@ void render_set_scene_uniforms(V3 sun, V3 cam_mod, V3 up_dir, float ground_albed
     set1(sh_lm, "groundAlbedo", ground_albedo);
     set3(sh_lm, "upDir", up_dir);
     bind_shadow(sh_lm);
+    set3(sh_decal, "sunDir", sun);
+    bind_shadow(sh_decal);
     render_set_lm_extras(0.0f, 1.0f, NULL, NULL, 0);
     set1(sh_fx, "exposure", exposure);
     set1(sh_fx, "gain", 1.0f);

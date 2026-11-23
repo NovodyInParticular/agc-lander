@@ -23,6 +23,7 @@
 #include "cockpit_int.h"
 #include "ascent.h"
 #include "crew.h"
+#include "eva.h"
 #include "dsky.h"
 #include "hints.h"
 #include "hud.h"
@@ -160,8 +161,24 @@ float cp_fan_level(void)
 // the player should operate next. Drawn last on its panel, over the artwork.
 
 static HintTarget hint_tgt;
+static Rectangle hint_key;   // the DSKY key to box: centre x, y and half sizes (mm)
 static struct { int on, dir; float x, y, r, lift; const char *text; } mark;
 static struct { int on; float x, y; const char *text; } hint_rec[NPANELS];
+
+// A bright box round the control to use next: tinted inside, a thick pulsing
+// frame, big enough to spot at a glance from the seat (and in the headset).
+static void hint_box(float cx, float cy, float hw, float hh, float lift)
+{
+    float p = 0.5f + 0.5f * sinf((float)GetTime() * 6.0f);
+    float m = 2.5f + 1.5f * p;
+    Rectangle r = { cx - hw - m, cy - hh - m, 2 * (hw + m), 2 * (hh + m) };
+    pc_lift(lift + 0.5f);
+    pc_rrect(r, 0.12f, (Color){ 70, 255, 150, (unsigned char)(35 + 35 * p) });
+    pc_glow((Color){ 90, 255, 160, 255 });
+    pc_rrect_lines(r, 0.12f, 2.6f, (Color){ 140, 255, 180, (unsigned char)(210 + 45 * p) });
+    pc_glow_off();
+    pc_lift(0);
+}
 
 static void hint_at(float x, float y, float r, float lift, int dir)
 {
@@ -174,19 +191,19 @@ static void draw_mark(void)
     mark.on = 0;
     float p = 0.5f + 0.5f * sinf((float)GetTime() * 6.0f);
     Color g = { 90, 255, 150, (unsigned char)(150 + 105 * p) };
-    float x = mark.x, y = mark.y, r = mark.r + 1.5f * p;
+    float x = mark.x, y = mark.y, r = mark.r + 4.0f;
+    hint_box(x, y, mark.r, mark.r, mark.lift);
     pc_lift(mark.lift + 0.4f);
     pc_glow((Color){ 60, 230, 120, 255 });
-    pc_ring((Vector2){ x, y }, r, 1.8f, g);
     if (mark.dir) {
         // Which way to move it: a chevron bobbing in that direction, left of the ring.
-        float d = (float)-mark.dir, ax = x - r - 5.5f, ay = y + d * (1.5f + 2.5f * p);
-        pc_tri((Vector2){ ax - 3.2f, ay - d * 2.5f }, (Vector2){ ax + 3.2f, ay - d * 2.5f }, (Vector2){ ax, ay + d * 3.0f }, g);
+        float d = (float)-mark.dir, ax = x - r - 8.0f, ay = y + d * (2.0f + 3.5f * p);
+        pc_tri((Vector2){ ax - 5.0f, ay - d * 4.0f }, (Vector2){ ax + 5.0f, ay - d * 4.0f }, (Vector2){ ax, ay + d * 4.5f }, g);
     }
     pc_glow_off();
     // The instruction: beside a switch (its own legends sit above and below
     // it), above a button; kept on the panel.
-    float sz = 8.0f, pw = cp_panels[cur_panel].w_mm;
+    float sz = 11.5f, pw = cp_panels[cur_panel].w_mm;
     Vector2 m = pc_measure(mark.text, sz, 0.2f);
     float tx, ty;
     if (mark.dir) {
@@ -248,9 +265,9 @@ static void pcx_poly_lines(Vector2 c, int sides, float r, float rot, Color col) 
 // Lettering is drawn larger than the real 3 mm engraving so it reads from the
 // seat in a headset; LEG scales nomenclature, the layout leaves room for it.
 #ifdef AGC_VR
-#define LEG 1.45f   // the headset's lenses need bigger type still
+#define LEG 1.62f   // the headset's lenses need bigger type still
 #else
-#define LEG 1.28f
+#define LEG 1.42f
 #endif
 
 static Color scale_col(Color c, float k)
@@ -275,7 +292,7 @@ static void txt(const char *s, float x, float y, float size, int align)
     float sz = size * LEG;
     Vector2 m = pc_measure(s, sz, sz * 0.05f);
     float px = align == 0 ? x : align == 1 ? x - m.x / 2 : x - m.x;
-    pc_glow(el_col(0.60f));
+    pc_glow(el_col(0.85f));
     pc_text(s, px, y - (sz - size) / 2, sz, sz * 0.05f, C_WHITE);
     pc_glow_off();
 }
@@ -289,7 +306,7 @@ static void group(float x, float y, float w, float h, const char *title)
     float t = 0.6f;
     float tw = title ? pc_measure(title, 3.4f * LEG, 0.2f).x + 4 : 0;
     float cx = x + w / 2;
-    pc_glow(el_col(0.35f));
+    pc_glow(el_col(0.45f));
     pc_rect(x, y, cx - tw / 2 - x, t, C_WHITE);
     pc_rect(cx + tw / 2, y, x + w - cx - tw / 2, t, C_WHITE);
     pc_rect(x, y + h - t, w, t, C_WHITE);
@@ -1002,7 +1019,8 @@ static void panel4(void)
         float kx = n.x + (k.x + k.width / 2) * n.width, ky = n.y + (k.y + k.height / 2) * n.width;
         add_part(LEV_KEY, kx, ky, down ? KEY_DOWN : KEY_UP, 0, k.width * n.width, k.height * n.width, 0, (Color){ 20, 20, 22, 255 });
         if (hint_tgt.kind == HT_DSKY_KEY && dsky_key_index(hint_tgt.arg) == i) {
-            // The DSKY rings the key itself; note where it is for the off-screen pointer.
+            // Boxed after the DSKY has drawn itself (below); note where it is for the off-screen pointer.
+            hint_key = (Rectangle){ kx, ky, k.width * n.width / 2, k.height * n.width / 2 };
             hint_rec[cur_panel].on = 1;
             hint_rec[cur_panel].x = kx;
             hint_rec[cur_panel].y = ky;
@@ -1012,6 +1030,8 @@ static void panel4(void)
     pc_push(n.x, n.y, n.width);
     dsky_draw_canvas(cp_numerics_level() * (ST(ID_DSKYLTG, 1) > 0 ? 1.0f : 0.45f));
     pc_pop();
+    if (hint_key.width > 0) hint_box(hint_key.x, hint_key.y, hint_key.width, hint_key.height, KEY_UP + 0.5f);
+    hint_key.width = 0;
     add_hot(HOT_DSKY, dsky_mm, "DSKY", 0);
     // Side switches: X-pointer scale, attitude monitor... and the PGNS lighting.
     toggle(48, 80, ID_DSKYLTG, "DSKY", "BRT", NULL, "DIM", 1, 0);
@@ -1454,6 +1474,8 @@ void cp_click(const Hot *h, float u, float v)
             lm_set_thc(0, +1);
             plusx_timer = 2.0f;
             crew_say("+X translation: 4 jets for ullage");
+        } else if (h->id == ID_ABSTAGE && lm.touchdown && !lm.abort_stage && !eva_all_inside()) {
+            crew_say("Not with a crewman outside: everyone in and the hatch shut first");
         } else if (h->id == ID_ABSTAGE) {
             int flying = !lm.touchdown;
             lm_abort_stage();

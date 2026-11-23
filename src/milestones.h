@@ -23,6 +23,8 @@ enum {
     // Scenarios from other flights (not on the canonical track):
     MS_BOULDERS,   // Luminary aimed onto West crater's boulder-strewn rim; 150 m, ~100 s of hover fuel
     MS_SITE2,      // retargeted 7 km downrange at PDI-15; high gate
+    // The canonical ascent (the LUNAR LIFT-OFF scenario's flight, automatic crew):
+    MS_INSERTION,  // P12 has shut the ascent engine down in orbit
     MS_COUNT
 };
 

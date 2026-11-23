@@ -340,6 +340,12 @@ static ViewCam make_camera(int mode, V3 lm_pos, M3 R, double t_wall)
     default: {
         double d = orbit_dist;
         V3 focus = focus_override ? focus_site : v3_add(lm_pos, v3_scale(up, 0.5));
+        if (getenv("AGC_FOCUS_DS") && lm.staged) {   // debugging: watch the descent stage left behind
+            V3 dp;
+            M3 dr;
+            ds_site_pose(&dp, &dr);
+            focus = dp;
+        }
         if (csm.valid && ascent_active() && ascent_phase() >= MP_PROX && !focus_override && !getenv("AGC_LMFOCUS")) {
             // Docking: frame Eagle and Columbia together.
             V3 cp = csm_site_pos();
@@ -372,6 +378,17 @@ static V3 earth_site_g;
 // viewpoint, the LM's sun shadow map, the dust simulation.
 static float world_dust;
 static V3 shadow_centre;
+static V3 crew_shadow_centre;   // site frame: the crew's shadow map, this frame
+
+// The descent stage as drawn: after a hard fall it is a crumpled wreck.
+static M3 ds_draw_rot(M3 dr)
+{
+    double sp = lm.ds_impact_t > 0 ? lm.ds_impact_speed : 0;
+    if (sp < 25) return dr;
+    double sq = fmax(0.42, 1.0 - (sp - 25) / 140.0), wide = 1.0 + (1.0 - sq) * 0.35;
+    M3 S = { { { sq, 0, 0 }, { 0, wide, 0 }, { 0, 0, wide } } };
+    return m3_mul(dr, S);
+}
 
 // Benchmarks: AGC_SKIP=terrain,sky,lm,shadow,rocks,cockpit leaves those stages
 // out, to see what each costs (the GPU can't time stages separately well).
@@ -398,13 +415,15 @@ static void world_prepare(const ViewCam *cam, int h, int camera)
         ds_site_pose(&dp, &dr);
         V3 centre = v3_len(v3_sub(lm_pos, dp)) < 14 ? dp : lm_pos;
         render_shadow_begin(v3_sub(centre, cam->pos), sun_site, 8.0f);
-        lmmodel_draw_stage_depth(0, dr, v3_sub(dp, centre));
+        lmmodel_draw_stage_depth(0, ds_draw_rot(dr), v3_sub(dp, centre));
         lmmodel_draw_stage_depth(1, R, v3_sub(lm_pos, centre));
         render_shadow_end();
         render_set_shadow_center(v3_sub(centre, cam->pos));
     } else {
         render_shadow_begin(v3_sub(lm_pos, cam->pos), sun_site, 8.0f);
-        lmmodel_draw_depth(R, v3(0, 0, 0));
+        const char *so = getenv("AGC_SHADOW_ONLY");   // debugging: one stage in the shadow map (asc / desc)
+        if (so) lmmodel_draw_stage_depth(so[0] == 'a', R, v3(0, 0, 0));
+        else lmmodel_draw_depth(R, v3(0, 0, 0));
         render_shadow_end();
     }
     shadow_centre = lm_pos;
@@ -413,6 +432,18 @@ static void world_prepare(const ViewCam *cam, int h, int camera)
         M3 dr;
         ds_site_pose(&dp, &dr);
         if (v3_len(v3_sub(lm_pos, dp)) < 14) shadow_centre = dp;
+    }
+    // The moonwalkers' (and the flag's) own shadows: a small sharp map that follows them.
+    {
+        float cr;
+        if (!skip("shadow") && eva_shadow_focus(&crew_shadow_centre, &cr)) {
+            double el = asin(fmax(0.05, v3_dot(sun_site, local_up_at(crew_shadow_centre))));
+            render_shadow2_begin(v3_sub(crew_shadow_centre, cam->pos), sun_site, cr, (float)fmin(40.0, 2.4 / tan(el) + 2.0));
+            eva_draw_depth(crew_shadow_centre);
+            render_shadow2_end();
+        } else {
+            render_shadow2_off();
+        }
     }
 
     // Dust kicked up by the descent engine.
@@ -449,6 +480,7 @@ static void world_draw(const ViewCam *cam, int w, int h, float film, int camera)
         return;
     }
     render_set_shadow_center(v3_sub(shadow_centre, cam->pos));   // the shadow map was made once; this view sees it from its own eye point
+    render_set_shadow2_center(v3_sub(crew_shadow_centre, cam->pos));
 
     render_set_film(film);
     render_begin_scene(cam, w, h);
@@ -477,7 +509,7 @@ static void world_draw(const ViewCam *cam, int w, int h, float film, int camera)
         V3 dp;
         M3 dr;
         ds_site_pose(&dp, &dr);
-        lmmodel_draw_stage(0, dr, v3_sub(dp, cam->pos));
+        lmmodel_draw_stage(0, ds_draw_rot(dr), v3_sub(dp, cam->pos));
     } else {
         lmmodel_draw(R, rel);
     }
@@ -514,6 +546,19 @@ static void world_draw(const ViewCam *cam, int w, int h, float film, int camera)
     fx.crash_speed = (float)lm.crash_speed;
     fx.crash_fire = lm.touchdown_fuel > 30 && lm.crash_speed > 5.0;
     lmmodel_draw_effects(R, rel, &fx);
+    if (lm.staged && lm.ds_impact_t > 0) {
+        // The descent stage's own crash after an abort in flight.
+        V3 dp;
+        M3 dr;
+        ds_site_pose(&dp, &dr);
+        double gx, gz;
+        terrain_site_to_plane(dp, &gx, &gz);
+        V3 gp = terrain_plane_to_site(gx, gz, terrain_ground_height(gx, gz));
+        lmmodel_draw_impact(v3_sub(gp, cam->pos), local_up_at(gp), (float)(lm.t - lm.ds_impact_t), (float)lm.ds_impact_speed,
+                            lm.ds_impact_fuel > 30);
+    } else {
+        lmmodel_draw_impact(v3(0, 0, 0), v3(0, 1, 0), -1, 0, 0);
+    }
     extras_draw_ufo(cam);
 
     render_scene_3d_end();
@@ -719,6 +764,8 @@ typedef struct {
     V3 cg, ds_fixed, ds_r, csm_r, csm_v;
     M3 ds_fixed_rot;
     Q4 ds_q, csm_q;
+    double ds_impact_t, ds_impact_speed;
+    EvaNet eva;            // both moonwalkers, the flag
 } StatePkt;
 
 static void pack_state(StatePkt *p, int bye)
@@ -755,6 +802,8 @@ static void pack_state(StatePkt *p, int bye)
     p->cg = lm.cg; p->ds_fixed = lm.ds_fixed; p->ds_r = lm.ds_r; p->ds_fixed_rot = lm.ds_fixed_rot; p->ds_q = lm.ds_q;
     p->csm_valid = csm.valid; p->csm_r = csm.r; p->csm_v = csm.v; p->csm_q = csm.q;
     p->asc_active = ascent_active(); p->asc_phase = ascent_phase();
+    p->ds_impact_t = lm.ds_impact_t; p->ds_impact_speed = lm.ds_impact_speed;
+    eva_net_pack(&p->eva);
 }
 
 static void apply_state(const StatePkt *p)
@@ -784,6 +833,8 @@ static void apply_state(const StatePkt *p)
     lm.cg = p->cg; lm.ds_fixed = p->ds_fixed; lm.ds_r = p->ds_r; lm.ds_fixed_rot = p->ds_fixed_rot; lm.ds_q = p->ds_q;
     csm.valid = p->csm_valid; csm.r = p->csm_r; csm.v = p->csm_v; csm.q = p->csm_q;
     ascent_mirror(p->asc_active, p->asc_phase);
+    lm.ds_impact_t = p->ds_impact_t; lm.ds_impact_speed = p->ds_impact_speed;
+    eva_net_apply(&p->eva);
 }
 
 // Landing results panel: how it went, with numbers.
@@ -1361,7 +1412,8 @@ int main(int argc, char **argv)
         if (wall - next_ev_wall > 0.5 || wall < next_ev_wall) {
             next_ev_wall = wall;
             int possible = gs == GS_FLY && !paused && coop_role != COOP_CLIENT && !opt.spectator && !opt.audit &&
-                           fade_kind == FADE_NONE && eva_phase() == EVA_INSIDE && !ascent_active() && !lm.touchdown;
+                           fade_kind == FADE_NONE && eva_all_inside() &&
+                           (ascent_active() ? ascent_phase() == MP_ASCENT : !lm.touchdown);
             next_ev = possible ? milestone_next_event(NULL, 0) : -1;
             if (next_ev >= 0) {
                 int secs = (int)(milestone_time(next_ev) - lm.t + 0.5);
@@ -1490,7 +1542,10 @@ int main(int argc, char **argv)
                 lm_set_engine_arm(arm);
                 crew_say(arm == ARM_ASC ? "ENG ARM: ASC (ascent engine)" : arm == ARM_DES ? "ENG ARM: DES (descent engine)" : "ENG ARM: OFF");
             }
-            if (IsKeyPressed(KEY_B) && !lm.abort_stage && eva_phase() == EVA_INSIDE) {
+            static int b_debug_done;   // AGC_ABORT_AT=SECONDS: ABORT STAGE once at that wall time (tests, screenshots)
+            int b_debug = !b_debug_done && getenv("AGC_ABORT_AT") && wall >= atof(getenv("AGC_ABORT_AT"));
+            if (b_debug) b_debug_done = 1;
+            if ((IsKeyPressed(KEY_B) || b_debug) && !lm.abort_stage && eva_all_inside()) {
                 int flying = !lm.touchdown;
                 lm_abort_stage();
                 if (flying && !lm.aps_on) lm_set_engine_arm(ARM_ASC);
@@ -1528,7 +1583,7 @@ int main(int argc, char **argv)
                     }
                 }
             }
-            if (lm.land_result != LAND_NONE && !lm.dps_on && eva_phase() == EVA_INSIDE && !ascent_active()) {
+            if (lm.land_result != LAND_NONE && !lm.dps_on && eva_all_inside() && !ascent_active()) {
                 if (IsKeyPressed(KEY_SPACE)) results_hidden = !results_hidden;
                 if (IsKeyPressed(KEY_L) && lm.land_result != LAND_CRASH && coop_role != COOP_CLIENT && fade_kind == FADE_NONE &&
                     lm.t - lm.touchdown_t > 3) {
@@ -1652,9 +1707,14 @@ int main(int argc, char **argv)
         }
 
         // ---------------- Simulation ----------------
-        crew.outside = eva_phase() != EVA_INSIDE;   // the automatic crew does not launch without the walker
+        eva_set_role(opt.spectator ? -1 : coop_role == COOP_CLIENT ? 1 : 0);
+        crew.outside = !eva_all_inside();   // the automatic crew does not launch with anyone outside
         coop_tick(GetTime());
-        if (coop_role == COOP_HOST) coop_host_poll();
+        if (coop_role == COOP_HOST) {
+            coop_host_poll();
+            const EvaNet *ev = coop_host_eva();
+            if (ev) eva_net_apply_joiner(ev);
+        }
         if (coop_role == COOP_CLIENT && gs == GS_FLY) {
             // LM Pilot: the host runs the AGC and the vehicle; mirror it.
             StatePkt p;
@@ -1675,6 +1735,11 @@ int main(int argc, char **argv)
                                      : *c == 'R' ? KEY_AGC_RSET : dig[(*c - '0') % 10]);
                     typed = 1;
                 }
+            }
+            {
+                EvaNet ev;
+                eva_net_pack_mine(&ev);
+                coop_client_set_eva(&ev);
             }
             coop_client_send();
             if (!coop_peer_connected()) {
@@ -1787,7 +1852,16 @@ int main(int argc, char **argv)
             }
         }
         // The moonwalk takes the view over: kneeling at the hatch in the cabin, then the astronaut's own eyes.
-        if (gs == GS_FLY && !paused && !opt.spectator) eva_update(dt, lm_site_pos(), lm_site_rot());
+        if (gs == GS_FLY && lm.staged && lm.ds_landed && lm.liftoff) {
+            // The ascent engine's blast off the descent stage's deck reaches the flag.
+            V3 dp;
+            M3 dr;
+            ds_site_pose(&dp, &dr);
+            eva_liftoff_blast(v3_add(dp, m3_apply(dr, v3(0.40, 0, 0))), lm.t - lm.liftoff_t);
+        } else {
+            eva_liftoff_blast(v3(0, 0, 0), -1);
+        }
+        if (gs == GS_FLY && !paused) eva_update(dt, lm_site_pos(), lm_site_rot());
         cockpit_set_egress(eva_hatch(), eva_at_hatch() ? eva_kneel() : 0);
         int vcam = eva_outside() ? CAM_EVA : eva_at_hatch() ? CAM_CDR : camera;
         if (gs != GS_MENU && vcam == CAM_CDR) cockpit_input(scene_w0, h);
@@ -1819,8 +1893,8 @@ int main(int argc, char **argv)
             SoundState ss = { 0 };
             ss.inside = vcam == CAM_CDR || vcam == CAM_DAC || vcam == CAM_EVA || vcam == CAM_DOCK;   // on the surface: the suit's own fan
             ss.running = gs == GS_FLY && !paused;
-            // The ascent engine sits right behind the cabin's back wall: loud for its size.
-            ss.thrust = (float)(lm.thrust_aps ? lm.thrust / 24000.0 : lm.thrust / 45000.0);
+            ss.thrust = (float)(lm.thrust_aps ? 0.0 : lm.thrust / 45000.0);
+            ss.aps = (float)(lm.thrust_aps ? lm.thrust / 15570.0 : 0.0);
             for (int j = 0; j < LM_NJETS; j++) {
                 ss.rcs += lm.jet_level[j];
                 if (lm.jet_level[j] > 0.3f && prev_jet[j] <= 0.3f) ss.rcs_hits++;
@@ -1831,6 +1905,11 @@ int main(int argc, char **argv)
             if (ss.running) {
                 if (lm.land_result == LAND_CRASH && prev_result != LAND_CRASH) sound_crash();
                 else if (lm.touchdown && !prev_touch) sound_touchdown((float)lm.touchdown_speed);
+            }
+            {   // Staging (ABORT STAGE, in flight or on the pad): the pyros part the two stages.
+                static int prev_staged = -1;
+                if (ss.running && prev_staged == 0 && lm.staged) sound_stage();
+                prev_staged = lm.staged;
             }
             prev_result = lm.land_result;
             prev_touch = lm.touchdown;
@@ -1860,6 +1939,24 @@ int main(int argc, char **argv)
                 laser_to = v3_add(o, v3_scale(d, dist > 0 ? dist : 1.2));
                 if (pressed && laser_hit) vr_haptic(1, 0.5f, 0.03f);
             }
+        }
+        {   // Hands: the hatch handle in the cabin; the flag and the ladder outside.
+            const VrInput *in = vr_input();
+            int grip[2] = { in->grip_ok[0] && in->lgrip > 0.6f, in->grip_ok[1] && in->rgrip > 0.6f };
+            V3 hs[2];
+            for (int k = 0; k < 2; k++) hs[k] = v3_add(cam.pos, vr_map(&cam, in->grip_pos[k]));
+            int ev = 0;
+            if (gs == GS_FLY && vcam == CAM_EVA) {
+                ev = eva_vr_hands(hs, grip);
+            } else if (gs == GS_FLY && vcam == CAM_CDR && !eva_at_hatch()) {
+                M3 Rt = m3_transpose(lm_site_rot());
+                V3 hb[2];
+                for (int k = 0; k < 2; k++) hb[k] = m3_apply(Rt, v3_sub(hs[k], lm_site_pos()));
+                ev = eva_vr_cabin_hands(hb, grip);
+            }
+            if (ev & (EVA_VR_TOOK_FLAG | EVA_VR_PLANTED)) vr_haptic(1, 0.6f, 0.08f);
+            if (ev & (EVA_VR_CLIMB | EVA_VR_HATCH)) { vr_haptic(0, 0.5f, 0.06f); vr_haptic(1, 0.5f, 0.06f); }
+            if (ev & EVA_VR_HATCH) { results_hidden = 1; camera = CAM_CDR; }
         }
         // Everything two-dimensional goes into the floating display.
         BeginTextureMode(ui_rt);
@@ -1961,7 +2058,7 @@ int main(int argc, char **argv)
                     "J  skip to the next event (when nothing needs doing)   F5  pause   Esc  menu   F10  2nd monitor   F11  fullscreen",
                     "F2  auto crew on/off  F3  16mm film  F4  DSKY  F6  HUD  H  plain-English hints  M  cabin sound",
                     "F7  engine arm (DES, or ASC after landing)  F8  PGNS mode AUTO/ATT HOLD  B  ABORT STAGE  Space  ENGINE STOP",
-                    "W/S A/D Q/E or stick/gamepad: hand controller   Up/Down, d-pad or hat: ROD switch (P66)",
+                    "W/S A/D Q/E or stick/gamepad: hand controller (W leans forward)   Up/Down, d-pad or hat: ROD switch (P66)",
                     "",
                     "The crew procedure: R51 V50N25 -> ENTER,  V50N18 -> PRO (maneuver) then ENTER,",
                     "arm the engine, V99N62 -> PRO at TIG-5 s, after radar lock key V57E,",

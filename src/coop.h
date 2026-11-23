@@ -17,12 +17,16 @@ void coop_tick(double now_seconds);       // call once per frame with the wall c
 // Client side: queue an action for the host (called from the lm/agc setters).
 void coop_forward(int type, int a, int b);
 void coop_client_set_rhc(double pitch, double yaw, double roll);
+struct EvaNet;
+// The LMP's moonwalker, sent with every packet.
+void coop_client_set_eva(const struct EvaNet *e);
 
 // Host side, per frame: apply the LMP's actions; the LMP's hand-controller deflection.
 void coop_host_poll(void);
 void coop_host_rhc(double *pitch, double *yaw, double *roll);
 int coop_peer_connected(void);             // heard from the other side recently
 unsigned coop_host_ack(void);              // last command applied (goes into the state)
+const struct EvaNet *coop_host_eva(void);   // the LMP's moonwalker, when a new one has arrived (else NULL)
 
 // State stream (opaque bytes; StatePkt lives in main.c).
 void coop_host_send_state(const void *state, int len);

@@ -15,6 +15,7 @@ typedef struct {
     int inside;        // camera is in the cabin
     int running;       // flying and not paused
     float thrust;      // descent engine, 0..1 of full thrust
+    float aps;         // ascent engine, 0..1 (on or off: it is not throttled)
     float rcs;         // summed RCS jet levels (0 = quiet)
     int rcs_hits;      // jets that started firing since the last update
     int alarm;         // master alarm lit
@@ -29,6 +30,8 @@ void sound_switch(void);              // panel switch, button, knob
 void sound_key(void);                 // DSKY key
 void sound_touchdown(float speed);    // footpads meet the surface, m/s
 void sound_crash(void);
+void sound_stage(void);               // ABORT STAGE / lift-off: explosive bolts, nuts and guillotines firing
+void sound_step(float speed);         // a boot landing on the surface (felt through the suit), m/s
 
 void sound_set_muted(int muted);
 int sound_muted(void);

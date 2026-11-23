@@ -87,7 +87,8 @@ void controls_poll(Controls *c)
 {
     memset(c, 0, sizeof *c);
     // Keyboard (always).
-    c->pitch = (IsKeyDown(KEY_W) ? 1 : 0) - (IsKeyDown(KEY_S) ? 1 : 0);
+    // W / stick forward leans the LM forward (-pitch), as in a flight sim and the real ACA.
+    c->pitch = (IsKeyDown(KEY_S) ? 1 : 0) - (IsKeyDown(KEY_W) ? 1 : 0);
     c->roll = (IsKeyDown(KEY_D) ? 1 : 0) - (IsKeyDown(KEY_A) ? 1 : 0);
     c->yaw = (IsKeyDown(KEY_Q) ? 1 : 0) - (IsKeyDown(KEY_E) ? 1 : 0);
     c->pitch *= 0.6; c->roll *= 0.6; c->yaw *= 0.6;   // keyboard = gentle fixed deflection
@@ -97,7 +98,7 @@ void controls_poll(Controls *c)
     // Gamepad.
     int g = find_pad();
     if (g >= 0) {
-        c->pitch -= dz(GetGamepadAxisMovement(g, GAMEPAD_AXIS_LEFT_Y));
+        c->pitch += dz(GetGamepadAxisMovement(g, GAMEPAD_AXIS_LEFT_Y));
         c->roll += dz(GetGamepadAxisMovement(g, GAMEPAD_AXIS_LEFT_X));
         // Triggers rest at -1 and go to +1.
         double lt = (GetGamepadAxisMovement(g, GAMEPAD_AXIS_LEFT_TRIGGER) + 1) * 0.5;
@@ -127,7 +128,7 @@ void controls_poll(Controls *c)
         const unsigned char *hat = glfwGetJoystickHats(j, &nh);
         if (na >= 2) {
             c->roll += dz(ax[0]);
-            c->pitch -= dz(ax[1]);
+            c->pitch += dz(ax[1]);
         }
         if (na >= 3) c->yaw -= dz(ax[2]) * 0.8;
         if (nh > 0) {

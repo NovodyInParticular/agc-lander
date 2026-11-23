@@ -171,8 +171,7 @@ Milestones, each with a headless test in src/selftest*.c:
    DONE in part 2026-11-16 (render_quality() tiers, see the Quest section below); the PC-high
    tier's extra detail and on-headset tuning are still open.
 4. DONE 2026-11-16: the Quest APK (org.agclander.quest) builds and runs on the Quest 3S.
-- Still missing in the moonwalk: an astronaut body/shadow, footprints, the second crewman,
-  rock collisions, VR hand interaction.
+- Moonwalk gaps closed 2026-11-16 evening (see "The gaps closed").
 
 ## Lift-off, ascent, rendezvous shortcut, docking (2026-11-16, branch quest-vr)
 Plan step 2 is done. Everything is flown by the real Luminary099 except the skipped rendezvous.
@@ -215,9 +214,8 @@ Plan step 2 is done. Everything is flown by the real Luminary099 except the skip
   starts lined up near Columbia, AGC_FAKE_RHC=p,y,r[,tx,ty,tz], AGC_DBGDOCK=1, AGC_DBGJETS=1,
   AGC_LMFOCUS=1 (chase camera on the LM only while docking). Lab: liftoff, liftoffkeep, stage,
   orbit, ascent:S, rndz, dock:M, dockpilot:S, thc:x,y,z.
-- Still open: plan step 3 (PC high / Quest quality tiers), step 4 (Quest APK); the descent
-  stage's own crash when it falls after an abort is not animated; the flag is not blown over at
-  lift-off; ascent sound is the DPS rumble scaled, not its own.
+- Still open: the PC-high tier's extra detail (plan step 3). The descent stage's crash, the flag
+  blown over at lift-off and the APS's own sound were done 2026-11-16 evening.
 
 ## Quest session (2026-11-16, branch quest-vr: c631488, 9bdd4a1)
 - render_quality() tiers (high PC / low headset; AGC_QUALITY and AGC_Q_* overrides) as shader
@@ -228,6 +226,55 @@ Plan step 2 is done. Everything is flown by the real Luminary099 except the skip
   /sdcard/Android/data/org.agclander.quest/files/agc-args.txt (always delete after a test run).
 - Unresolved reports: seams that look like gaps, missing textures (not reproduced on the PC or
   the stand-in; screenshots from the headset wanted).
+
+## The gaps closed (2026-11-16 evening, branch quest-vr)
+User asked: flip W on PC and headset, and fix every gap in the game itself.
+- W / stick forward now leans the LM forward (-pitch, as the real ACA and a flight sim): keyboard,
+  gamepad, flight stick and the headset's right stick (controls.c, controls_vr.c). Hints and README
+  follow. The 3D hand controller already tilted the right way (m3_ry is passive).
+- Moonwalk, two crewmen (eva.c): the Commander and the LM Pilot. Playing alone the LMP is
+  computer-run: out 9 s after the CDR is down (crawl, porch, ladder), keeps ~4 m ahead-right of the
+  CDR (never under the LM), walks round blocks (veers when stuck), salutes the flag once, and climbs
+  in FIRST when X is pressed at the ladder (the CDR waits, then follows; the hatch shuts behind the
+  last man). Co-op: the joiner walks the LMP (CmdPkt carries an EvaNet, StatePkt both walkers and
+  the flag; PROTO_VERSION 4). The LMP goes out only after the CDR. The spectator draws both.
+- Figure (astro.c + lmmodel.c AP_* parts, materials 11 gold visor / 12 beta cloth): torso with
+  chest unit and hoses, PLSS + OPS, helmet with visor, arms, legs by two-bone IK onto the drawn
+  ground, overshoes; red stripes on the CDR (an Apollo 13+ convention, kept to tell the two apart).
+  Poses: walk/lope gait, jump tuck, landing squat, ladder climb, porch crawl, flag planting,
+  salute. First person draws only boots, shins and gloves (no gloves on the headset).
+- Crew shadow map (render.c render_shadow2_*, CREW_SHADOW_GLSL in the terrain, LM and decal
+  shaders, texture unit 7): follows the crew, sized to take in both and the flag, depth stretched
+  for the ~10 m low-Sun shadows.
+- Footprints (footprints.c + decal shader): multiplicative decals, the sole hollow and tread bars
+  shaded against the Sun with self-shadowing; on landing of each hop (one boot) or jump (both);
+  up to 900, cleared on a new flight. terrain_ground_height() = the finest mesh's surface (1 m
+  grid, features < 1.5 m dropped, alternating diagonals): walkers, prints and the flag stand on it.
+- Boulders: blocks >= 0.12 m within 30 m are cached; taller than STEP_UP (0.35 m) above the soles
+  stop you at their edge + 0.32 m, lower ones are stepped onto (jumping onto a big one works).
+- Headset hands: right grip takes the flag, letting go plants it under the hand; a grip on the
+  ladder rail climbs in; in the cabin a grip on the hatch handle (by the knees) opens the hatch.
+- Lift-off blast: a flag within 16 m goes over away from the stage (Apollo 11's did); further
+  out it shakes. Descent-stage crash after an abort: impact speed recorded (lm.ds_impact_*; not in
+  the save states), it tips over the way it was going and digs in; > 25 m/s it is drawn crushed;
+  fireball if propellant is left, debris, a dust ring (lmmodel_draw_impact).
+- Sound: the APS has its own voice (rough mid-band roar, combustion buzz, feed-line hiss, ignition
+  cough), the staging pyros crack (on any ABORT STAGE), boot steps are felt through the suit.
+- J skips the ascent burn: MS_INSERTION save state (snapgen_insertion: the LUNAR LIFT-OFF flight,
+  auto crew, 2 s after the APS cutoff). Offered in P12 when lift-off was within 8 s of P12's TIG,
+  after the vertical rise, no alarm, no keys. The descent stage keeps its own spot after the jump.
+- Cockpit lettering: LEG 1.42 (PC) / 1.62 (headset), EL glow 0.85, glyphs drawn slightly bold.
+- Looks from LM interior reference photos (cabin): cabin_wall map rebaked as flat painted
+  sheets (0.45 x 0.30 m), screw rows along every seam, a raised frame and stringer with rivets (no
+  more pillowed padding), K_WALL the lavender blue-grey, perforated cream overhead (procedural in
+  the cabin shader). Exterior: lm_blanket rebaked shallow and crinkled (the low Sun had cut the old
+  11-18 mm pillows into black/white pyramids), mylar bumpK 2.4 -> 1.5, black paint (material 3) is
+  a satin charcoal with the panel map, a faint fill light on the LM (shadowed panels kept their
+  seams instead of going flat black: the user's "missing textures"), the ascent stage roof's aft
+  slope is shield panels. LM self-shadow bias is slope-scaled.
+- Debug switches: AGC_EVA_LOOK=yaw,pitch, AGC_EVA_WALK=SECONDS (walk at the nearest big block),
+  AGC_EVA_IN=SECONDS (press X), AGC_EVA_LOG=1 (phases), AGC_EVA_FLAG=east,south (plant near the LM),
+  AGC_FOCUS_DS=1 (chase camera on the descent stage), AGC_SHADOW_ONLY=asc|desc, AGC_ABORT_AT=SECONDS.
 
 ## No fast-forward, no time warp: save states (2026-11-16, branch quest-vr)
 Goal from the user: every scenario starts at once, the full mission feels shorter without

@@ -86,5 +86,13 @@ void render_shadow_end(void);
 // Same shadow map seen from another eye point: move its centre (camera-relative).
 void render_set_shadow_center(V3 center_cam_rel);
 Shader *render_depth_shader(void);
+// Footprint decals (footprints.c): multiplied over the terrain.
+Shader *render_decal_shader(void);
+// The crew's shadow map: centre camera-relative, radius across the Sun's view,
+// length: the longest shadow to take in. Off for frames with nobody outside.
+void render_shadow2_begin(V3 center_cam_rel, V3 sun, float radius, float length);
+void render_shadow2_end(void);
+void render_shadow2_off(void);
+void render_set_shadow2_center(V3 center_cam_rel);
 
 #endif

@@ -34,9 +34,9 @@ static int ready, muted;
 static float sr = 48000.0f;   // device sample rate, set when the device opens
 
 // Targets written by the game thread.
-static volatile float t_gain, t_thrust, t_rcs, t_alarm, t_fans = 1.0f;
-static volatile unsigned ev_switch, ev_key, ev_rcs, ev_thud, ev_crash;
-static volatile float ev_thud_gain = 1.0f;
+static volatile float t_gain, t_thrust, t_aps, t_rcs, t_alarm, t_fans = 1.0f;
+static volatile unsigned ev_switch, ev_key, ev_rcs, ev_thud, ev_crash, ev_stage, ev_step;
+static volatile float ev_thud_gain = 1.0f, ev_step_gain = 1.0f;
 
 // --- Audio-thread state ----------------------------------------------------------
 
@@ -80,11 +80,14 @@ static inline float hit_run(Hit *h)
 }
 
 #define NHIT 6
-static Hit rcs_hit[NHIT], click_hit[4], thud_hit[2], crash_hit[2];
-static int rcs_i, click_i;
-static unsigned seen_switch, seen_key, seen_rcs, seen_thud, seen_crash;
+static Hit rcs_hit[NHIT], click_hit[4], thud_hit[2], crash_hit[2], pyro_hit[4], ign_hit[2], step_hit[2];
+static int rcs_i, click_i, pyro_i, step_i;
+static unsigned seen_switch, seen_key, seen_rcs, seen_thud, seen_crash, seen_stage, seen_step;
+static int pyro_left, pyro_wait;   // staging: the remaining charges and samples to the next one
 
-static float gain, thrust, rcs, alarm, fans = 1.0f;
+static float gain, thrust, aps, rcs, alarm, fans = 1.0f;
+static float aps_bp1, aps_bp2, aps_hiss1, aps_hiss2, aps_flut, aps_ph, aps_jit, aps_was;
+static float k_aps_hi, k_aps_lo, k_hiss_hi, k_hiss_lo, k_flut, g_aps;
 static float eng_lp1, eng_lp2, eng_wob, eng_ph;
 static float fan_bp1[2], fan_bp2[2], hum_ph[3], rcs_lp, alarm_ph, alarm_gate_ph;
 static float k_eng1, k_eng2, k_wob, k_fan_lo, k_fan_hi, k_rcs;
@@ -139,6 +142,18 @@ static void audio_cb(ma_device *dev, void *buffer, const void *input, ma_uint32 
         hit_start(&crash_hit[0], 1.3f, 0.9f, 48, 25, 1400, 0.8f, 2.6f);
         hit_start(&crash_hit[1], 0.6f, 2.2f, 31, 4, 200, 1.0f, 1.2f);
     }
+    n = ev_stage;
+    if (n != seen_stage) {
+        seen_stage = n;
+        pyro_left = 4;     // four explosive nuts and the umbilical guillotine, a few ms apart
+        pyro_wait = 0;
+    }
+    n = ev_step;
+    if (n != seen_step) {
+        seen_step = n;
+        // A boot meeting the regolith, heard only through the suit: soft and low.
+        hit_start(&step_hit[step_i++ & 1], 0.16f * ev_step_gain, 0.07f, 75 + 10 * white(), 200, 500, 0.9f, 1.0f);
+    }
 
     for (unsigned i = 0; i < frames; i++) {
         // Glide to the targets (about 60 ms, the engine a little slower).
@@ -147,8 +162,18 @@ static void audio_cb(ma_device *dev, void *buffer, const void *input, ma_uint32 
         rcs = glide(rcs, t_rcs, g_rcs);
         alarm = glide(alarm, t_alarm, g_alarm);
         fans = glide(fans, t_fans, g_thrust * 0.3f);   // fans take a second or two to spin up or down
+        aps = glide(aps, t_aps, g_aps);
 
         float w0 = white(), w1 = white();
+
+        // Staging charges: sharp cracks a few milliseconds apart, each ringing the structure.
+        if (pyro_left > 0 && --pyro_wait <= 0) {
+            Hit *h = &pyro_hit[pyro_i++ & 3];
+            hit_start(h, 0.55f + 0.1f * white(), 0.030f, 1500 + 400 * white(), 9000, 6000, 0.5f, 2.2f);
+            if (pyro_left == 4) hit_start(&crash_hit[1], 0.45f, 0.45f, 140, 60, 600, 1.0f, 0.8f);   // the whole cabin rings once
+            pyro_left--;
+            pyro_wait = (int)(sr * (0.012f + 0.025f * (white() * 0.5f + 0.5f)));
+        }
 
         // Environmental control: two suit fans as broad bands of air noise, slightly
         // different left and right, over the 400 Hz inverter whine and its harmonics.
@@ -177,6 +202,30 @@ static void audio_cb(ma_device *dev, void *buffer, const void *input, ma_uint32 
         float ta = powf(thrust, 0.7f);
         float eng = (eng_lp1 * 5.5f + eng_lp2 * 1.3f + sinf(eng_ph) * 0.10f) * ta * (0.34f + eng_wob * 6.0f * 0.34f);
 
+        // Ascent engine: bolted to the structure right behind the cabin (its cover
+        // sits between the crew's feet). Harder and higher than the descent engine:
+        // a rough mid-band roar, a combustion buzz that never quite settles, and the
+        // hiss of propellant through the feed lines. A cough when it lights.
+        if (aps > 0.5f && aps_was <= 0.5f) {
+            hit_start(&ign_hit[0], 0.70f, 0.16f, 70, 120, 900, 0.8f, 1.8f);
+            hit_start(&ign_hit[1], 0.30f, 0.50f, 44, 10, 250, 1.0f, 0.9f);
+        }
+        aps_was = aps;
+        float apsv = 0;
+        if (aps > 1e-4f) {
+            aps_bp1 += (w1 - aps_bp1) * k_aps_hi;
+            aps_bp2 += (aps_bp1 - aps_bp2) * k_aps_lo;
+            aps_hiss1 += (w0 - aps_hiss1) * k_hiss_hi;
+            aps_hiss2 += (aps_hiss1 - aps_hiss2) * k_hiss_lo;
+            aps_flut += (white() - aps_flut) * k_flut;
+            aps_jit += (white() - aps_jit) * k_flut * 0.3f;
+            aps_ph += TAU * (88.0f + 40.0f * aps_jit) / sr;
+            if (aps_ph > TAU) aps_ph -= TAU;
+            float saw = aps_ph / TAU * 2.0f - 1.0f;   // ragged buzz: a band-limited saw would be politer than the real thing
+            float rough = 0.55f + aps_flut * 7.0f;
+            apsv = ((aps_bp1 - aps_bp2) * 2.6f + eng_lp1 * 2.4f + saw * 0.035f + (aps_hiss1 - aps_hiss2) * 0.12f) * rough * aps * 0.55f;
+        }
+
         // RCS: the knock of each jet lighting, then a faint hiss while jets stay on.
         rcs_lp += (w1 - rcs_lp) * k_rcs;
         float r = rcs_lp * 0.5f * fminf(rcs, 2.0f) * 0.22f;
@@ -195,9 +244,10 @@ static void audio_cb(ma_device *dev, void *buffer, const void *input, ma_uint32 
 
         float one = 0;
         for (int k = 0; k < 4; k++) one += hit_run(&click_hit[k]);
-        for (int k = 0; k < 2; k++) one += hit_run(&thud_hit[k]) + hit_run(&crash_hit[k]);
+        for (int k = 0; k < 2; k++) one += hit_run(&thud_hit[k]) + hit_run(&crash_hit[k]) + hit_run(&ign_hit[k]) + hit_run(&step_hit[k]);
+        for (int k = 0; k < 4; k++) one += hit_run(&pyro_hit[k]);
 
-        float mono = hum + eng + r + al + one;
+        float mono = hum + eng + apsv + r + al + one;
         for (int c = 0; c < 2; c++) {
             float v = (mono + fan[c]) * gain;
             v = tanhf(v * 1.4f) / 1.4f;   // soft limit: a crash must not clip
@@ -228,6 +278,12 @@ void sound_init(void)
     k_fan_hi = lp_coef(2200);
     k_fan_lo = lp_coef(500);
     k_rcs = lp_coef(1500);
+    k_aps_hi = lp_coef(700);
+    k_aps_lo = lp_coef(140);
+    k_hiss_hi = lp_coef(5000);
+    k_hiss_lo = lp_coef(1800);
+    k_flut = lp_coef(11);
+    g_aps = 1.0f - expf(-1.0f / (0.040f * sr));
     g_gain = 1.0f - expf(-1.0f / (0.057f * sr));
     g_thrust = 1.0f - expf(-1.0f / (0.150f * sr));
     g_rcs = 1.0f - expf(-1.0f / (0.011f * sr));
@@ -256,6 +312,7 @@ void sound_update(const SoundState *s, float dt)
     int on = s->inside && s->running && !muted;
     t_gain = on ? 1.0f : 0.0f;
     t_thrust = s->thrust < 0 ? 0 : s->thrust > 1 ? 1 : s->thrust;
+    t_aps = s->aps < 0 ? 0 : s->aps > 1 ? 1 : s->aps;
     t_rcs = s->rcs;
     t_fans = s->fans < 0 ? 0 : s->fans > 2 ? 2 : s->fans;
     if (on && s->rcs_hits > 0) ev_rcs += (unsigned)s->rcs_hits;
@@ -278,6 +335,14 @@ void sound_touchdown(float speed)
 }
 
 void sound_crash(void) { ev_crash++; }
+void sound_stage(void) { ev_stage++; }
+
+void sound_step(float speed)
+{
+    float g = 0.4f + speed;
+    ev_step_gain = g > 1.5f ? 1.5f : g;
+    ev_step++;
+}
 
 void sound_set_muted(int m) { muted = m; }
 int sound_muted(void) { return muted; }

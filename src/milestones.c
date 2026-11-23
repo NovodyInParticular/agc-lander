@@ -5,14 +5,15 @@
 
 #include "agc_host.h"
 #include "agc_mem.h"
+#include "ascent.h"
 #include "crew.h"
 #include "lm.h"
 #include "milestones.h"
 #include "snapshot.h"
 
 // data/snapshots.c (tools/embed_bin.py --multi, `make snapshots`).
-extern const unsigned char ms_tig30[], ms_radar[], ms_highgate[], ms_150m[], ms_boulders[], ms_site2[], ms_track[];
-extern const unsigned int ms_tig30_len, ms_radar_len, ms_highgate_len, ms_150m_len, ms_boulders_len, ms_site2_len, ms_track_len;
+extern const unsigned char ms_tig30[], ms_radar[], ms_highgate[], ms_150m[], ms_boulders[], ms_site2[], ms_insertion[], ms_track[];
+extern const unsigned int ms_tig30_len, ms_radar_len, ms_highgate_len, ms_150m_len, ms_boulders_len, ms_site2_len, ms_insertion_len, ms_track_len;
 
 static const struct {
     const char *name, *title;
@@ -29,6 +30,7 @@ static const struct {
     [MS_150M] = { "150 M", "500 ft", ms_150m, &ms_150m_len, "" },
     [MS_BOULDERS] = { "BOULDERS", "Low fuel over the boulders", ms_boulders, &ms_boulders_len, "" },
     [MS_SITE2] = { "SITE 2", "Site 2 high gate", ms_site2, &ms_site2_len, "" },
+    [MS_INSERTION] = { "INSERTION", "Orbit insertion", ms_insertion, &ms_insertion_len, "" },
 };
 
 const char *milestone_title(int ms) { return ms >= 0 && ms < MS_COUNT ? table[ms].title : ""; }
@@ -241,12 +243,53 @@ int milestone_advance(void)
     if (ms < 0) return -1;
     int ac = crew.auto_crew, al = crew.auto_land;
     double rr = agc_host_rr_dither();   // the scenario's radar fault stays
+    // After the ascent the descent stage stays where this flight left it.
+    V3 dsf = lm.ds_fixed;
+    M3 dsr = lm.ds_fixed_rot;
+    int dsl = lm.ds_landed;
+    double dit = lm.ds_impact_t, dis = lm.ds_impact_speed, dif = lm.ds_impact_fuel;
     char err[200];
     if (milestone_load(ms, err, sizeof err)) return -1;
     crew.auto_crew = ac;
     crew.auto_land = al;
     agc_host_set_rr_dither(rr);
+    if (ms == MS_INSERTION && dsl) {
+        lm.ds_fixed = dsf;
+        lm.ds_fixed_rot = dsr;
+        lm.ds_landed = 1;
+        lm.ds_impact_t = dit;
+        lm.ds_impact_speed = dis;
+        lm.ds_impact_fuel = dif;
+    }
     return ms;
+}
+
+// The ascent: P12 flies itself to orbit, so the gate is simpler than the
+// descent's track: lifted off at the computer's TIG (the save state's flight
+// did), P12 still in charge, nothing alarming, no keys going in.
+static int ascent_next_event(char *why, size_t whyn)
+{
+    double tm = milestone_time(MS_INSERTION);
+    if (tm <= 0) { snprintf(why, whyn, "this build has no ascent save state"); return -1; }
+    if (ascent_phase() != MP_ASCENT || !lm.liftoff || !lm.aps_on) { snprintf(why, whyn, "no events ahead"); return -1; }
+    size_t n;
+    const uint8_t *b = milestone_blob(MS_INSERTION, &n);
+    SnapInfo in;
+    double canon = 0;
+    if (!b || snapshot_peek(b, n, &in) || sscanf(in.label, "INSERTION L%lf", &canon) != 1) {
+        snprintf(why, whyn, "the ascent save state has no lift-off time");
+        return -1;
+    }
+    if (fabs(lm.liftoff_t - canon) > 8.0) { snprintf(why, whyn, "lift-off was %.0f s off the canonical one", lm.liftoff_t - canon); return -1; }
+    if (lm.t - lm.liftoff_t < 12.0) { snprintf(why, whyn, "the vertical rise first"); return -1; }
+    if (tm < lm.t + MIN_JUMP) { snprintf(why, whyn, "%s is only seconds away", milestone_title(MS_INSERTION)); return -1; }
+    TrackSample now;
+    track_sample_now(&now, 0);
+    if (now.prog != 12) { snprintf(why, whyn, "program P%02d, not P12", now.prog); return -1; }
+    const DskyState *d = agc_host_dsky();
+    if (d->prog_lamp || d->opr_err || d->restart) { snprintf(why, whyn, "an alarm lamp is lit"); return -1; }
+    if (crew_typing() || agc_host_keys_queued()) { snprintf(why, whyn, "keys still going in"); return -1; }
+    return MS_INSERTION;
 }
 
 int milestone_next_event(char *why, size_t whyn)
@@ -254,6 +297,7 @@ int milestone_next_event(char *why, size_t whyn)
     static const int targets[] = { MS_TIG30, MS_RADAR, MS_HIGHGATE };
     char dummy[8];
     if (!why) { why = dummy; whyn = sizeof dummy; }
+    if (ascent_active()) return ascent_next_event(why, whyn);
     int i = track_index(lm.t);
     if (i < 0) { snprintf(why, whyn, "no events ahead"); return -1; }
     for (size_t k = 0; k < sizeof targets / sizeof targets[0]; k++) {

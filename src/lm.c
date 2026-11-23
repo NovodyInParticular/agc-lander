@@ -382,6 +382,7 @@ void lm_abort_stage(void)
     if (lm.staged || lm.land_result == LAND_CRASH) return;
 
     // The descent stage keeps the model pose it has now.
+    lm.ds_impact_t = lm.ds_impact_speed = lm.ds_impact_fuel = 0;
     lm.ds_r = lm.r;
     lm.ds_v = lm.v;
     lm.ds_q = lm.q;
@@ -583,7 +584,20 @@ static void descent_stage_step(double dt)
     if (rr - surface_radius_at(lm.ds_r) < -PAD_X) {
         double t = lm.t + lm.tephem;
         V3 up = v3_norm(lm.ds_r);
-        lm.ds_r = v3_scale(up, surface_radius_at(lm.ds_r) - PAD_X);
+        // The impact: how hard, and the wreck it leaves. It goes over away from the
+        // way it was moving, the struts fold and it digs in; at the speed of a fall
+        // from orbit-making heights there is little left standing.
+        V3 vrel = v3_sub(lm.ds_v, v3_cross(moon_omega(t), lm.ds_r));
+        double sp = v3_len(vrel);
+        lm.ds_impact_t = lm.t;
+        lm.ds_impact_speed = sp;
+        lm.ds_impact_fuel = lm.m_dps;
+        V3 vh = v3_sub(vrel, v3_scale(up, v3_dot(vrel, up)));
+        V3 axis = v3_len(vh) > 0.3 ? v3_norm(v3_cross(up, vh)) : v3_norm(v3_cross(up, lm_body_to_inertial(v3(0, 0, 1))));
+        double tumble = fmin(1.1, 0.012 * sp + (sp > 3 ? 0.12 : 0));
+        if (v3_len(axis) > 0.5 && tumble > 0) lm.ds_q = q4_normalize(q4_mul(q4_axis_angle(axis, tumble), lm.ds_q));
+        double sink = fmin(1.9, sp > 3 ? 0.25 + 0.035 * sp : 0);
+        lm.ds_r = v3_scale(up, surface_radius_at(lm.ds_r) - PAD_X - sink);
         lm.ds_landed = 1;
         lm.ds_fixed = moon_inertial_to_fixed(lm.ds_r, t);
         lm.ds_fixed_rot = m3_mul(moon_matrix(t), q4_to_m3(lm.ds_q));

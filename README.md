@@ -42,6 +42,8 @@ gate) **J** skips to the next event: 30 s to ignition, landing radar data good, 
 offered only when nothing needs doing before then and your flight is still the one that save state
 continues: same orbit, attitude, switches and computer state (programs, flags), no alarm. Fly it
 differently, or leave something undone, and the time is yours to fly in full.
+The ascent has one too: once P12 has the ascent stage climbing (lift-off on time, nothing
+alarming), **J** jumps to orbit insertion; your descent stage stays where you left it.
 
 New to this? Start with **Final 500 ft** and leave **plain-English hints** on (the last menu
 entry, or **H** in flight). A box at the top of the screen tells you what to do next: which key to
@@ -123,7 +125,7 @@ backs off for another approach. A hard dock ends the mission.
 ### Flying
 | Key | Action |
 |---|---|
-| W / S | Pitch (rotational hand controller) |
+| W / S | Pitch: W leans the LM forward, S leans it back (rotational hand controller) |
 | A / D | Roll |
 | Q / E | Yaw |
 | Up / Down | ROD switch in P66: each click is −1 / +1 ft/s rate of descent |
@@ -145,7 +147,7 @@ Controllers are detected automatically and hot-plug. A message shows which one w
 | Control | Action |
 |---|---|
 | Stick left/right | Roll |
-| Stick forward/back | Pitch |
+| Stick forward/back | Pitch (forward leans the LM forward) |
 | Twist | Yaw |
 | Hat up / down | ROD switch (P66) |
 | Hat left / right | Translate left / right |
@@ -158,7 +160,7 @@ Controllers are detected automatically and hot-plug. A message shows which one w
 **Gamepad (PS5 DualSense, Xbox, ...)**
 | Control | Action |
 |---|---|
-| Left stick | Pitch / roll |
+| Left stick | Pitch / roll (forward leans the LM forward) |
 | L2 / R2 | Yaw left / right |
 | Right stick | Translate (TTCA) left/right, forward/back |
 | L1 / R1 | Translate down / up (R1 = +X ullage) |
@@ -215,6 +217,8 @@ Tab to **COCKPIT**. You stand at the Commander's station of the LM cabin.
 | End | Step back and look down at the lower panels (again: stand up) |
 | X | After landing, engine off: open the hatch and go outside; outside, at the foot of the ladder: climb back in |
 | W A S D, Shift, Space, F | On the surface: walk, lope, jump, plant the flag (right-drag or arrow keys to look) |
+| (moonwalk) | Playing alone, the LM Pilot follows you out, keeps you company and climbs in first; in co-op the joining player walks him. Boulders taller than a step block your way; you leave boot prints |
+| (headset, moonwalk) | Squeeze the right grip to take the flag, let go to plant it where your hand is; grab the ladder to climb in; in the cabin, grab the hatch handle by your knees to go out |
 | F9 | Swap to the LM Pilot's station |
 | Left click | Operate switches, knobs, buttons and the DSKY |
 

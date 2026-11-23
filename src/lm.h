@@ -87,6 +87,9 @@ typedef struct {
     M3 ds_fixed_rot;        // ... moon-fixed from its body axes
     V3 ds_r, ds_v;          // ... falling (abort in flight): inertial state
     Q4 ds_q;
+    // Where it came down after falling (for the crash effects; not part of the
+    // save states: set at the impact, cleared at staging): lm.t and m/s, 0 = none.
+    double ds_impact_t, ds_impact_speed, ds_impact_fuel;
     int liftoff;            // the ascent stage has left the descent stage
     double liftoff_t;
 

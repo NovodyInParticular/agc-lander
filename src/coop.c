@@ -7,6 +7,7 @@
 
 
 #include "agc_host.h"
+#include "eva.h"
 #include "lm.h"
 #include "net.h"
 
@@ -25,6 +26,8 @@ typedef struct {
     float rhc[3];
     int ncmd;
     Cmd cmd[MAXQ];
+    int has_eva;
+    EvaNet eva;            // the LMP's moonwalker (sent every frame; only the newest counts)
 } CmdPkt;
 
 static int sock = -1;
@@ -38,12 +41,16 @@ static Cmd queue[MAXQ];
 static int nq;
 static unsigned next_seq = 1, acked;
 static float my_rhc[3];
+static EvaNet my_eva;
+static int my_eva_set;
 
 // Host.
 static unsigned applied;
 static float peer_rhc[3];
+static EvaNet peer_eva;
+static int peer_eva_new;
 
-#define PROTO_VERSION 3   // 2: landing result + hints in StatePkt; 3: ascent and docking
+#define PROTO_VERSION 4   // 2: landing result + hints in StatePkt; 3: ascent and docking; 4: both moonwalkers
 
 int coop_start_host(void)
 {
@@ -100,6 +107,12 @@ void coop_client_set_rhc(double p, double y, double r)
     my_rhc[2] = (float)r;
 }
 
+void coop_client_set_eva(const EvaNet *e)
+{
+    my_eva = *e;
+    my_eva_set = 1;
+}
+
 void coop_client_ack(unsigned ack)
 {
     acked = ack;
@@ -119,6 +132,8 @@ void coop_client_send(void)
     memcpy(p.rhc, my_rhc, sizeof p.rhc);
     p.ncmd = nq;
     memcpy(p.cmd, queue, sizeof(Cmd) * nq);
+    p.has_eva = my_eva_set;
+    p.eva = my_eva;
     net_sendto(sock, &peer, &p, sizeof p);
 }
 
@@ -168,6 +183,7 @@ void coop_host_poll(void)
         }
         last_heard = GetTime();
         memcpy(peer_rhc, p.rhc, sizeof peer_rhc);
+        if (p.has_eva) { peer_eva = p.eva; peer_eva_new = 1; }
         if (p.ncmd < 0 || p.ncmd > MAXQ) continue;
         for (int i = 0; i < p.ncmd; i++)
             if (p.cmd[i].seq > applied) {
@@ -186,6 +202,13 @@ void coop_host_rhc(double *p, double *y, double *r)
 }
 
 unsigned coop_host_ack(void) { return applied; }
+
+const EvaNet *coop_host_eva(void)
+{
+    if (!peer_eva_new) return NULL;
+    peer_eva_new = 0;
+    return &peer_eva;
+}
 
 void coop_host_send_state(const void *state, int len)
 {

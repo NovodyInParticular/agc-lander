@@ -169,7 +169,7 @@ static void tube(V3 a, V3 b, double ra, double rb, int seg, Color col, int mat, 
 
 // --- Colours ---------------------------------------------------------------------------
 
-static const Color K_WALL = { 150, 158, 170, 255 };     // cabin structure: blue-grey
+static const Color K_WALL = { 104, 110, 136, 255 };     // cabin structure: the lavender blue-grey of LM-2's paint
 static const Color K_CEIL = { 214, 208, 182, 255 };     // overhead and upper bulkhead: cream
 static const Color K_YELLOW = { 222, 176, 28, 255 };    // handholds
 static const Color K_ORANGE = { 204, 122, 40, 255 };    // AOT guard, wire lacing
@@ -725,7 +725,7 @@ static void build_dynamic(void)
         V3 hinge = v3((HATCH_X0 + HATCH_X1) / 2, HATCH_HW, 0.985);
         V3 xh = v3(1, 0, 0), wd = v3(0, -cos(a), -sin(a)), in = v3_cross(xh, wd);
         V3 ctr = v3_add(hinge, v3_scale(wd, HATCH_HW));
-        Color door = { 150, 158, 170, 255 };
+        Color door = { 112, 118, 142, 255 };
         obox(ctr, xh, wd, in, (HATCH_X1 - HATCH_X0) / 2, HATCH_HW, 0.012, door, M_PAINT);
         for (int k = -1; k <= 1; k++)   // stiffening ribs on the inner face
             obox(v3_add(ctr, v3_add(v3_scale(wd, k * 0.24), v3_scale(in, 0.018))), xh, wd, in, 0.14, 0.012, 0.006, door, M_PAINT);
@@ -849,6 +849,14 @@ static const char *ck_fs =
     "    vec3 b; vec4 sm;\n"
     "    if (mat == 8) sm = triMap(wallMap, bodyPos / 0.90, N, b); else sm = triMap(cabinMap, bodyPos / (mat == 3 ? 0.35 : 0.60), N, b);\n"
     "    float k = (mat == 1 || mat == 3) ? 0.5 : 1.0;\n"
+    "    if (mat == 8 && vcol.r > vcol.b + 0.06) {\n"   // the cream overhead: perforated acoustic panels, every other one
+    "      vec3 an = abs(N); vec2 q = (an.x > an.y && an.x > an.z) ? bodyPos.yz : (an.y > an.z ? bodyPos.xz : bodyPos.xy);\n"
+    "      vec2 cell = floor(q / 0.16); float on = step(0.45, fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453));\n"
+    "      vec2 ip = fract(q / 0.16); float inside = step(0.07, ip.x) * step(ip.x, 0.93) * step(0.07, ip.y) * step(ip.y, 0.93);\n"
+    "      vec2 g = fract(q / 0.010) - 0.5; float hole = smoothstep(0.30, 0.20, length(g));\n"
+    "      float fade = 1.0 - smoothstep(0.35, 0.9, fwidth(q.x) / 0.010);\n"
+    "      alb *= 1.0 - (0.55 * hole * fade + 0.18 * (1.0 - fade)) * on * inside;\n"
+    "    }\n"
     "    alb *= mix(1.0, sm.a * 2.0, k); N = normalize(N + b * k); specK *= mix(1.0, clamp(1.0 - 3.0 * (sm.b - 0.5), 0.4, 2.2), k);\n"
     "  }\n"
     "  vec3 col = cabinLight(bodyPos, N, V, alb, specK, shin);\n"
@@ -889,7 +897,7 @@ static const char *pn_fs =
     "  } else if (kind == 3) {\n"   // glyph: distance field, one screen pixel of edge
     "    float sd = texture(texture0, uv).r;\n"
     "    float tpp = length(fwidth(uv)) * 0.7071 * fontTexels;\n"
-    "    cov = clamp((sd - 0.5) / clamp(fontSlope * tpp, 1e-4, 0.5) + 0.5 + 0.10 * clamp(tpp / 6.0 - 0.3, 0.0, 1.0), 0.0, 1.0);\n"
+    "    cov = clamp((sd - 0.455) / clamp(fontSlope * tpp, 1e-4, 0.5) + 0.5 + 0.10 * clamp(tpp / 6.0 - 0.3, 0.0, 1.0), 0.0, 1.0);\n"   // engraved type a little bold: it must read from the seat
     "  } else if (kind == 4) {\n"
     "    vec4 t = texture(texture1, uv); alb = t.rgb; cov = t.a; emis = t.rgb * glow.x;\n"
     "  }\n"
@@ -1378,11 +1386,23 @@ void cockpit_overlay(int w, int h)
 #endif
     if (hover) {
         const char *t = cp_tooltip(hover, hover_u, hover_v);
-        Vector2 m = MeasureTextEx(font_ui, t, 19 * s, 0.4f);
+#ifdef AGC_VR
+        // The headset can't resolve the panels' small engraving: whatever the
+        // laser points at is named here in large, sharp type, centred.
+        float fs = 40 * s;
+        Vector2 m = MeasureTextEx(font_bold, t, fs, 0.6f);
+        if (m.x > w - 60) { fs *= (w - 60) / m.x; m = MeasureTextEx(font_bold, t, fs, 0.6f); }
+        float x = (w - m.x) / 2, y = h * 0.60f;
+        DrawRectangleRounded((Rectangle){ x - 18, y - 10, m.x + 36, m.y + 20 }, 0.25f, 8, (Color){ 8, 12, 14, 235 });
+        DrawRectangleRoundedLinesEx((Rectangle){ x - 18, y - 10, m.x + 36, m.y + 20 }, 0.25f, 8, 2.5f, (Color){ 120, 200, 160, 220 });
+        DrawTextEx(font_bold, t, (Vector2){ x, y }, fs, 0.6f, (Color){ 245, 248, 250, 255 });
+#else
+        Vector2 m = MeasureTextEx(font_ui, t, 24 * s, 0.4f);
         float x = mouse_pos.x + 18, y = mouse_pos.y + 14;
         if (x + m.x + 16 > w) x = w - m.x - 16;
-        DrawRectangleRounded((Rectangle){ x - 8, y - 5, m.x + 16, m.y + 10 }, 0.3f, 6, (Color){ 10, 12, 14, 220 });
-        DrawTextEx(font_ui, t, (Vector2){ x, y }, 19 * s, 0.4f, (Color){ 235, 238, 240, 255 });
+        DrawRectangleRounded((Rectangle){ x - 8, y - 5, m.x + 16, m.y + 10 }, 0.3f, 6, (Color){ 10, 12, 14, 225 });
+        DrawTextEx(font_ui, t, (Vector2){ x, y }, 24 * s, 0.4f, (Color){ 235, 238, 240, 255 });
+#endif
     }
     // Hints: when the marked control is out of view, an arrow at the screen
     // edge says which way to look.

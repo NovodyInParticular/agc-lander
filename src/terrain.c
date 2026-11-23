@@ -683,3 +683,20 @@ void terrain_debug_chunk(double x0, double z0, double size)
     printf("chunk %.0f m: %d verts, %d tris, %d degenerate, grid tri area %.3g..%.3g, origin (%.1f %.1f %.1f)\n",
            size, n.nverts, n.nidx / 3, degenerate, amin, amax, n.origin.x, n.origin.y, n.origin.z);
 }
+
+// The finest drawn mesh's surface (1 m grid, features under 1.5 m left out,
+// alternating diagonals as in build_chunk): what the eye sees underfoot.
+double terrain_ground_height(double x, double z)
+{
+    double gx = floor(x), gz = floor(z), fx = x - gx, fz = z - gz;
+    const double mf = 1.5;
+    double ha = terrain_height(gx, gz, mf), hb = terrain_height(gx + 1, gz, mf);
+    double hc = terrain_height(gx, gz + 1, mf), hd = terrain_height(gx + 1, gz + 1, mf);
+    long ix = (long)gx, iz = (long)gz;
+    if ((ix ^ iz) & 1) {   // diagonal b-c
+        if (fx + fz <= 1) return ha + (hb - ha) * fx + (hc - ha) * fz;
+        return hd + (hc - hd) * (1 - fx) + (hb - hd) * (1 - fz);
+    }
+    if (fx >= fz) return ha + (hb - ha) * fx + (hd - hb) * fz;   // diagonal a-d
+    return ha + (hd - hc) * fx + (hc - ha) * fz;
+}

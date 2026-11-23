@@ -281,7 +281,7 @@ static void build_ascent_stage(void)
     const float pz[8] = { 1.05f, 1.05f, 0.62f, 0.05f, -0.75f, -1.15f, -1.32f, -1.32f };
     // Half-width at each profile point (narrower at the top front: the "face").
     const float hw[8] = { 1.12f, 1.12f, 1.00f, 1.00f, 1.00f, 1.05f, 1.12f, 1.12f };
-    const Mat face[8] = { MT_ANOD, MT_ANOD, MT_DARKGREY, MT_ANOD, MT_BLACK, MT_ANOD, MT_BLACK, MT_BLACK };
+    const Mat face[8] = { MT_ANOD, MT_ANOD, MT_DARKGREY, MT_ANOD, MT_ANOD, MT_ANOD, MT_BLACK, MT_BLACK };   // the roof is shield panels too
     for (int i = 0; i < 8; i++) {
         int j = (i + 1) % 8;
         if (i == 7) continue;   // bottom closed by the mid section
@@ -563,9 +563,137 @@ static void build_flag(void)
         }
 }
 
+
+// --- Astronaut (A7L suit, PLSS, lunar overshoes) ------------------------------------------
+// Separate rigid parts, each in its own axes with the joint at the origin and
+// the same convention as the LM: +X up, +Y right, +Z forward; limbs hang along
+// -X. astro.c poses them. Material 12 is the beta-cloth suit, 11 the gold visor.
+
+static const Mat MT_SUIT = { 178, 178, 172, 12 };
+static const Mat MT_SUITDK = { 150, 150, 146, 12 };
+static const Mat MT_VISOR = { 230, 170, 70, 11 };
+static const Mat MT_GLOVE = { 92, 104, 128, 12 };
+static const Mat MT_SOLE = { 40, 50, 74, 9 };
+static const Mat MT_STRIPE = { 150, 22, 24, 12 };
+static const Mat MT_HOSE_R = { 140, 30, 30, 9 }, MT_HOSE_B = { 30, 50, 130, 9 };
+
+// Elliptical tube along X through a list of rings (x, half-width y, half-depth z, z offset).
+static void ering(const float (*r)[4], int n, int seg, Mat m, int caps)
+{
+    for (int k = 0; k + 1 < n; k++)
+        for (int i = 0; i < seg; i++) {
+            float t0 = 2 * PI * i / seg, t1 = 2 * PI * (i + 1) / seg;
+#define EP(R, t) V((R)[0], (R)[1] * cosf(t), (R)[3] + (R)[2] * sinf(t))
+#define EN(R, t) Vector3Normalize(V(0, cosf(t) / (R)[1], sinf(t) / (R)[2]))
+            Vector3 a0 = EP(r[k], t0), a1 = EP(r[k], t1), b0 = EP(r[k + 1], t0), b1 = EP(r[k + 1], t1);
+            tri_n(a0, b1, a1, EN(r[k], t0), EN(r[k + 1], t1), EN(r[k], t1), m);
+            tri_n(a0, b0, b1, EN(r[k], t0), EN(r[k + 1], t0), EN(r[k + 1], t1), m);
+#undef EP
+#undef EN
+        }
+    if (!caps) return;
+    for (int e = 0; e < 2; e++) {
+        const float *R = r[e ? n - 1 : 0];
+        Vector3 c = V(R[0], 0, R[3]);
+        for (int i = 0; i < seg; i++) {
+            float t0 = 2 * PI * i / seg, t1 = 2 * PI * (i + 1) / seg;
+            Vector3 p0 = V(R[0], R[1] * cosf(t0), R[3] + R[2] * sinf(t0)), p1 = V(R[0], R[1] * cosf(t1), R[3] + R[2] * sinf(t1));
+            if (e) tri(c, p0, p1, m); else tri(c, p1, p0, m);
+        }
+    }
+}
+
+// Sphere; material by direction (the helmet's visor).
+static void ball(Vector3 c, float r, int seg, int rings, Mat m, int visor)
+{
+    for (int j = 0; j < rings; j++)
+        for (int i = 0; i < seg; i++) {
+            float a0 = PI * j / rings, a1 = PI * (j + 1) / rings, t0 = 2 * PI * i / seg, t1 = 2 * PI * (i + 1) / seg;
+#define SD(a, t) V(cosf(a), sinf(a) * cosf(t), sinf(a) * sinf(t))
+            Vector3 d00 = SD(a0, t0), d01 = SD(a0, t1), d10 = SD(a1, t0), d11 = SD(a1, t1);
+#undef SD
+            Mat mm = m;
+            if (visor) {
+                Vector3 dc = Vector3Normalize(Vector3Add(Vector3Add(d00, d11), Vector3Add(d01, d10)));
+                if (dc.z > 0.30f && dc.x > -0.42f && dc.x < 0.80f) mm = MT_VISOR;
+            }
+            Vector3 p00 = Vector3Add(c, Vector3Scale(d00, r)), p01 = Vector3Add(c, Vector3Scale(d01, r));
+            Vector3 p10 = Vector3Add(c, Vector3Scale(d10, r)), p11 = Vector3Add(c, Vector3Scale(d11, r));
+            tri_n(p00, p10, p11, d00, d10, d11, mm);
+            tri_n(p00, p11, p01, d00, d11, d01, mm);
+        }
+}
+
+static void build_astro_part(int part)
+{
+    switch (part) {
+    case AP_TORSO: {
+        static const float trunk[][4] = { { -0.10f, 0.15f, 0.12f, 0.00f }, { 0.02f, 0.18f, 0.14f, 0.00f }, { 0.20f, 0.19f, 0.145f, 0.01f },
+                                          { 0.38f, 0.22f, 0.155f, 0.01f }, { 0.50f, 0.22f, 0.145f, 0.00f }, { 0.57f, 0.15f, 0.12f, 0.00f },
+                                          { 0.60f, 0.115f, 0.105f, 0.01f } };
+        ering(trunk, 7, 18, MT_SUIT, 1);
+        tube(V(0.59f, 0, 0.01f), V(0.66f, 0, 0.02f), 0.118f, 0.118f, 18, MT_GREY, 0);       // neck ring
+        box(V(0.33f, -0.09f, 0.13f), V(0.45f, 0.09f, 0.22f), MT_SUITDK);                      // remote control unit on the chest
+        for (int k = 0; k < 3; k++) box(V(0.41f, -0.06f + 0.06f * k, 0.215f), V(0.435f, -0.045f + 0.06f * k, 0.235f), MT_BLACK);
+        tube(V(0.20f, -0.07f, 0.13f), V(0.20f, -0.07f, 0.19f), 0.025f, 0.025f, 8, MT_HOSE_R, 1);   // oxygen connectors
+        tube(V(0.20f, 0.07f, 0.13f), V(0.20f, 0.07f, 0.19f), 0.025f, 0.025f, 8, MT_HOSE_B, 1);
+        tube(V(0.20f, -0.07f, 0.19f), V(0.42f, -0.20f, -0.14f), 0.018f, 0.018f, 6, MT_SUITDK, 0);    // PLSS hoses
+        tube(V(0.20f, 0.07f, 0.19f), V(0.42f, 0.20f, -0.14f), 0.018f, 0.018f, 6, MT_SUITDK, 0);
+        static const float belt[][4] = { { -0.02f, 0.185f, 0.142f, 0.0f }, { 0.03f, 0.186f, 0.143f, 0.0f } };
+        ering(belt, 2, 18, MT_SUITDK, 0);
+        break;
+    }
+    case AP_PLSS:
+        box(V(0.18f, -0.23f, -0.44f), V(0.70f, 0.23f, -0.15f), MT_SUIT);                      // life-support pack
+        box(V(0.70f, -0.21f, -0.42f), V(0.86f, 0.21f, -0.17f), MT_SUITDK);                    // oxygen purge system on top
+        tube(V(0.86f, 0.14f, -0.30f), V(1.12f, 0.14f, -0.30f), 0.006f, 0.004f, 5, MT_GREY, 1);   // antenna
+        box(V(0.40f, -0.24f, -0.30f), V(0.48f, 0.24f, -0.15f), MT_SUITDK);                    // strap
+        break;
+    case AP_HELMET:
+        ball(V(0, 0, 0), 0.178f, 22, 14, MT_SUIT, 1);
+        tube(V(-0.12f, 0, 0.0f), V(-0.07f, 0, 0.0f), 0.13f, 0.15f, 18, MT_SUITDK, 0);          // shell's lower edge
+        break;
+    case AP_UARM:
+        ball(V(0, 0, 0), 0.085f, 12, 8, MT_SUIT, 0);
+        tube(V(0, 0, 0), V(-0.30f, 0, 0), 0.075f, 0.064f, 16, MT_SUIT, 0);
+        break;
+    case AP_FARM:
+        ball(V(0, 0, 0), 0.066f, 12, 8, MT_SUIT, 0);
+        tube(V(0, 0, 0), V(-0.22f, 0, 0), 0.062f, 0.056f, 16, MT_SUIT, 0);
+        tube(V(-0.22f, 0, 0), V(-0.28f, 0, 0), 0.066f, 0.060f, 12, MT_GLOVE, 1);              // gauntlet
+        box(V(-0.40f, -0.024f, -0.050f), V(-0.28f, 0.024f, 0.050f), MT_GLOVE);                // hand
+        box(V(-0.33f, -0.040f, 0.020f), V(-0.27f, 0.000f, 0.055f), MT_GLOVE);                 // thumb
+        break;
+    case AP_THIGH:
+        tube(V(0.06f, 0, 0), V(-0.41f, 0, 0), 0.105f, 0.086f, 16, MT_SUIT, 1);
+        break;
+    case AP_SHIN:
+        ball(V(0, 0, 0), 0.088f, 12, 8, MT_SUIT, 0);
+        tube(V(0, 0, 0), V(-0.40f, 0, 0), 0.084f, 0.076f, 16, MT_SUIT, 1);
+        break;
+    case AP_BOOT:
+        box(V(-0.08f, -0.068f, -0.10f), V(0.08f, 0.068f, 0.22f), MT_SUIT);                    // overshoe
+        box(V(-0.10f, -0.074f, -0.11f), V(-0.07f, 0.074f, 0.24f), MT_SOLE);                   // ribbed silicone sole
+        box(V(0.00f, -0.05f, 0.20f), V(0.06f, 0.05f, 0.226f), MT_HOSE_B);                     // toe cap tab
+        break;
+    case AP_TORSO_LOW: {
+        static const float trunk[][4] = { { -0.10f, 0.15f, 0.12f, 0.00f }, { 0.02f, 0.18f, 0.14f, 0.00f }, { 0.20f, 0.19f, 0.145f, 0.01f },
+                                          { 0.30f, 0.20f, 0.15f, 0.01f } };
+        ering(trunk, 4, 18, MT_SUIT, 1);
+        static const float belt[][4] = { { -0.02f, 0.185f, 0.142f, 0.0f }, { 0.03f, 0.186f, 0.143f, 0.0f } };
+        ering(belt, 2, 18, MT_SUITDK, 0);
+        tube(V(0.20f, -0.07f, 0.13f), V(0.20f, -0.07f, 0.19f), 0.025f, 0.025f, 8, MT_HOSE_R, 1);
+        tube(V(0.20f, 0.07f, 0.13f), V(0.20f, 0.07f, 0.19f), 0.025f, 0.025f, 8, MT_HOSE_B, 1);
+        break;
+    }
+    case AP_BAND_ARM: tube(V(-0.10f, 0, 0), V(-0.16f, 0, 0), 0.0755f, 0.0735f, 12, MT_STRIPE, 0); break;
+    case AP_BAND_LEG: tube(V(-0.10f, 0, 0), V(-0.17f, 0, 0), 0.1035f, 0.1005f, 12, MT_STRIPE, 0); break;
+    }
+}
+
 // --- Public ---------------------------------------------------------------------
 
-static Mesh lm_mesh, desc_mesh, asc_mesh, flag_mesh;
+static Mesh lm_mesh, desc_mesh, asc_mesh, flag_mesh, astro_mesh[AP_COUNT];
 static Material lm_mat, depth_mat, fx_mat;
 
 static Mesh upload(const Builder *b)
@@ -605,6 +733,12 @@ void lmmodel_init(void)
     f.colors = B.c;
     UploadMesh(&f, false);
     flag_mesh = f;
+    for (int k = 0; k < AP_COUNT; k++) {
+        memset(&B, 0, sizeof B);
+        build_astro_part(k);
+        astro_mesh[k] = upload(&B);
+    }
+    memset(&B, 0, sizeof B);
     lm_mat = LoadMaterialDefault();
     render_lm_material(&lm_mat);
     depth_mat = LoadMaterialDefault();
@@ -647,6 +781,17 @@ void lmmodel_draw_stage_depth(int ascent, M3 site_from_body, V3 pos_cam_rel)
 void lmmodel_draw_flag(M3 site_from_flag, V3 base_cam_rel)
 {
     DrawMesh(flag_mesh, lm_mat, to_matrix(site_from_flag, base_cam_rel));
+}
+
+void lmmodel_draw_flag_depth(M3 site_from_flag, V3 base_cam_rel)
+{
+    DrawMesh(flag_mesh, depth_mat, to_matrix(site_from_flag, base_cam_rel));
+}
+
+void lmmodel_draw_part(int part, M3 site_from_part, V3 pos_cam_rel, int depth)
+{
+    if (part < 0 || part >= AP_COUNT) return;
+    DrawMesh(astro_mesh[part], depth ? depth_mat : lm_mat, to_matrix(site_from_part, pos_cam_rel));
 }
 
 void lmmodel_draw_depth(M3 site_from_body, V3 pos_cam_rel)
@@ -761,14 +906,14 @@ static void draw_dust(const LmFx *fx)
 // around the point under the LM; they fall at lunar g and rest on the ground.
 #define NDEBRIS 260
 typedef struct { float x, y, z, vx, vy, vz, size; unsigned char kind; } Debris;
-static Debris debris[NDEBRIS];
-static float debris_seed_age = -1;
+typedef struct { Debris d[NDEBRIS]; float seed_age; } DebrisSet;
+static DebrisSet lm_debris = { .seed_age = -1 }, ds_debris = { .seed_age = -1 };
 
-static void debris_spawn(float speed)
+static void debris_spawn(DebrisSet *set, float speed)
 {
     float k = fminf(2.2f, 0.5f + speed / 5.0f);
     for (int i = 0; i < NDEBRIS; i++) {
-        Debris *d = &debris[i];
+        Debris *d = &set->d[i];
         float th = frand() * 2 * PI, el = 0.15f + frand() * 1.2f;
         float v = (2.0f + frand() * frand() * 14.0f) * k;
         d->x = (frand() - 0.5f) * 3.0f;
@@ -782,13 +927,12 @@ static void debris_spawn(float speed)
     }
 }
 
-static void draw_crash(const LmFx *fx, Vector3 t1, Vector3 t2, Vector3 n, Vector3 c)
+static void draw_debris(DebrisSet *set, float age, float speed, Vector3 t1, Vector3 t2, Vector3 n, Vector3 c)
 {
-    float age = fx->crash_age;
-    if (debris_seed_age < 0 || age < debris_seed_age) debris_spawn(fx->crash_speed);
-    debris_seed_age = age;
+    if (set->seed_age < 0 || age < set->seed_age) debris_spawn(set, speed);
+    set->seed_age = age;
     for (int i = 0; i < NDEBRIS; i++) {
-        Debris *d = &debris[i];
+        Debris *d = &set->d[i];
         // Flight time until it lands: y + vy t - g/2 t^2 = 0.
         float g = 1.62f;
         float tl = (d->vy + sqrtf(d->vy * d->vy + 2 * g * d->y)) / g;
@@ -806,11 +950,10 @@ static void draw_crash(const LmFx *fx, Vector3 t1, Vector3 t2, Vector3 n, Vector
     }
 }
 
-static void draw_fireball(const LmFx *fx, Vector3 c, Vector3 n)
+static void draw_fireball(float age, float speed, int fire, Vector3 c, Vector3 n)
 {
-    float age = fx->crash_age;
-    if (!fx->crash_fire || age > 2.6f) return;
-    float k = fminf(1.0f, fx->crash_speed / 8.0f + 0.4f);
+    if (!fire || age > 2.6f) return;
+    float k = fminf(1.0f, speed / 8.0f + 0.4f);
     for (int i = 0; i < 14; i++) {
         float a = i * 2.39996f;
         float r = (1.2f + 6.5f * k) * sqrtf(age) * (0.3f + 0.7f * ((i * 37) % 11) / 10.0f);
@@ -971,7 +1114,7 @@ void lmmodel_draw_effects(M3 R, V3 T, const LmFx *fx)
         Vector3 t2 = Vector3CrossProduct(n, t1);
         set_kind(0);
         rlBegin(RL_QUADS);
-        draw_fireball(fx, c, n);
+        draw_fireball(fx->crash_age, fx->crash_speed, fx->crash_fire, c, n);
         rlEnd();
         rlDrawRenderBatchActive();
         EndBlendMode();
@@ -979,15 +1122,72 @@ void lmmodel_draw_effects(M3 R, V3 T, const LmFx *fx)
         rlEnableDepthMask();
         set_kind(4);
         rlBegin(RL_QUADS);
-        draw_crash(fx, t1, t2, n, c);
+        draw_debris(&lm_debris, fx->crash_age, fx->crash_speed, t1, t2, n, c);
         rlEnd();
         rlDrawRenderBatchActive();
     } else {
-        debris_seed_age = -1;
+        lm_debris.seed_age = -1;
     }
 
     rlEnableBackfaceCulling();
     rlEnableDepthMask();
+    EndBlendMode();
+    EndShaderMode();
+}
+
+// The descent stage coming down after an abort: a flash and fireball if its
+// propellant is still aboard, wreckage and torn foil thrown out ballistically,
+// and a ring of dust racing across the ground. c: the impact point (camera-
+// relative), n: local up. A fall from a few kilometres throws far more.
+void lmmodel_draw_impact(V3 c3, V3 n3, float age, float speed, int fire)
+{
+    if (age < 0) { ds_debris.seed_age = -1; return; }
+    if (age > 40) return;
+    Vector3 c = { (float)c3.x, (float)c3.y, (float)c3.z }, n = Vector3Normalize((Vector3){ (float)n3.x, (float)n3.y, (float)n3.z });
+    Vector3 t1 = Vector3Normalize(Vector3CrossProduct(n, fabsf(n.z) < 0.9f ? V(0, 0, 1) : V(1, 0, 0)));
+    Vector3 t2 = Vector3CrossProduct(n, t1);
+    float big = fminf(4.0f, 1.0f + speed / 40.0f);   // a high fall: everything larger
+    Shader s = *render_fx_shader();
+    rlDrawRenderBatchActive();
+    BeginShaderMode(s);
+    BeginBlendMode(BLEND_ADD_COLORS);
+    rlDisableDepthMask();
+    rlDisableBackfaceCulling();
+    set_kind(0);
+    rlBegin(RL_QUADS);
+    draw_fireball(age / sqrtf(big), speed, fire, Vector3Add(c, Vector3Scale(n, 1.0f * big)), n);
+    if (fire && age < 2.6f * sqrtf(big) && big > 1.2f)   // the bigger blast: a second, wider shell
+        draw_fireball(age / (1.6f * sqrtf(big)), speed, 1, Vector3Add(c, Vector3Scale(n, 3.0f * big)), n);
+    rlEnd();
+    rlDrawRenderBatchActive();
+    // Dust ring: kicked out at once, thinning as it spreads.
+    if (age < 9) {
+        set_kind(2);
+        rlBegin(RL_QUADS);
+        float rad = (6.0f + 22.0f * sqrtf(age)) * big;
+        unsigned char a = (unsigned char)(150 * expf(-age / 2.2f));
+        rlColor4ub(175, 168, 156, a);
+        Vector3 cc = Vector3Add(c, Vector3Scale(n, 0.6f));
+        Vector3 p0 = Vector3Add(cc, Vector3Add(Vector3Scale(t1, -rad), Vector3Scale(t2, -rad)));
+        Vector3 p1 = Vector3Add(cc, Vector3Add(Vector3Scale(t1, rad), Vector3Scale(t2, -rad)));
+        Vector3 p2 = Vector3Add(cc, Vector3Add(Vector3Scale(t1, rad), Vector3Scale(t2, rad)));
+        Vector3 p3 = Vector3Add(cc, Vector3Add(Vector3Scale(t1, -rad), Vector3Scale(t2, rad)));
+        rlTexCoord2f(0, 0); rlVertex3f(p0.x, p0.y, p0.z);
+        rlTexCoord2f(1, 0); rlVertex3f(p1.x, p1.y, p1.z);
+        rlTexCoord2f(1, 1); rlVertex3f(p2.x, p2.y, p2.z);
+        rlTexCoord2f(0, 1); rlVertex3f(p3.x, p3.y, p3.z);
+        rlEnd();
+        rlDrawRenderBatchActive();
+    }
+    EndBlendMode();
+    BeginBlendMode(BLEND_ALPHA);
+    rlEnableDepthMask();
+    set_kind(4);
+    rlBegin(RL_QUADS);
+    draw_debris(&ds_debris, age, speed * big, t1, t2, n, Vector3Add(c, Vector3Scale(n, 0.5f)));
+    rlEnd();
+    rlDrawRenderBatchActive();
+    rlEnableBackfaceCulling();
     EndBlendMode();
     EndShaderMode();
 }

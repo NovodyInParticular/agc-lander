@@ -29,7 +29,7 @@ static double dz(double v)
 void controls_poll(Controls *c)
 {
     memset(c, 0, sizeof *c);
-    c->pitch = (IsKeyDown(KEY_W) ? 1 : 0) - (IsKeyDown(KEY_S) ? 1 : 0);
+    c->pitch = (IsKeyDown(KEY_S) ? 1 : 0) - (IsKeyDown(KEY_W) ? 1 : 0);   // W / stick forward = lean forward
     c->roll = (IsKeyDown(KEY_D) ? 1 : 0) - (IsKeyDown(KEY_A) ? 1 : 0);
     c->yaw = (IsKeyDown(KEY_Q) ? 1 : 0) - (IsKeyDown(KEY_E) ? 1 : 0);
     c->pitch *= 0.6; c->roll *= 0.6; c->yaw *= 0.6;
@@ -38,7 +38,7 @@ void controls_poll(Controls *c)
 
     const VrInput *in = vr_input();
     if (controls_vr_docking) {
-        c->pitch += dz(in->ry);
+        c->pitch -= dz(in->ry);
         if (in->rgrip > 0.5f) c->yaw -= dz(in->rx);
         else c->roll += dz(in->rx);
         if (IsKeyDown(VKEY_PRO)) c->pro = 1;
@@ -50,7 +50,7 @@ void controls_poll(Controls *c)
         if (c->yaw < -1) c->yaw = -1;
         return;
     }
-    c->pitch += dz(in->ry);
+    c->pitch -= dz(in->ry);
     c->roll += dz(in->rx);
     // The left stick does two jobs, so each needs a clear push in its own direction.
     if (fabs(in->lx) > fabs(in->ly)) c->yaw -= dz(in->lx);
