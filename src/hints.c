@@ -677,7 +677,11 @@ void hints_draw(int w, int h, int dsky_w)
     DrawRectangleRounded((Rectangle){ x, y, bw, bh }, 0.12f, 8, bg);
     DrawRectangleRoundedLinesEx((Rectangle){ x, y, bw, bh }, 0.12f, 8, flash ? 3.0f : 1.5f, edge);
     hud_text(font_bold, "HINT", x + 14 * scale, y + 6 * scale, 15 * scale, edge);
-    hud_text(font_ui, "H hides", x + bw - 62 * scale, y + 6 * scale, 14 * scale, (Color){ 150, 160, 170, 200 });
+    {   // the headset has no keyboard: hints are switched off from the menu there
+        const char *off = VRT("H hides", "off in menu");
+        float ow = MeasureTextEx(font_ui, off, 14 * scale, 14 * scale * 0.02f).x;
+        hud_text(font_ui, off, x + bw - 14 * scale - ow, y + 6 * scale, 14 * scale, (Color){ 150, 160, 170, 200 });
+    }
     float ty = y + 26 * scale;
     if (hint.title[0]) { hud_text(font_bold, hint.title, x + 20 * scale, ty, size, (Color){ 140, 255, 185, 255 }); ty += lh; }
     for (int i = 0; i < hint.n; i++, ty += lh)
