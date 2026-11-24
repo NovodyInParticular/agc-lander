@@ -15,3 +15,7 @@ third_party/virtualagc/*
 !third_party/virtualagc/README.md
 # NASSP source data is only needed to regenerate data/a11_pdi_lgc.c (tools/extract_nassp.py).
 third_party/ref/
+
+# Python bytecode
+__pycache__/
+*.pyc
