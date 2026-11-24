@@ -307,7 +307,13 @@ static const char *globe_vs =
     "uniform mat4 mvp; uniform mat4 matModel; uniform float logFar;\n"
     "out vec3 fixedDir; out vec3 camRel; out float fragLogZ;\n"
     "void main(){ fixedDir = vertexPosition; camRel = (matModel * vec4(vertexPosition, 1.0)).xyz;\n"
-    "  gl_Position = mvp * vec4(vertexPosition, 1.0); fragLogZ = 1.0 + gl_Position.w; }\n";
+    "  gl_Position = mvp * vec4(vertexPosition, 1.0); fragLogZ = 1.0 + gl_Position.w;\n"
+    "#ifdef BACKDROP\n"
+    // Behind everything the world draws (depth ~0.998 and up, beyond any log depth
+    // of the terrain), and clipped half a metre in front of the eye.
+    "  gl_Position.z = 0.99995 * gl_Position.w - 0.5;\n"
+    "#endif\n"
+    "}\n";
 
 static const char *globe_fs =
     "in vec3 fixedDir; in vec3 camRel; in float fragLogZ;\n"
@@ -345,7 +351,9 @@ static const char *globe_fs =
     "}\n"
     "float angdist(vec3 a, float lat, float lon){ vec3 b = vec3(cos(lat)*cos(lon), cos(lat)*sin(lon), sin(lat)); return acos(clamp(dot(a,b), -1.0, 1.0)); }\n"
     "void main(){\n"
+    "#ifndef BACKDROP\n"
     "  gl_FragDepth = log2(fragLogZ) * logFar * 0.5;\n"
+    "#endif\n"
     "  vec3 n = normalize(fixedDir);\n"
     "  float dist = length(camRel);\n"
     "  vec3 V = normalize(-(mat3(fixedFromSite) * camRel));\n"
@@ -395,7 +403,11 @@ static const char *globe_fs =
     "}\n";
 
 static Shader globe_sh;
-static Material globe_mat, lm_mat;
+// The same globe as the backdrop beyond the terrain (globe_draw_backdrop): drawn
+// after the terrain into the pixels it left empty. It writes no depth, so the GPU
+// skips every pixel the terrain covers before running this costly shader.
+static Shader globe_bd_sh;
+static Material globe_mat, globe_bd_mat, lm_mat;
 static Mesh globe_mesh, base_mesh, saucer_mesh;
 
 static double g_lat, g_lon, g_alt = 400e3, g_heading = 0;
@@ -459,12 +471,28 @@ void extras_init(void)
     base_mesh = mb_upload();
     globe_mesh = make_sphere(G_NLON, G_NLAT);   // 16-bit indices: (256 * 129) vertices fit
     globe_sh = render_load_shader(globe_vs, globe_fs);
+    {
+        size_t nv = strlen(globe_vs) + 32, nf = strlen(globe_fs) + 32;
+        char *bv = malloc(nv), *bf = malloc(nf);
+        snprintf(bv, nv, "#define BACKDROP 1\n%s", globe_vs);
+        snprintf(bf, nf, "#define BACKDROP 1\n%s", globe_fs);
+        globe_bd_sh = render_load_shader(bv, bf);
+        free(bv);
+        free(bf);
+    }
     float lf = render_log_far();
     SetShaderValue(globe_sh, GetShaderLocation(globe_sh, "logFar"), &lf, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(globe_bd_sh, GetShaderLocation(globe_bd_sh, "logFar"), &lf, SHADER_UNIFORM_FLOAT);
     float one[3] = { 1, 1, 1 };
     SetShaderValue(globe_sh, GetShaderLocation(globe_sh, "tint"), one, SHADER_UNIFORM_VEC3);
+    // The backdrop matches the detailed terrain's regolith colour where the two meet, and has no base lamps.
+    float tint[3] = { 0.80f, 0.74f, 0.66f }, zero[12] = { 0 };
+    SetShaderValue(globe_bd_sh, GetShaderLocation(globe_bd_sh, "tint"), tint, SHADER_UNIFORM_VEC3);
+    SetShaderValueV(globe_bd_sh, GetShaderLocation(globe_bd_sh, "lampC"), zero, SHADER_UNIFORM_VEC3, 4);
     globe_mat = LoadMaterialDefault();
     globe_mat.shader = globe_sh;
+    globe_bd_mat = LoadMaterialDefault();
+    globe_bd_mat.shader = globe_bd_sh;
     lm_mat = LoadMaterialDefault();
     lm_mat.shader = *render_lm_shader();
     // Maria and basins: lat, lon (deg), angular radius (deg), albedo factor.
@@ -483,9 +511,12 @@ void extras_init(void)
         mv[4 * i + 2] = (float)(maria[i][2] * DEG);
         mv[4 * i + 3] = maria[i][3];
     }
-    SetShaderValueV(globe_sh, GetShaderLocation(globe_sh, "maria"), mv, SHADER_UNIFORM_VEC4, 24);
     int nm = 24;
-    SetShaderValue(globe_sh, GetShaderLocation(globe_sh, "nMaria"), &nm, SHADER_UNIFORM_INT);
+    for (int k = 0; k < 2; k++) {
+        Shader sh = k ? globe_bd_sh : globe_sh;
+        SetShaderValueV(sh, GetShaderLocation(sh, "maria"), mv, SHADER_UNIFORM_VEC4, 24);
+        SetShaderValue(sh, GetShaderLocation(sh, "nMaria"), &nm, SHADER_UNIFORM_INT);
+    }
     next_ufo = 360 + frand() * 840;   // first chance: 6..20 minutes of flying
 }
 
@@ -653,8 +684,9 @@ static V3 base_site(V3 *up_site)
     return terrain_fixed_to_site(v3_scale(f, globe_radius() * ff - 0.5));
 }
 
-static void globe_sphere(const ViewCam *cam, V3 sun_site, V3 earth_site, V3 brel, double R)
+static void globe_sphere(const ViewCam *cam, V3 sun_site, V3 earth_site, V3 brel, double R, int backdrop)
 {
+    Shader sh = backdrop ? globe_bd_sh : globe_sh;
     (void)brel;
     M3 S = terrain_site_from_fixed();
     M3 St = m3_transpose(S);
@@ -663,11 +695,11 @@ static void globe_sphere(const ViewCam *cam, V3 sun_site, V3 earth_site, V3 brel
     M3 rs = m3_mul(S, (M3){ { { R, 0, 0 }, { 0, R, 0 }, { 0, 0, R } } });
     Matrix ffs = { (float)St.m[0][0], (float)St.m[0][1], (float)St.m[0][2], 0, (float)St.m[1][0], (float)St.m[1][1],
                    (float)St.m[1][2], 0, (float)St.m[2][0], (float)St.m[2][1], (float)St.m[2][2], 0, 0, 0, 0, 1 };
-    SetShaderValueMatrix(globe_sh, GetShaderLocation(globe_sh, "fixedFromSite"), ffs);
+    SetShaderValueMatrix(sh, GetShaderLocation(sh, "fixedFromSite"), ffs);
     V3 sf = m3_apply(St, sun_site), ef = m3_apply(St, earth_site), bf = fixed_dir(BASE_LAT, BASE_LON);
     float v[3];
 #define SET3(name, vec) do { v[0] = (float)(vec).x; v[1] = (float)(vec).y; v[2] = (float)(vec).z; \
-        SetShaderValue(globe_sh, GetShaderLocation(globe_sh, name), v, SHADER_UNIFORM_VEC3); } while (0)
+        SetShaderValue(sh, GetShaderLocation(sh, name), v, SHADER_UNIFORM_VEC3); } while (0)
     SET3("sunF", sf);
     SET3("earthF", ef);
     SET3("baseF", bf);
@@ -678,9 +710,9 @@ static void globe_sphere(const ViewCam *cam, V3 sun_site, V3 earth_site, V3 brel
                v3_dot(v3_norm(cf), sf), m3_apply(St, cam->fwd).x, m3_apply(St, cam->fwd).y, m3_apply(St, cam->fwd).z);
     }
     float br = (float)(BASE_CRATER_R / R), ex = render_exposure();
-    SetShaderValue(globe_sh, GetShaderLocation(globe_sh, "baseR"), &br, SHADER_UNIFORM_FLOAT);
-    SetShaderValue(globe_sh, GetShaderLocation(globe_sh, "exposure"), &ex, SHADER_UNIFORM_FLOAT);
-    DrawMesh(globe_mesh, globe_mat, to_matrix(rs, v3_sub(centre, cam->pos)));
+    SetShaderValue(sh, GetShaderLocation(sh, "baseR"), &br, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(sh, GetShaderLocation(sh, "exposure"), &ex, SHADER_UNIFORM_FLOAT);
+    DrawMesh(globe_mesh, backdrop ? globe_bd_mat : globe_mat, to_matrix(rs, v3_sub(centre, cam->pos)));
 }
 
 
@@ -691,18 +723,11 @@ static void globe_sphere(const ViewCam *cam, V3 sun_site, V3 earth_site, V3 brel
 void globe_draw_backdrop(const ViewCam *cam, V3 sun_site, V3 earth_site)
 {
     V3 brel = v3_sub(base_site(NULL), cam->pos);
-    float zero[12] = { 0 };
-    SetShaderValueV(globe_sh, GetShaderLocation(globe_sh, "lampC"), zero, SHADER_UNIFORM_VEC3, 4);
-    // Match the detailed terrain's regolith colour where the two meet.
-    float tint[3] = { 0.80f, 0.74f, 0.66f };
-    SetShaderValue(globe_sh, GetShaderLocation(globe_sh, "tint"), tint, SHADER_UNIFORM_VEC3);
     rlDrawRenderBatchActive();
     rlDisableDepthMask();
-    globe_sphere(cam, sun_site, earth_site, brel, globe_radius() - 300.0);
+    globe_sphere(cam, sun_site, earth_site, brel, globe_radius() - 300.0, 1);
     rlDrawRenderBatchActive();
     rlEnableDepthMask();
-    float one[3] = { 1, 1, 1 };
-    SetShaderValue(globe_sh, GetShaderLocation(globe_sh, "tint"), one, SHADER_UNIFORM_VEC3);
 }
 
 void globe_draw(const ViewCam *cam, V3 sun_site, V3 earth_site)
@@ -727,7 +752,7 @@ void globe_draw(const ViewCam *cam, V3 sun_site, V3 earth_site)
 
     SetShaderValueV(globe_sh, GetShaderLocation(globe_sh, "lampP"), lpf, SHADER_UNIFORM_VEC3, 4);
     SetShaderValueV(globe_sh, GetShaderLocation(globe_sh, "lampC"), lcf, SHADER_UNIFORM_VEC3, 4);
-    globe_sphere(cam, sun_site, earth_site, brel, R);
+    globe_sphere(cam, sun_site, earth_site, brel, R, 0);
 
     // The base: only worth drawing as geometry when close; its lights show
     // from much further away - if the camera is above its horizon.

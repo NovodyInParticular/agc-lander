@@ -368,6 +368,31 @@ skipping time. Commits ca7e66f, 3268d90, 8769df0 and the scenarios commit after 
 - Seen, not acted on: from the CDR seat in P63 the window shows the surface far below as a
   soft grey blur (both at 105,000 ft and 27,000 ft).
 
+## Speed: the Moon backdrop was the cost (2026-11-23, branch quest-vr)
+World pass at 2560x1440 on the 2070 Super: HIGH GATE chase ~24 -> 7.6 ms, landed ~24 -> 9.3 ms,
+CDR seat 7.5 ms, mission start at 105,000 ft (backdrop on 24% of the frame) ~10 ms.
+- CAUSE: globe_draw_backdrop (the rest of the Moon beyond the terrain patch, radius R0-300 m)
+  was drawn FIRST with the globe's costly procedural shader, which also wrote gl_FragDepth, and
+  the terrain then painted over most of it. Every hidden backdrop pixel was fully shaded.
+- FIX (sky_extras.c, main.c): a second build of the globe shader (BACKDROP): depth set in the
+  vertex shader to 0.99995 w - 0.5 (behind any log depth the world writes, clipped like the
+  normal near plane) and no gl_FragDepth. Drawn AFTER the terrain with depth writes off, so the
+  GPU's early depth test drops every pixel the terrain covers. Terrain is opaque, so the
+  picture is unchanged: old vs new order pixel-identical in 5 scenes, and the audit.
+- Ruled out on the way: per-pixel log depth itself costs little once the backdrop is fixed.
+  Reversed-Z (float depth, glClipControl, GEQUAL) gained only ~10%: NVIDIA's coarse depth cull
+  can't separate distances that all crowd near 0. AGC_Q_VZ=1 only LOOKED 2x faster because
+  its vertex log depth made the clipper cut away most of the backdrop's huge triangles (from
+  high up it would cut holes in the visible Moon). Vertex depth for the terrain alone gained
+  ~1 ms but let mid-ground pebbles poke through a few mm of terrain: dropped.
+- Test switches: AGC_SHOT_SIZE=WxH renders --shot/--audit off screen at that size (with
+  AGC_PERF for timings at 1440p); AGC_TITLE=NAME sets the window title (a runtime Hyprland rule
+  on title "agcperftest" with workspace "11 silent" + no_initial_focus keeps test windows on the
+  TV without taking focus).
+- --audit is deterministic now: each view waits for the terrain threads to finish (5 quiet
+  frames) plus 0.8 s for chunks to grow in (was 10 frames: captures depended on frame rate and
+  CPU load). Two runs differ by <= 0.005%; the audit takes ~86 s.
+
 ## Next
 - GitHub: public repo + v0.1.0 release (2026-11-02). GPLv2 (Virtual AGC, NASSP data).
 

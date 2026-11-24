@@ -495,11 +495,13 @@ static void world_draw(const ViewCam *cam, int w, int h, float film, int camera)
     V3 cam_mod = v3(fmod(cam->pos.x, 4096.0), fmod(cam->pos.y, 4096.0), fmod(cam->pos.z, 4096.0));
     render_set_scene_uniforms(sun_site, cam_mod, local_up_at(cam->pos), 0.11f, ground, dust);
 
-    if (!skip("backdrop")) globe_draw_backdrop(cam, sun_site, earth_site);
-    render_set_scene_uniforms(sun_site, cam_mod, local_up_at(cam->pos), 0.11f, ground, dust);
     if (getenv("AGC_NODEPTH")) rlDisableDepthTest();
     if (!skip("terrain")) terrain_draw(cam->pos, render_terrain_shader());
     rlEnableDepthTest();
+    // The rest of the Moon beyond the terrain patch: after the terrain, into the
+    // pixels it left empty (its costly shader never runs under the terrain).
+    if (!skip("backdrop")) globe_draw_backdrop(cam, sun_site, earth_site);
+    render_set_scene_uniforms(sun_site, cam_mod, local_up_at(cam->pos), 0.11f, ground, dust);
     if (!skip("rocks")) rocks_draw(cam->pos);
     if (camera == CAM_CDR || camera == CAM_DOCK) render_set_lm_extras(COCKPIT_NEAR_CUT, 1.0f, NULL, NULL, 0);
     if (skip("lm")) {
@@ -1253,7 +1255,7 @@ int main(int argc, char **argv)
     InitWindow(0, 0, "AGC Lander");
 #else
     SetConfigFlags(FLAG_VSYNC_HINT);
-    InitWindow(1600, 844, "AGC Lander - headset stand-in");
+    InitWindow(1600, 844, getenv("AGC_TITLE") ? getenv("AGC_TITLE") : "AGC Lander - headset stand-in");
 #endif
     if (vr_init() != 0) {
         TraceLog(LOG_ERROR, "VR: the headset could not be started");
@@ -1266,7 +1268,8 @@ int main(int argc, char **argv)
     if (opt.camera == 0) opt.camera = CAM_CDR;   // in the headset you start at the Commander's station
 #else
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT | FLAG_MSAA_4X_HINT);
-    InitWindow(1600, 900, opt.spectator ? "AGC Lander - Outside View" : "AGC Lander - Apollo 11 / Luminary099");
+    // AGC_TITLE: another window title, so a test run can be given its own window rule.
+    InitWindow(1600, 900, getenv("AGC_TITLE") ? getenv("AGC_TITLE") : opt.spectator ? "AGC Lander - Outside View" : "AGC Lander - Apollo 11 / Luminary099");
 #endif
 #ifdef _WIN32
     GetModuleFileNameA(NULL, self_exe, sizeof self_exe);
@@ -1367,8 +1370,12 @@ int main(int argc, char **argv)
         outside_on = 1;
     }
 
+    // Screenshots render off screen at 1920x1080; AGC_SHOT_SIZE=WxH picks another
+    // size (performance measurements at a given resolution, with AGC_PERF).
+    int shot_w = 1920, shot_h = 1080;
+    if (getenv("AGC_SHOT_SIZE") && sscanf(getenv("AGC_SHOT_SIZE"), "%dx%d", &shot_w, &shot_h) != 2) shot_w = 1920, shot_h = 1080;
     RenderTexture2D shot_rt = { 0 };
-    if (capture) shot_rt = LoadRenderTexture(1920, 1080);
+    if (capture) shot_rt = LoadRenderTexture(shot_w, shot_h);
 #if defined(AGC_VR) && !defined(__ANDROID__)
     if (opt.shot) capture = 1;   // stand-in screenshots: stay silent
 #endif
@@ -1401,7 +1408,7 @@ int main(int argc, char **argv)
         if (dt > 0.1f) dt = 0.1f;
         wall += dt;
         int w = GetScreenWidth(), h = GetScreenHeight();
-        if (capture) { w = 1920; h = 1080; }
+        if (capture) { w = shot_w; h = shot_h; }
         render_set_output(w, h);
         render_set_output_fbo(capture ? shot_rt.id : 0);
 #endif
@@ -2172,7 +2179,7 @@ int main(int argc, char **argv)
 #else
         if (capture) {
             EndTextureMode();
-            DrawTexturePro(shot_rt.texture, (Rectangle){ 0, 0, 1920, -1080 },
+            DrawTexturePro(shot_rt.texture, (Rectangle){ 0, 0, (float)shot_w, (float)-shot_h },
                            (Rectangle){ 0, 0, (float)GetScreenWidth(), (float)GetScreenHeight() }, (Vector2){ 0, 0 }, 0, WHITE);
         }
         if (perf_on) {
@@ -2230,7 +2237,21 @@ int main(int argc, char **argv)
             if (outside_on) net_send(&p, sizeof p);
             if (coop_role == COOP_HOST && gs != GS_MENU) coop_host_send_state(&p, sizeof p);
         }
-        if (opt.audit && audit_i >= 0 && ++audit_frames >= (audit_i == 0 ? 120 : 10)) {
+        // Each view waits for its frames, for the terrain threads to finish every chunk
+        // it asked for (5 quiet frames in a row), and then 0.8 s more so the new chunks
+        // have grown in (FADE_TIME 0.6 s): the same picture however fast the frames or
+        // how busy the CPU. At most 10 s per view.
+        static double audit_view_t, audit_quiet_t;
+        static int audit_quiet;
+        if (opt.audit && audit_i >= 0) {
+            if (audit_frames == 0) audit_view_t = GetTime(), audit_quiet = 0, audit_quiet_t = 0;
+            int dn, ld, pd;
+            terrain_stats(&dn, &ld, &pd);
+            audit_quiet = pd ? 0 : audit_quiet + 1;
+            if (audit_quiet < 5) audit_quiet_t = GetTime();
+        }
+        if (opt.audit && audit_i >= 0 && ++audit_frames >= (audit_i == 0 ? 120 : 10) &&
+            ((audit_quiet >= 5 && GetTime() - audit_quiet_t >= 0.8) || GetTime() - audit_view_t >= 10.0)) {
             char path[1200];
             snprintf(path, sizeof path, "%s/%s.png", opt.audit, audit_views[audit_i].name);
             Image img = LoadImageFromTexture(shot_rt.texture);
