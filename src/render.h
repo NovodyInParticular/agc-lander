@@ -28,6 +28,7 @@ typedef struct {
     int shadow;            // shadow map size
     float star_grid, star_boost;
     float crater_px0, crater_px1;   // craters fade in between these sizes, pixels
+    int msaa;              // samples per pixel in the HDR scene target (0 = off; PC only)
 } RenderQuality;
 const RenderQuality *render_quality(void);
 

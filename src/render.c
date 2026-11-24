@@ -13,6 +13,12 @@
 #include "assets.h"
 #include "render.h"
 
+#ifndef AGC_GLES
+// Multisampled scene target (PC): raw GL calls through the loader raylib already set up.
+#include "external/glad.h"
+#define HAVE_MSAA 1
+#endif
+
 #define FAR_PLANE 2.0e8
 #define NEAR_PLANE 0.25
 
@@ -591,6 +597,24 @@ static const char *post_vs = GLSL_HEADER
     "in vec3 vertexPosition; in vec2 vertexTexCoord; out vec2 uv;\n"
     "void main(){ uv = vertexTexCoord; gl_Position = vec4(vertexPosition.xy, 0.0, 1.0); }\n";
 
+#ifdef HAVE_MSAA
+// Multisample resolve into the HDR target. Each sample is weighted by
+// 1 / (1 + brightness) so that, after tonemapping, an edge between a sunlit
+// part (HDR values well above 1) and black space comes out half-way instead
+// of nearly full bright: the edge stays smooth.
+static const char *resolve_fs = GLSL_HEADER
+    "uniform sampler2DMS msaaTex; uniform int samples;\n"
+    "out vec4 o;\n"
+    "void main(){\n"
+    "  ivec2 p = ivec2(gl_FragCoord.xy); vec3 s = vec3(0.0); float ws = 0.0, a = 0.0;\n"
+    "  for (int i = 0; i < samples; i++) {\n"
+    "    vec4 c = texelFetch(msaaTex, p, i); float w = 1.0 / (1.0 + max(c.r, max(c.g, c.b)));\n"
+    "    s += c.rgb * w; ws += w; a += c.a;\n"
+    "  }\n"
+    "  o = vec4(s / ws, a / float(samples));\n"
+    "}\n";
+#endif
+
 static const char *down_fs = GLSL_HEADER
     "in vec2 uv; uniform sampler2D src; uniform vec2 texel; uniform float threshold;\n"
     "out vec4 o;\n"
@@ -793,6 +817,7 @@ const RenderQuality *render_quality(void)
     // where the picture is coarser and never still).
     q.crater_px0 = low ? 3.0f : 1.5f;
     q.crater_px1 = low ? 7.0f : 4.0f;
+    q.msaa = low ? 0 : 4;
     q.oct0 = env_int("AGC_Q_OCT0", q.oct0);
     q.oct1 = env_int("AGC_Q_OCT1", q.oct1);
     q.soil = env_int("AGC_Q_SOIL", q.soil);
@@ -806,13 +831,16 @@ const RenderQuality *render_quality(void)
     q.star_boost = env_float("AGC_Q_STARBOOST", q.star_boost);
     q.crater_px0 = env_float("AGC_Q_CRATERPX0", q.crater_px0);
     q.crater_px1 = env_float("AGC_Q_CRATERPX1", q.crater_px1);
+    q.msaa = env_int("AGC_Q_MSAA", q.msaa);
     if (q.oct0 < 0) q.oct0 = 0;
     if (q.oct1 > 6) q.oct1 = 6;
     if (q.pcf != 9) q.pcf = 4;
+    if (q.msaa < 2) q.msaa = 0;
+    if (q.msaa > 8) q.msaa = 8;
     quality = q;
     quality_ready = 1;
-    TraceLog(LOG_INFO, "render: quality %s (craters %d-%d, soil %d, trimap %s, pcf %d, fbm %d, vertex depth %d, lod %.2f, shadow %d)",
-             low ? "low" : "high", q.oct0, q.oct1, q.soil, q.tri1 ? "1" : "3", q.pcf, q.fbm, q.vz, q.lod, q.shadow);
+    TraceLog(LOG_INFO, "render: quality %s (craters %d-%d, soil %d, trimap %s, pcf %d, fbm %d, vertex depth %d, lod %.2f, shadow %d, msaa %d)",
+             low ? "low" : "high", q.oct0, q.oct1, q.soil, q.tri1 ? "1" : "3", q.pcf, q.fbm, q.vz, q.lod, q.shadow, q.msaa);
     return &quality;
 }
 
@@ -913,6 +941,79 @@ static void free_target(Target *t)
     memset(t, 0, sizeof *t);
 }
 
+#ifdef HAVE_MSAA
+// The multisampled scene target (PC high tier): colour as a multisample texture
+// for the resolve shader, depth in the same format as the HDR target's.
+static unsigned int ms_fbo, ms_color, ms_depth;
+static int ms_n;   // samples in the current target; 0 = drawing straight into hdr
+static Shader sh_resolve;
+static void fullscreen(void);
+
+static void free_msaa(void)
+{
+    if (ms_fbo) glDeleteFramebuffers(1, &ms_fbo);
+    if (ms_color) glDeleteTextures(1, &ms_color);
+    if (ms_depth) glDeleteRenderbuffers(1, &ms_depth);
+    ms_fbo = ms_color = ms_depth = 0;
+    ms_n = 0;
+}
+
+static void make_msaa(int w, int h, int n)
+{
+    free_msaa();
+    if (n < 2 || !sh_resolve.id) return;
+    GLint maxs = 0;
+    glGetIntegerv(GL_MAX_SAMPLES, &maxs);
+    if (n > maxs) n = maxs;
+    if (n < 2) return;
+    GLint depth_fmt = GL_DEPTH_COMPONENT24;
+    glBindRenderbuffer(GL_RENDERBUFFER, hdr.depth);
+    glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_INTERNAL_FORMAT, &depth_fmt);
+    glGenFramebuffers(1, &ms_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, ms_fbo);
+    glGenTextures(1, &ms_color);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, ms_color);
+    glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, n, GL_RGBA16F, w, h, GL_TRUE);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D_MULTISAMPLE, ms_color, 0);
+    glGenRenderbuffers(1, &ms_depth);
+    glBindRenderbuffer(GL_RENDERBUFFER, ms_depth);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, n, (GLenum)depth_fmt, w, h);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, ms_depth);
+    int ok = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (!ok) {
+        TraceLog(LOG_WARNING, "render: %dx MSAA target %dx%d incomplete, drawing without it", n, w, h);
+        free_msaa();
+        return;
+    }
+    ms_n = n;
+}
+
+// End of the scene: average the samples into hdr.tex (hdr bound, blending off).
+static void resolve_msaa(void)
+{
+    rlEnableFramebuffer(hdr.fbo);
+    rlViewport(0, 0, hdr.w, hdr.h);
+    rlDisableColorBlend();
+    rlDisableDepthTest();
+    BeginShaderMode(sh_resolve);
+    int unit = 9;
+    SetShaderValue(sh_resolve, GetShaderLocation(sh_resolve, "msaaTex"), &unit, SHADER_UNIFORM_INT);
+    SetShaderValue(sh_resolve, GetShaderLocation(sh_resolve, "samples"), &ms_n, SHADER_UNIFORM_INT);
+    glActiveTexture(GL_TEXTURE0 + unit);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, ms_color);
+    glActiveTexture(GL_TEXTURE0);
+    fullscreen();
+    glActiveTexture(GL_TEXTURE0 + unit);
+    glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, 0);
+    glActiveTexture(GL_TEXTURE0);
+    EndShaderMode();
+    rlEnableColorBlend();
+}
+#endif
+
 static void ensure_targets(int w, int h)
 {
     if (w == cur_w && h == cur_h) return;
@@ -921,6 +1022,9 @@ static void ensure_targets(int w, int h)
     ldr = make_target(w, h, 0);
     for (int i = 0; i < NBLOOM; i++) free_target(&bloom[i]);
     hdr = make_target(w, h, 1);
+#ifdef HAVE_MSAA
+    make_msaa(w, h, render_quality()->msaa);
+#endif
     int bw = w / 2, bh = h / 2;
     for (int i = 0; i < NBLOOM; i++) {
         bloom[i] = make_target(bw > 1 ? bw : 1, bh > 1 ? bh : 1, 0);
@@ -947,6 +1051,9 @@ void render_init(void)
     sh_up = render_load_shader(post_vs, up_fs);
     sh_final = render_load_shader(post_vs, final_fs);
     sh_fxaa = render_load_shader(post_vs, fxaa_fs);
+#ifdef HAVE_MSAA
+    if (!direct_out && render_quality()->msaa) sh_resolve = render_load_shader(post_vs, resolve_fs);
+#endif
     sh_depth = render_load_shader(depth_vs, depth_fs);
     sh_decal = render_load_shader(decal_vs, decal_fs);
     sh_lm.locs[SHADER_LOC_MATRIX_NORMAL] = GetShaderLocation(sh_lm, "matNormal");
@@ -984,6 +1091,10 @@ void render_shutdown(void)
     free_target(&hdr);
     free_target(&ldr);
     for (int i = 0; i < NBLOOM; i++) free_target(&bloom[i]);
+#ifdef HAVE_MSAA
+    free_msaa();
+    if (sh_resolve.id) UnloadShader(sh_resolve);
+#endif
     UnloadShader(sh_fxaa);
     UnloadShader(sh_terrain); UnloadShader(sh_lm); UnloadShader(sh_fx); UnloadShader(sh_sky);
     UnloadShader(sh_down); UnloadShader(sh_up); UnloadShader(sh_final); UnloadShader(sh_depth); UnloadShader(sh_decal);
@@ -1171,7 +1282,11 @@ void render_begin_scene(const ViewCam *cam, int w, int h)
         rlViewport(direct_x, direct_y, w, h);
     } else {
         ensure_targets(w, h);
+#ifdef HAVE_MSAA
+        rlEnableFramebuffer(ms_n ? ms_fbo : hdr.fbo);
+#else
         rlEnableFramebuffer(hdr.fbo);
+#endif
         rlViewport(0, 0, w, h);
     }
     rlClearColor(0, 0, 0, 255);
@@ -1305,6 +1420,9 @@ void render_end_scene(void)
         rlDisableDepthTest();
         return;
     }
+#ifdef HAVE_MSAA
+    if (ms_n) resolve_msaa();
+#endif
     rlDisableFramebuffer();
 
     // Bloom: bright-pass downsample chain, then upsample-accumulate.

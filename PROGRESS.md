@@ -401,6 +401,14 @@ CDR seat 7.5 ms, mission start at 105,000 ft (backdrop on 24% of the frame) ~10 
   the overhead docking window (braking burn, high gate) the forward windows were washed out
   with a grey smudge layer and the Moon could not be seen. Now per pane (uniform glareW:
   forward pair, docking window), and the veil is strongest looking towards the Sun.
+- 4x MSAA on the PC high tier (render.c, RenderQuality.msaa, AGC_Q_MSAA=0|2|4|8): the scene is
+  drawn into a multisampled RGBA16F target (depth in the HDR target's own format) and resolved
+  into hdr.tex before bloom/tonemap/FXAA. The resolve weights each sample by 1/(1 + max rgb), so
+  sunlit edges against black space stay smooth after tonemapping (a plain box resolve leaves
+  them hard). Struts, probes, railings and the antenna are continuous now. Cost ~0.6 ms at 1440p.
+  Not on the Quest (AGC_GLES: no multisample textures in GLES 3.0) and not in direct-output
+  modes (vrsim). Fragment-shader depth means terrain/rock intersections keep one depth per
+  pixel; silhouettes are what improve. Audit: only edge pixels change (<= 0.24%).
 
 ## Next
 - GitHub: public repo + v0.1.0 release (2026-11-02). GPLv2 (Virtual AGC, NASSP data).
