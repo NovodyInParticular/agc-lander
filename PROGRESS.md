@@ -392,6 +392,15 @@ CDR seat 7.5 ms, mission start at 105,000 ft (backdrop on 24% of the frame) ~10 
 - --audit is deterministic now: each view waits for the terrain threads to finish (5 quiet
   frames) plus 0.8 s for chunks to grow in (was 10 frames: captures depended on frame rate and
   CPU load). Two runs differ by <= 0.005%; the audit takes ~86 s.
+- Globe shader (globe + backdrop, sky_extras.c): the 24 maria each ran a 5-octave edge noise
+  for every pixel (~960 hashes). Now skipped where it cannot matter: beyond 1.22 radii the shade
+  is off, inside 0.6396 radii (0.78 x 0.82) it is fully on. Same for the three ray systems.
+  Pixel-identical (max diff 1/255). Mission start chase 10.6 -> 4.9 ms, mission start cockpit
+  20.8 -> 6.7 ms, orbit globe 18.0 -> 5.0 ms.
+- Cockpit window glare (cockpit.c): one glare value for all glass, so when the Sun stood in
+  the overhead docking window (braking burn, high gate) the forward windows were washed out
+  with a grey smudge layer and the Moon could not be seen. Now per pane (uniform glareW:
+  forward pair, docking window), and the veil is strongest looking towards the Sun.
 
 ## Next
 - GitHub: public repo + v0.1.0 release (2026-11-02). GPLv2 (Virtual AGC, NASSP data).

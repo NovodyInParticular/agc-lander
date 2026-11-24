@@ -779,7 +779,7 @@ static void build_dynamic(void)
     "uniform mat4 shadowVP2; uniform vec3 shadowC2; uniform vec3 sunB; uniform float sunOn; uniform vec3 eyeB;\n" \
     "uniform vec3 winC[3]; uniform vec3 winN[3]; uniform float winA[3]; uniform vec3 winL[3];\n" \
     "uniform vec3 lampP[3]; uniform vec3 lampC[3];\n" \
-    "uniform float exposure; uniform float emitGain; uniform float glare;\n" \
+    "uniform float exposure; uniform float emitGain; uniform float glare; uniform vec2 glareW;\n" \
     "float sunShadow(vec3 p, vec3 n){\n" \
     "  vec4 sp = shadowVP2 * vec4(p - shadowC2 + n * 0.008, 1.0);\n" \
     "  vec3 c = sp.xyz / sp.w * 0.5 + 0.5;\n" \
@@ -861,9 +861,13 @@ static const char *ck_fs =
     "  }\n"
     "  vec3 col = cabinLight(bodyPos, N, V, alb, specK, shin);\n"
     "  if (mat == 7) {\n"
+    // Sunlight on a pane lights up the smudges on it: only on the panes the Sun
+    // shines on (forward pair or the docking window), strongest looking towards the Sun.
+    "    float gw = bodyPos.x > 3.3 ? glareW.y : glareW.x;\n"
     "    float smudge = vnoise(bodyPos.yz * 60.0) * 0.6 + vnoise(bodyPos.yz * 230.0) * 0.4;\n"
-    "    float a = 0.012 + glare * (0.03 + 0.18 * smudge);\n"
-    "    finalColor = sceneOut(vec3(0.9, 0.92, 0.95) * (0.02 + glare * 1.5) * exposure, a);\n"
+    "    float veil = gw * (0.15 + 0.85 * pow(max(dot(-V, sunB), 0.0), 16.0));\n"
+    "    float a = 0.012 + veil * (0.02 + 0.10 * smudge);\n"
+    "    finalColor = sceneOut(vec3(0.9, 0.92, 0.95) * (0.02 + veil * 1.5) * exposure, a);\n"
     "    return;\n"
     "  }\n"
     "  finalColor = sceneOut(col * exposure, 1.0);\n"
@@ -1272,8 +1276,9 @@ ViewCam cockpit_camera(V3 lm_pos, M3 R)
 // --- Draw --------------------------------------------------------------------------------------
 
 static void light_uniforms(Shader sh, const float *wc, const float *wn, const float *wa, const float *wl, const float *lp,
-                           const float *lc, float glare)
+                           const float *lc, float glare, const float *glare_w)
 {
+    SetShaderValue(sh, GetShaderLocation(sh, "glareW"), glare_w, SHADER_UNIFORM_VEC2);
     SetShaderValueV(sh, GetShaderLocation(sh, "winC"), wc, SHADER_UNIFORM_VEC3, 3);
     SetShaderValueV(sh, GetShaderLocation(sh, "winN"), wn, SHADER_UNIFORM_VEC3, 3);
     SetShaderValueV(sh, GetShaderLocation(sh, "winA"), wa, SHADER_UNIFORM_FLOAT, 3);
@@ -1330,7 +1335,7 @@ void cockpit_draw(M3 R, V3 lm_rel, int w, int h)
     wa[2] = (float)((DW_Y1 - DW_Y0) * (DW_Z1 - DW_Z0));
     double sun_up = fmax(0.0, v3_dot(m3_apply(R, sun_b), m3_apply(R, up_b)));
     double ground = 0.11 * 2.6 * fmin(1.0, sun_up * 3.0 + 0.15);
-    float glare = 0;
+    float glare = 0, glare_w[2] = { 0, 0 };   // all windows; forward pair, docking window
     for (int k = 0; k < 3; k++) {
         V3 out_b = v3_scale(wn[k], -1);
         double g = v3_dot(out_b, up_b);
@@ -1340,6 +1345,7 @@ void cockpit_draw(M3 R, V3 lm_rel, int w, int h)
         // Sun shining in through a window: glare on the glass.
         double sd = v3_dot(sun_b, out_b);
         if (sd > 0) glare = fmaxf(glare, (float)sd);
+        if (sd > 0) glare_w[k == 2] = fmaxf(glare_w[k == 2], (float)sd);
     }
     glare_amt = glare;
     float c9[9], n9[9], p9[9], lc[9];
@@ -1355,8 +1361,8 @@ void cockpit_draw(M3 R, V3 lm_rel, int w, int h)
         float g = k < 2 ? fl * 0.38f : fl * 0.10f;
         lc[3 * k] = g; lc[3 * k + 1] = g * 0.93f; lc[3 * k + 2] = g * 0.80f;
     }
-    light_uniforms(ck_sh, c9, n9, wa, wl, p9, lc, glare);
-    light_uniforms(pn_sh, c9, n9, wa, wl, p9, lc, glare);
+    light_uniforms(ck_sh, c9, n9, wa, wl, p9, lc, glare, glare_w);
+    light_uniforms(pn_sh, c9, n9, wa, wl, p9, lc, glare, glare_w);
 
     Matrix M = to_matrix(R, lm_rel);
     rlDisableBackfaceCulling();
