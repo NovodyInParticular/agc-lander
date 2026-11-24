@@ -290,7 +290,12 @@ run `make install`.
 
 ## Command-line options
 
-`--windowed`, `--monitor N`, `--dual`, `--host`, `--join ADDRESS`, `--demo`, `--start 0-3` (skip the menu), `--camera N`
+`--windowed`, `--monitor N`, `--dual`, `--host`, `--join ADDRESS`, `--demo`, `--start 0-7` (skip the menu and
+start that menu entry: 0 full mission … 4 lunar lift-off … 7 another site), `--camera N`
+
+**Graphics:** the PC runs the high tier (4x MSAA, 2048 shadow map, full terrain detail). On a slower
+computer, start it with the lighter tier the headset uses: `AGC_QUALITY=low agc-lander` on Linux, or
+`set AGC_QUALITY=low` then `agc-lander.exe` in a Windows command prompt.
 
 ## Building
 
